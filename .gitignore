@@ -1,0 +1,21 @@
+node_modules/
+
+# Auth state — contains cookies/tokens, never commit
+.periscope-probe-auth.json
+
+# Build output
+dist/
+
+# Env files
+.env
+.env.local
+enviroment_vras.txt
+
+# Probe captures
+docs/tmp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
