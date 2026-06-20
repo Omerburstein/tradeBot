@@ -78,7 +78,7 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
 const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow } =
   await import('./config.js');
 const { expectedWindowEnd, parseSlotEnd } = await import('./dates.js');
-const { insertSnapshots } = await import('./db.js');
+const { insertSnapshots, insertSpotPrice } = await import('./db.js');
 const { scrapeAllPanels, scrapeBackfill, scrapeBackfillRange } =
   await import('./scrape.js');
 const { loadWebhookConfig, postPlaybookWebhook } = await import('./webhook.js');
@@ -166,7 +166,8 @@ async function runTick(
   tickInFlight = true;
   const startedAt = Date.now();
   try {
-    const rows = await scrapeAllPanels();
+    const scrapeResult = await scrapeAllPanels();
+    const rows = scrapeResult.rows;
 
     if (rows.length === 0) {
       consecutiveEmptyScrapes += 1;
@@ -218,10 +219,24 @@ async function runTick(
     }
 
     const inserted = await insertSnapshots(rows);
+
+    // Persist spot price for the algorithm pipeline.
+    if (scrapeResult.spot !== null) {
+      try {
+        await insertSpotPrice(anchor.capturedAt, anchor.expiry, scrapeResult.spot);
+      } catch (err) {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'insertSpotPrice failed — non-blocking',
+        );
+      }
+    }
+
     logger.info(
       {
         rows: rows.length,
         inserted,
+        spot: scrapeResult.spot,
         ms: Date.now() - startedAt,
         slot: anchor.timeframe,
       },

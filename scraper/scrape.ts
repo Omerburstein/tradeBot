@@ -1,30 +1,31 @@
 /**
- * Phase 2a — Periscope Market Maker Exposures Table scraper.
+ * Phase 2a — Periscope Market Maker Exposures scraper (chart view).
  *
- * Loads the UW Periscope table view in headless Chromium, cycles through
- * the three Greeks (Gamma / Charm / Vanna) by clicking the Greek
- * dropdown, captures the rendered HTML after each switch, and parses
- * per-strike values via the pure parser.
+ * Loads the UW Periscope dashboard/4 (chart view) in headless Chromium,
+ * intercepts the `market_maker_exposures` JSON API response, and parses
+ * per-strike Greeks (Gamma, Charm, Vanna) directly from the API payload.
+ *
+ * Unlike the table-view approach (dashboard/6) which required cycling
+ * through Greek dropdowns and scraping HTML tables, the chart view fetches
+ * ALL Greeks in a single API call — making scraping faster, more reliable,
+ * and immune to HTML class-name changes.
  *
  * Auth: the runtime expects a Playwright `storageState` JSON at
- * UW_AUTH_STATE_PATH (created locally via `scripts/periscope-probe.mjs
- * --login`, then uploaded to Railway as a base64-encoded env var that
- * the `start` step decodes to disk — see README).
+ * UW_AUTH_STATE_PATH (created locally via `periscope-probe.mjs --login`,
+ * then uploaded to Railway as a base64-encoded env var).
  *
  * Page-state assumptions (the user pre-configures the saved view):
- *   - Expiry: today (set in UW UI before the storageState was saved)
+ *   - Dashboard 4 has a "SPX Market Maker Exposures" chart panel
+ *   - Expiry: set via the Expiry dropdown or SETUP_PAUSE_MS for manual config
  *   - Timeframe: defaults to "Latest" — UW resolves to the most recent
  *     10-min slice during RTH automatically.
- *   - Greek: cycled by this scraper, not pre-set.
- *
- * The page lives at /periscope/market-exposures-table; the URL has no
- * query params for state, so dropdown clicks are the only way to
- * switch Greeks. Same approach Periscope users would take by hand.
  *
  * Spec: docs/superpowers/specs/periscope-html-ingestion-2026-05-07.md
  *       (Phase 2 — scraper)
  */
 
+import { mkdir, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { type Browser, type Page } from 'playwright';
 import { chromium as chromiumExtra } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -41,8 +42,74 @@ import pino from 'pino';
 chromiumExtra.use(StealthPlugin());
 import { LOG_LEVEL, UW_AUTH_STATE_PATH, UW_PERISCOPE_URL } from './config.js';
 import { insertSnapshots } from './db.js';
-import { parseDateLabel, parsePage } from './parser.js';
+import { parseDateLabel } from './parser.js';
 import type { Panel, SnapshotRow } from './types.js';
+
+/** Result of a single slot capture: rows + metadata for the caller. */
+export interface ScrapeResult {
+  rows: SnapshotRow[];
+  /** SPX spot price at capture time (from the API index_values or page header). */
+  spot: number | null;
+}
+
+/**
+ * Shape of a single row in the UW `market_maker_exposures` API response.
+ * The `data` field is an object keyed by index (0, 1, 2, ...) containing
+ * these rows.
+ */
+interface ApiExposureRow {
+  count: number;
+  timestamp: string;
+  gamma: string;
+  strike: number;
+  vanna: string;
+  charm: string;
+}
+
+/**
+ * Shape of the `market_maker_exposures` API response body.
+ */
+interface ApiExposureResponse {
+  data: Record<string, ApiExposureRow>;
+  timestamp: string; // e.g. "2026-06-18T20:00:00Z"
+  date: string;      // e.g. "2026-06-18"
+  index_values: {
+    close: number;
+    high: number;
+    low: number;
+    open: number;
+  };
+  prev?: ApiExposureRow[];
+  prev2?: ApiExposureRow[];
+  prev3?: ApiExposureRow[];
+}
+
+/**
+ * Shape of a single row in the UW `market_maker_contracts` API response.
+ * Each strike appears twice — once for "call" and once for "put".
+ */
+interface ApiContractsRow {
+  count: number;
+  timestamp: string;
+  type: 'call' | 'put';
+  strike: number;
+  qty: number;
+}
+
+/**
+ * Shape of the `market_maker_contracts` API response body.
+ */
+interface ApiContractsResponse {
+  data: ApiContractsRow[];
+  timestamp: string;
+  date: string;
+  index_values: {
+    close: number;
+    high: number;
+    low: number;
+    open: number;
+  };
+}
 
 // US equity-options market holidays. SPX trading is closed on these
 // dates. Maintained inline because the periscope-scraper service does
@@ -78,11 +145,18 @@ const US_MARKET_HOLIDAYS: ReadonlySet<string> = new Set([
 
 const logger = pino({ level: LOG_LEVEL });
 
-/** Greeks present in the table view's dropdown, in capture order. */
-const GREEKS_TO_CAPTURE: ReadonlyArray<{ panel: Panel; label: string }> = [
-  { panel: 'gamma', label: 'Gamma' },
-  { panel: 'charm', label: 'Charm' },
-  { panel: 'vanna', label: 'Vanna' },
+/**
+ * Minimum gamma magnitude (|gamma|) for a strike to be persisted. Strikes
+ * whose gamma is within ±this value are dropped entirely, along with their
+ * charm/vanna rows — gamma is the anchor that gates the whole strike.
+ */
+const GAMMA_MIN_ABS = 150;
+
+/** Greeks present in the API response, in capture order. */
+const GREEKS_TO_CAPTURE: ReadonlyArray<{ panel: Panel; key: keyof Pick<ApiExposureRow, 'gamma' | 'charm' | 'vanna'> }> = [
+  { panel: 'gamma', key: 'gamma' },
+  { panel: 'charm', key: 'charm' },
+  { panel: 'vanna', key: 'vanna' },
 ];
 
 // ── Time-window helpers (used by both walkers and the backfill loop) ──
@@ -121,6 +195,46 @@ function todayInCT(): string {
   }).format(new Date());
 }
 
+function prevDay(ymd: string): string {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The latest date for which UW market data is available.
+ * Returns today if the market has already opened (past 08:20 CT) and
+ * today is a trading day. Otherwise walks backwards past weekends and
+ * holidays until it finds the most recent trading day.
+ */
+function latestTradingDay(): string {
+  const now = new Date();
+
+  const todayYmd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Chicago',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+
+  const hhmm = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(now);
+
+  let candidate = hhmm >= '08:20' ? todayYmd : prevDay(todayYmd);
+
+  while (true) {
+    const dow = new Date(`${candidate}T12:00:00Z`).getUTCDay();
+    if (dow >= 1 && dow <= 5 && !US_MARKET_HOLIDAYS.has(candidate)) {
+      return candidate;
+    }
+    candidate = prevDay(candidate);
+  }
+}
+
 /** Advance an HH:MM string by 10 minutes. "08:20" → "08:30", "08:50" → "09:00". */
 function nextTimeframe(slotStartHhmm: string): string {
   const [hStr, mStr] = slotStartHhmm.split(':');
@@ -141,43 +255,128 @@ import { computeCapturedAt } from './dates.js';
 export { computeCapturedAt };
 
 /**
- * Open the DTE filter popover and set Min/Max DTE to 0.
- *
- * The user trades 0DTE-only, so the canonical scrape filter is
- * DTE=[0,0]. This forces the table to show today's 0DTE expiry rows
- * and filters out everything else, matching what the user configures
- * by hand. More reliable than walking the Expiry tree.
- *
- * The DTE pill has `data-testid="dte-filter"` (stable), and the inputs
- * inside the popover have placeholders "Min dte" / "Max dte" — we
- * locate by those rather than by tailwind hash class.
- *
- * No-ops gracefully if the popover doesn't appear (e.g. UW renamed
- * the test-id) — the page just won't filter, and we'll see "No data
- * available" downstream which is the existing soft-fail path.
+ * Convert a UTC ISO timestamp (from the API response) to a CT HH:MM
+ * string. Used to derive the timeframe label for DB rows.
  */
+function utcToCTHhmm(utcIso: string): string {
+  const d = new Date(utcIso);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d);
+  const hour = parts.find((p) => p.type === 'hour')?.value ?? '00';
+  const minute = parts.find((p) => p.type === 'minute')?.value ?? '00';
+  return `${hour}:${minute}`;
+}
+
+/**
+ * Derive a UW-style timeframe label from an API timestamp.
+ * The API timestamp represents the slot END time.
+ * Returns e.g. "08:20 - 08:30" from the end time "08:30".
+ */
+function apiTimestampToTimeframe(utcIso: string): string {
+  const endHhmm = utcToCTHhmm(utcIso);
+  // Slot start is 10 minutes before end
+  const d = new Date(utcIso);
+  d.setMinutes(d.getMinutes() - 10);
+  const startHhmm = utcToCTHhmm(d.toISOString());
+  return `${startHhmm} - ${endHhmm}`;
+}
+
+/**
+ * Convert an API exposure response into SnapshotRow[] for all three Greeks.
+ * Each row in the API data has gamma, charm, vanna as string fields — we
+ * parse them into numeric values and emit one SnapshotRow per (strike, greek).
+ */
+function apiResponseToRows(
+  apiData: ApiExposureResponse,
+  capturedAt: string,
+): { rows: SnapshotRow[]; spot: number; timeframe: string; expiry: string; qualifyingStrikes: Set<number> } {
+  const rows: SnapshotRow[] = [];
+  const timeframe = apiTimestampToTimeframe(apiData.timestamp);
+  const expiry = apiData.date; // YYYY-MM-DD
+  const spot = apiData.index_values.close;
+
+  const dataRows = Object.values(apiData.data);
+
+  // Gamma is the anchor: only persist strikes whose gamma magnitude exceeds
+  // the threshold. Charm/Vanna for a strike are kept only when that same
+  // strike's gamma qualifies — i.e. a strike is all-or-nothing across Greeks.
+  const qualifyingStrikes = new Set<number>();
+  for (const row of dataRows) {
+    const gamma = Number.parseFloat(row.gamma);
+    if (Number.isFinite(gamma) && Math.abs(gamma) > GAMMA_MIN_ABS) {
+      qualifyingStrikes.add(row.strike);
+    }
+  }
+
+  for (const greek of GREEKS_TO_CAPTURE) {
+    for (const row of dataRows) {
+      if (!qualifyingStrikes.has(row.strike)) continue;
+      const valueStr = row[greek.key];
+      const value = Number.parseFloat(valueStr);
+      if (!Number.isFinite(value)) continue;
+      // Skip rows where all Greeks are zero (noise at extreme strikes)
+      // Keep zero values though since they can be meaningful at specific strikes
+      rows.push({
+        capturedAt,
+        expiry,
+        panel: greek.panel,
+        strike: row.strike,
+        value,
+        timeframe,
+      });
+    }
+  }
+
+  return { rows, spot, timeframe, expiry, qualifyingStrikes };
+}
+
+/**
+ * Convert an API contracts response into SnapshotRow[] for positions.
+ * Each strike has a call row and a put row — we net them (call_qty + put_qty)
+ * to produce one SnapshotRow per strike with panel='positions'.
+ * Only includes strikes that appear in `qualifyingStrikes` (gamma-gated).
+ */
+function contractsResponseToRows(
+  apiData: ApiContractsResponse,
+  capturedAt: string,
+  qualifyingStrikes: ReadonlySet<number>,
+): SnapshotRow[] {
+  const timeframe = apiTimestampToTimeframe(apiData.timestamp);
+  const expiry = apiData.date;
+
+  // Aggregate net qty per strike (call + put).
+  const netByStrike = new Map<number, number>();
+  for (const row of apiData.data) {
+    if (!qualifyingStrikes.has(row.strike)) continue;
+    const prev = netByStrike.get(row.strike) ?? 0;
+    netByStrike.set(row.strike, prev + row.qty);
+  }
+
+  const rows: SnapshotRow[] = [];
+  for (const [strike, value] of netByStrike) {
+    rows.push({
+      capturedAt,
+      expiry,
+      panel: 'positions',
+      strike,
+      value,
+      timeframe,
+    });
+  }
+  return rows;
+}
+
 /**
  * Open the Expiry filter, switch to Single mode, and click the row
  * matching `targetYmd` (YYYY-MM-DD). Returns true on success.
  *
- * UW Periscope renders the Expiry popover into a Radix portal with two
- * tabs (Multi / Single). In Single mode, the popover body is a
- * `<table><tfoot><tr>` list where each row's first `<span class="text-base">`
- * holds a label like `05/08/2026 (0d)`. Clicking the matching row
- * narrows the chart to that single expiry — the user-validated path
- * for working pre-market data on a fresh trading day, since DTE=[0,0]
- * mode renders empty before the first session trades.
- *
- * The function:
- *   1. Locates the Expiry trigger (DropdownFilter with `Expiry` label).
- *   2. Clicks it to open the popover.
- *   3. Clicks the `Single` tab if present.
- *   4. Finds the row whose label starts with the converted `MM/DD/YYYY`.
- *   5. Clicks it and waits for the trigger pill to update.
- *
- * Returns false on any of: trigger not found, Single tab missing, or
- * target date not present in the row list (e.g. a holiday). Callers
- * should fall back to DTE=[0,0] in that case.
+ * UW Periscope renders the Expiry filter as a DropdownFilter component.
+ * In the chart view (dashboard/4), dates are shown as "YYYY-MM-DD (Nd)"
+ * format, e.g. "2026-06-17 (1d)".
  */
 async function setExpirySingle(
   page: Page,
@@ -186,11 +385,12 @@ async function setExpirySingle(
   if (!/^\d{4}-\d{2}-\d{2}$/.test(targetYmd)) {
     throw new Error(`setExpirySingle: invalid target "${targetYmd}"`);
   }
-  const [yyyy, mm, dd] = targetYmd.split('-');
-  const targetMdy = `${mm}/${dd}/${yyyy}`;
+  // UW dialog shows dates as "YYYY-MM-DD (Nd)" e.g. "2026-06-17 (1d)"
+  const datePattern = new RegExp(`^${escapeRegex(targetYmd)}\\s*\\(`);
 
+  // Find the Expiry dropdown trigger — stable sentry component attribute.
   const trigger = page
-    .locator('div[data-sentry-component="DropdownFilter"]')
+    .locator('[data-sentry-component="DropdownFilter"]')
     .filter({ has: page.locator('span', { hasText: /^Expiry$/ }) })
     .first();
   if ((await trigger.count()) === 0) {
@@ -198,122 +398,111 @@ async function setExpirySingle(
     return false;
   }
 
-  // The DropdownFilter container has multiple clickable children
-  // (label, value, info icon). Clicking the container's center can
-  // land on the info icon's `DropdownIcon` popover instead of the
-  // Expiry filter. Click the value span (`span.text-base` — currently
-  // shows "All" or a single-mode date) which is unambiguously the
-  // filter trigger.
-  const triggerValue = trigger.locator('span.text-base').first();
-  await triggerValue.click({ timeout: 5_000 });
-  // Probe verified 1500ms is the right settle window for Radix popper
-  // mount + content render in this app.
+  const dialogId = await trigger.getAttribute('aria-controls');
+
+  // Approach 1: real mouse move + click (triggers hover/focus states that
+  // Radix components sometimes require before the dialog fires).
+  const box = await trigger.boundingBox();
+  if (box) {
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    await page.mouse.move(cx, cy);
+    await page.waitForTimeout(300);
+    await page.mouse.click(cx, cy);
+  } else {
+    // Fallback: synthetic click with force
+    await trigger.click({ timeout: 5_000, force: true });
+  }
   await page.waitForTimeout(1_500);
 
-  // Find the popover whose content is the Expiry filter (contains a
-  // Switch component for Multi/Single tabs). Multiple Radix poppers can
-  // be mounted at once — picking by content keeps us off help-icon
-  // tooltips and other unrelated poppers.
-  const allPoppers = page.locator('[data-radix-popper-content-wrapper]');
-  const popperCount = await allPoppers.count();
-  let popoverIdx = -1;
-  for (let i = 0; i < popperCount; i += 1) {
-    const switchCount = await allPoppers
-      .nth(i)
-      .locator('[data-sentry-component="Switch"]')
-      .count();
-    if (switchCount > 0) {
-      popoverIdx = i;
-      break;
-    }
+  // Approach 2: if the dialog still hasn't opened, try a JS-level click
+  // (bypasses Playwright event dispatch entirely — hits the DOM handler directly).
+  const isExpanded = await trigger.getAttribute('aria-expanded');
+  if (isExpanded !== 'true') {
+    logger.info('setExpirySingle: mouse click did not open dialog — trying JS click');
+    await page.evaluate(() => {
+      const filters = document.querySelectorAll('[data-sentry-component="DropdownFilter"]');
+      for (const el of filters) {
+        if (el.textContent?.includes('Expiry')) {
+          (el as HTMLElement).click();
+          break;
+        }
+      }
+    });
+    await page.waitForTimeout(1_500);
   }
-  if (popoverIdx === -1) {
+
+  // Wait for the dialog to appear.
+  const dialog =
+    dialogId != null
+      ? page.locator(`[id="${dialogId}"]`).first()
+      : page.locator('[role="dialog"]').first();
+  try {
+    await dialog.waitFor({ state: 'visible', timeout: 5_000 });
+  } catch {
+    // Save debug HTML so we can inspect the state when the dialog fails to open.
+    const debugHtml = await page.content().catch(() => '');
+    const debugPath = resolve('docs/temp', `expiry-debug-${Date.now()}.html`);
+    await mkdir(resolve('docs/temp'), { recursive: true });
+    await writeFile(debugPath, debugHtml, 'utf8').catch(() => undefined);
     logger.warn(
-      { popperCount },
-      'setExpirySingle: Expiry popover (with Switch) not found among open Radix poppers',
+      { dialogId, debugPath, ariaExpanded: isExpanded },
+      'setExpirySingle: dialog did not appear — debug HTML saved',
     );
     await page.keyboard.press('Escape');
     return false;
   }
-  const popover = allPoppers.nth(popoverIdx);
 
-  // Click the Single tab. The probe (scripts/periscope-controls-probe.mjs)
-  // verified this exact selector + click sequence works to switch the
-  // popover from Multi (HierarchicalMultiSelect tree) to Single (flat
-  // <table><tfoot><tr> list of MM/DD/YYYY (Nd) labels).
-  //
-  // BUT: across consecutive setExpirySingle calls (e.g. range backfill
-  // walking date-by-date) the popover often opens already on Single
-  // because the prior call left it pinned. Re-clicking the active tab
-  // toggles it OFF on UW's Switch component, leaving the popover
-  // empty and the next row.click() failing with rowCount=0. Detect
-  // the pre-existing Single state by checking whether the date list
-  // is ALREADY populated on popover open; if yes, skip the tab click.
-  const preexistingDateRows = await popover
-    .locator('span.text-base')
-    .filter({ hasText: /^\d{2}\/\d{2}\/\d{4}/ })
-    .count();
-  if (preexistingDateRows === 0) {
-    const singleTab = popover
-      .locator('[data-sentry-component="Switch"]')
-      .locator('div', { hasText: /^Single$/ })
-      .first();
-    if ((await singleTab.count()) === 0) {
-      logger.warn('setExpirySingle: Single tab not found in popover');
-      await page.keyboard.press('Escape');
-      return false;
-    }
-    await singleTab.click({ timeout: 3_000 });
-    // After the Switch toggles to Single, UW lazy-loads the date list.
-    // Wait for either a row with `MM/DD/YYYY` to appear OR a 5s timeout.
-    await page
-      .locator('span.text-base', { hasText: /^\d{2}\/\d{2}\/\d{4}/ })
-      .first()
-      .waitFor({ state: 'visible', timeout: 5_000 })
-      .catch(() => undefined);
+  // Always try to switch to Single mode first — in Multi mode clicking a
+  // date only toggles a checkbox and the dialog stays open.
+  const singleBtn = dialog.getByText('Single', { exact: true }).first();
+  if ((await singleBtn.count()) > 0) {
+    await singleBtn.click({ timeout: 3_000 });
     await page.waitForTimeout(500);
-  } else {
-    logger.debug(
-      { preexistingDateRows },
-      'setExpirySingle: popover already in Single mode — skipping tab click',
-    );
   }
 
-  // Find the row whose first text-base span starts with MM/DD/YYYY.
-  // The row label is `MM/DD/YYYY (Nd)` so we match on prefix.
-  const rows = popover.locator('tr', {
-    has: page.locator('span.text-base', {
-      hasText: new RegExp(`^${escapeRegex(targetMdy)}\\b`),
-    }),
-  });
-  const rowCount = await rows.count();
-  if (rowCount === 0) {
-    // Known issue (2026-05-08 testing): in headless mode UW's Single
-    // popover currently renders only an "All" placeholder row instead
-    // of the date list captured by the headed probe — likely a UW UI
-    // change since 2026-05-07 OR a headless-detection guard. Fall back
-    // to DTE=[0,0]+walkDate. Re-probe with the headed
-    // periscope-controls-probe.mjs script to confirm the new markup
-    // when UW is up; the rest of this function is ready to consume it.
-    const fullHtmlLen = (await popover.innerHTML().catch(() => '')).length;
+  // Wait for a date row in YYYY-MM-DD (Nd) format to be visible.
+  await dialog
+    .locator('span, div, td, li', { hasText: /^\d{4}-\d{2}-\d{2}\s*\(/ })
+    .first()
+    .waitFor({ state: 'visible', timeout: 5_000 })
+    .catch(() => undefined);
+
+  // Click the row whose text starts with "YYYY-MM-DD (" e.g. "2026-06-17 (1d)"
+  const target = dialog
+    .locator('span, div, td, li', { hasText: datePattern })
+    .first();
+
+  if ((await target.count()) === 0) {
+    const dialogHtml = await dialog.innerHTML().catch(() => '');
     logger.warn(
-      { targetYmd, targetMdy, fullHtmlLen },
-      'setExpirySingle: Single-mode date list not populated — UW UI may have changed',
+      { targetYmd, dialogHtmlLen: dialogHtml.length },
+      'setExpirySingle: target date not found in dialog',
     );
     await page.keyboard.press('Escape');
     return false;
   }
 
-  await rows.first().click({ timeout: 3_000 });
-  // After click, the popover should close and the trigger pill should
-  // update to the YYYY-MM-DD or MM/DD/YYYY label. Give UW a beat to
-  // refetch + repaint the table for the new expiry.
-  await page.waitForTimeout(2_000);
+  await target.click({ timeout: 3_000, force: true });
 
-  logger.info(
-    { targetYmd, targetMdy },
-    'setExpirySingle: clicked target date row',
-  );
+  // In Single mode Radix closes the dialog automatically; give it a moment.
+  await page.waitForTimeout(500);
+
+  // If dialog is still visible, try pressing Enter (activates focused item)
+  // then fall back to clicking outside the modal.
+  if (await dialog.isVisible().catch(() => false)) {
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(500);
+  }
+  if (await dialog.isVisible().catch(() => false)) {
+    // Click in the page margin well outside the dialog to dismiss it.
+    await page.mouse.click(10, 10);
+    await page.waitForTimeout(500);
+  }
+
+  // Verify the trigger pill updated away from "All"
+  const newValue = await trigger.locator('span.text-base').first().textContent().catch(() => '');
+  logger.info({ targetYmd, newValue }, 'setExpirySingle: date selected');
   return true;
 }
 
@@ -392,108 +581,6 @@ async function setDTEZero(page: Page): Promise<void> {
     pills['__date'] = ((await dateBtn.textContent()) ?? '').trim();
   }
   logger.info({ pills }, 'setDTEZero: trigger pill state after apply');
-}
-
-/**
- * Click the Greek dropdown trigger and pick the named option.
- *
- * The dropdown trigger is the `<div data-sentry-component="DropdownFilter">`
- * that contains a `<span>Greek</span>` label. Clicking it opens a Radix
- * popover; the option to click is a popover item with the matching text.
- *
- * If the trigger already shows the target label (e.g. first iteration
- * happens to land on the user's pre-saved Greek), this no-ops by returning
- * early — saves an unneeded click + render cycle.
- */
-async function selectGreek(page: Page, label: string): Promise<void> {
-  // Locate the Greek dropdown trigger by walking from the "Greek" text-xs
-  // span up to its DropdownFilter ancestor.
-  const trigger = page
-    .locator('div[data-sentry-component="DropdownFilter"]')
-    .filter({ has: page.locator('span', { hasText: /^Greek$/ }) })
-    .first();
-
-  // Read the currently-displayed Greek (the text-base sibling). If it
-  // already matches our target, skip the click.
-  const currentText = (
-    await trigger.locator('span.text-base').first().textContent()
-  )?.trim();
-  if (currentText === label) {
-    logger.debug({ label }, 'selectGreek: already on target, skipping click');
-    return;
-  }
-
-  // Open the popover. Radix's close animation from a prior option
-  // click can swallow the next trigger click if we re-click too fast
-  // — the click registers but Radix's "click outside" handler treats
-  // it as a no-op against the just-finished popover. Settle first,
-  // use force:true to bypass actionability flicker, and retry once
-  // if the popover doesn't appear.
-  let popoverOpen = false;
-  for (let attempt = 0; attempt < 2 && !popoverOpen; attempt += 1) {
-    await page.waitForTimeout(attempt === 0 ? 800 : 1_500);
-    await trigger.click({ timeout: 5_000, force: true });
-    try {
-      await page
-        .locator('[data-radix-popper-content-wrapper]')
-        .last()
-        .waitFor({ state: 'visible', timeout: 3_500 });
-      popoverOpen = true;
-    } catch {
-      logger.warn(
-        { label, attempt: attempt + 1 },
-        'selectGreek: popover did not open after trigger click — retrying',
-      );
-    }
-  }
-  if (!popoverOpen) {
-    await page.keyboard.press('Escape').catch(() => undefined);
-    throw new Error(
-      `selectGreek: popover did not open for "${label}" after 2 attempts`,
-    );
-  }
-
-  const option = page.getByText(label, { exact: true }).last();
-  try {
-    await option.waitFor({ state: 'visible', timeout: 3_000 });
-    await option.scrollIntoViewIfNeeded({ timeout: 2_000 });
-    await option.click({ timeout: 3_000 });
-  } catch (err) {
-    // Diagnostic: dump popover text + take a screenshot so we can
-    // SEE the page state when the option isn't clickable.
-    const popover = page.locator('[data-radix-popper-content-wrapper]').last();
-    const popoverText =
-      (await popover.textContent().catch(() => null)) ?? '<unreadable>';
-    const screenshotPath = `/tmp/periscope-fail-${label}-${Date.now()}.png`;
-    await page
-      .screenshot({ path: screenshotPath, fullPage: true })
-      .catch(() => undefined);
-    logger.warn(
-      {
-        label,
-        popoverText: popoverText.replaceAll(/\s+/g, ' ').slice(0, 300),
-        screenshotPath,
-        err: err instanceof Error ? err.message : String(err),
-      },
-      'selectGreek: option not clickable — screenshot saved',
-    );
-    await page.keyboard.press('Escape').catch(() => undefined);
-    throw err;
-  }
-
-  // Wait for the trigger's text-base span to display the new Greek
-  // label. Playwright's locator-based wait avoids serialising a function
-  // into the browser context (which would force a `dom` lib in tsconfig).
-  await trigger
-    .locator('span.text-base')
-    .filter({ hasText: new RegExp(`^${label}$`, 'i') })
-    .first()
-    .waitFor({ state: 'visible', timeout: 5_000 });
-
-  // Small settle wait: the data table re-renders asynchronously after
-  // the dropdown commit. Empirically ~500ms is enough on the captured
-  // page; we give 1s to absorb network jitter.
-  await page.waitForTimeout(1_000);
 }
 
 /**
@@ -848,258 +935,333 @@ async function withBrowser<T>(
 }
 
 /**
- * Capture rows for the three Greeks at the current page state. Assumes
- * the page is already on the right date / timeframe / DTE filter — this
- * function only handles the Greek-cycling + parsing.
+ * Collapse the left navigation sidebar to give the chart panel more
+ * horizontal space. The sidebar has a hamburger button with
+ * aria-label="Collapse sidebar" (SidebarHeader.tsx). When collapsed,
+ * the aria-label changes to "Expand sidebar" — so we only click when
+ * the collapse button is visible.
  *
- * `capturedAt` is stamped on every emitted row. For live ticks pass
- * `new Date().toISOString()`. For backfill, pass a per-slot timestamp
- * computed from the slot's end time.
+ * Called once after the page loads and the chart is ready, before any
+ * date/filter manipulation begins.
  */
-async function captureCurrentSlot(
-  page: Page,
-  capturedAt: string,
-): Promise<SnapshotRow[]> {
-  // Empty-state short-circuit: this page state has no data (e.g. an
-  // expiry/date combo that resolves to nothing). Bail cleanly.
-  if ((await page.getByText(/no data available/i).count()) > 0) {
-    logger.warn('captureCurrentSlot: "No data available" — returning 0 rows');
-    return [];
+async function clickZoomOut(page: Page): Promise<void> {
+  const zoomOutBtn = page.locator('svg.lucide-zoom-out').locator('..');
+  const count = await zoomOutBtn.count();
+  if (count > 0) {
+    await zoomOutBtn.first().click();
+    // Wait for the chart to re-render after zoom change.
+    await page.waitForTimeout(500);
+    logger.info('zoom-out (minimize) clicked');
+  } else {
+    logger.debug('zoom-out button not found');
   }
-
-  const slotRows: SnapshotRow[] = [];
-  // Anchor: the timeframe we read from the FIRST Greek (gamma). All
-  // subsequent Greeks must come from the same slot — Greek-cycling
-  // takes 5–10s and UW publishes a new 10-min slot every 10 min, so
-  // mid-cycle rollover would silently mix two slots into one
-  // captured_at. When drift is detected, walk the timeframe widget
-  // back to the anchor and re-parse the panel.
-  let anchorTimeframe: string | null = null;
-  let anchorStart: string | null = null;
-
-  for (const greek of GREEKS_TO_CAPTURE) {
-    try {
-      await selectGreek(page, greek.label);
-    } catch (err) {
-      logger.warn(
-        {
-          panel: greek.panel,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'selectGreek failed — skipping this Greek',
-      );
-      continue;
-    }
-
-    if ((await page.getByText(/no data available/i).count()) > 0) {
-      logger.info({ panel: greek.panel }, 'no data for this Greek — skipping');
-      continue;
-    }
-
-    let html = await page.content();
-    let parsed = parsePage(html, capturedAt);
-
-    if (parsed.header.panel !== greek.panel) {
-      logger.warn(
-        { expected: greek.panel, got: parsed.header.panel },
-        'panel mismatch — skipping this Greek',
-      );
-      continue;
-    }
-
-    if (anchorTimeframe === null) {
-      // First Greek — record the anchor.
-      anchorTimeframe = parsed.header.timeframe;
-      anchorStart = parseTimeframeStart(parsed.header.timeframe);
-    } else if (parsed.header.timeframe !== anchorTimeframe) {
-      // Drift detected — UW rolled to a new slot mid-cycle. Walk the
-      // timeframe back to the anchor and re-parse the same Greek.
-      logger.info(
-        {
-          panel: greek.panel,
-          anchor: anchorTimeframe,
-          got: parsed.header.timeframe,
-        },
-        'timeframe drift — realigning to gamma anchor',
-      );
-      if (anchorStart != null) {
-        try {
-          await walkTimeframeToTarget(page, anchorStart);
-          await page.waitForTimeout(1_500);
-          html = await page.content();
-          parsed = parsePage(html, capturedAt);
-          if (parsed.header.timeframe !== anchorTimeframe) {
-            logger.warn(
-              {
-                panel: greek.panel,
-                anchor: anchorTimeframe,
-                got: parsed.header.timeframe,
-              },
-              'realign did not converge — committing rows with drifted timeframe',
-            );
-          }
-        } catch (err) {
-          logger.warn(
-            {
-              panel: greek.panel,
-              err: err instanceof Error ? err.message : String(err),
-            },
-            'walkTimeframeToTarget failed during realign — committing drifted rows',
-          );
-        }
-      }
-    }
-
-    logger.info(
-      {
-        panel: greek.panel,
-        rows: parsed.rows.length,
-        spot: parsed.header.spot,
-        expiry: parsed.header.expiry,
-        timeframe: parsed.header.timeframe,
-        anchorTimeframe,
-        capturedAt,
-      },
-      'parsed Greek',
-    );
-    slotRows.push(...parsed.rows);
-  }
-
-  return slotRows;
 }
 
 /**
- * Wait until the page either renders table rows OR has "No data
- * available" persisting for a full poll cycle. UW takes a few seconds
- * to refetch and repaint after a date change; a fixed wait too short
- * yields a stale "no data" read on a date that DOES have data (UW
- * Periscope publishes 10-min slots from ~5:50 CT onward every trading
- * day).
+ * Wait for the page to have loaded enough that data is rendered.
+ * For the chart view, we look for the "SPX Market Maker Exposures" title
+ * or the Timeframe widget — either means the chart panel is mounted.
  *
- * Returns true if rows are present, false on persistent "no data".
- * Throws on overall timeout.
+ * Returns true if the chart appears ready, false on timeout.
  */
-async function waitForTableReady(
+async function waitForChartReady(
   page: Page,
   timeoutMs = 20_000,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  let consecutiveNoData = 0;
   while (Date.now() < deadline) {
-    const rowCount = await page.locator('tr.table_row__wxw5u').count();
-    if (rowCount > 0) return true;
+    // Check for the Timeframe widget (reliable indicator the MM Exposures
+    // panel is rendered and interactive).
+    const tfCount = await page.locator('span', { hasText: /^Timeframe:$/ }).count();
+    if (tfCount > 0) return true;
+
+    // Also check for explicit "No data available"
     const noDataCount = await page.getByText(/no data available/i).count();
-    if (noDataCount > 0) {
-      consecutiveNoData += 1;
-      // Five consecutive "no data" reads spaced 1s apart = genuinely
-      // empty (e.g. weekend/holiday). Fewer isn't enough — after a
-      // date-walk UW takes 5–10s to refetch and the empty state
-      // persists during the request.
-      if (consecutiveNoData >= 5) return false;
-    } else {
-      consecutiveNoData = 0;
-    }
+    if (noDataCount > 0) return false;
+
     await page.waitForTimeout(1_000);
   }
-  throw new Error(
-    'waitForTableReady: neither rows nor "no data" stabilized within timeout',
-  );
+  logger.warn('waitForChartReady timed out');
+  return false;
 }
 
-export async function scrapeAllPanels(): Promise<SnapshotRow[]> {
-  return await withBrowser(async (_browser, page) => {
-    // Live mode prep order is critical: storageState often restores a
-    // stale date from the last --login session, and DTE=[0,0] resolves
-    // its expiry against whatever date the page thinks is "current".
-    // If we apply DTE=[0,0] BEFORE walking the date forward, the filter
-    // gets computed against the stale date and the table renders
-    // empty even when today's data exists. So: navigate, walk to today
-    // FIRST, wait for the table to populate, THEN apply DTE=[0,0].
-    logger.info({ url: UW_PERISCOPE_URL }, 'navigating to periscope');
-    await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
+/**
+ * Read the current Timeframe label from the page.
+ * Returns the label text like "15:50 - 16:00" or "Latest".
+ */
+async function readTimeframeLabel(page: Page): Promise<string> {
+  try {
+    const container = page
+      .locator('div.rounded-full')
+      .filter({ has: page.locator('span', { hasText: /^Timeframe:$/ }) })
+      .first();
+    const labelSpan = container.locator('span').last();
+    return ((await labelSpan.textContent()) ?? '').trim();
+  } catch {
+    return '';
+  }
+}
 
-    const firstRow = page.locator('tr.table_row__wxw5u').first();
-    const emptyState = page.getByText(/no data available/i).first();
-    try {
-      await Promise.race([
-        firstRow.waitFor({ state: 'visible', timeout: 20_000 }),
-        emptyState.waitFor({ state: 'visible', timeout: 20_000 }),
-      ]);
-    } catch {
-      logger.warn(
-        'neither table rows nor empty-state appeared after 20s — proceeding anyway',
-      );
-    }
-
-    const today = todayInCT();
-
-    // Filter strategy for live mode: prefer Single-Expiry mode for
-    // today's date — this is the user-validated path that works
-    // pre-market. DTE=[0,0] is empirically empty pre-market on a
-    // fresh trading day even when Single-Expiry shows full data.
-    //
-    // Fall back to walkDateToTarget + DTE=[0,0] when Single-Expiry
-    // can't find today's row (holiday, weekend, or markup change).
-    let usedSingleExpiry = false;
-    try {
-      usedSingleExpiry = await setExpirySingle(page, today);
-    } catch (err) {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        'setExpirySingle threw — falling back to DTE=[0,0]',
-      );
-    }
-
-    if (usedSingleExpiry) {
-      const ready = await waitForTableReady(page);
-      logger.info(
-        { today, ready, mode: 'single-expiry' },
-        'live tick prep complete',
-      );
-    } else {
-      logger.info(
-        { today },
-        'Single-Expiry unavailable — falling back to walk-date + DTE=[0,0]',
-      );
-      try {
-        await walkDateToTarget(page, today);
-        const ready = await waitForTableReady(page);
-        logger.info({ today, ready }, 'walked date picker to today');
-      } catch (err) {
-        logger.warn(
-          {
-            today,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          'walkDateToTarget(today) failed — proceeding anyway',
-        );
-      }
-
-      await setDTEZero(page);
-      await page.waitForTimeout(2_000);
-
-      // "Latest" sentinel can render empty pre-market in DTE=[0,0] mode
-      // even when specific 10-min slots have data. If the table still
-      // shows "No data available" at this point, step back one slot to
-      // land on the most recent specific timeframe and re-check.
-      if ((await page.getByText(/no data available/i).count()) > 0) {
-        logger.info(
-          'still empty after DTE=[0,0] — rewinding timeframe one slot to escape "Latest"',
-        );
-        try {
-          await rewindTimeframeOneSlot(page);
-          const ready = await waitForTableReady(page);
-          logger.info({ ready }, 'after timeframe rewind');
-        } catch (err) {
-          logger.warn(
-            { err: err instanceof Error ? err.message : String(err) },
-            'rewindTimeframeOneSlot failed — proceeding to capture anyway',
-          );
+/**
+ * Read the SPX spot price from the chart view page header.
+ * The chart view shows: `<span class="pr-2">SPX</span>7,500.63`
+ * Falls back to the `Underlying: ($XXXX.XX)` pattern used by the table view.
+ */
+async function readSpotPrice(page: Page): Promise<number | null> {
+  return await page.evaluate(() => {
+    // Chart view pattern: SPX followed by price
+    const spans = document.querySelectorAll('span');
+    for (const span of spans) {
+      if (span.textContent?.trim() === 'SPX') {
+        // The price is in the next text node or sibling
+        const parent = span.parentElement;
+        if (parent) {
+          const text = parent.textContent ?? '';
+          const match = text.match(/SPX\s*([\d,]+\.\d+)/);
+          if (match?.[1]) {
+            const v = parseFloat(match[1].replace(/,/g, ''));
+            if (isFinite(v) && v > 0) return v;
+          }
         }
       }
     }
+    // Table view fallback: Underlying: ($XXXX.XX)
+    for (const span of spans) {
+      const match = span.textContent?.match(/Underlying:\s*\(\$([\d.]+)\)/);
+      if (match?.[1]) {
+        const v = parseFloat(match[1]);
+        if (isFinite(v) && v > 0) return v;
+      }
+    }
+    return null;
+  });
+}
 
-    return await captureCurrentSlot(page, new Date().toISOString());
+export async function scrapeAllPanels(): Promise<ScrapeResult> {
+  return await withBrowser(async (_browser, page) => {
+    // Intercept market_maker_exposures API responses. We collect ALL
+    // JSON responses and filter for the one we need after page settles.
+    const saveDebug = (process.env.SAVE_SCREENSHOT ?? '').trim().toLowerCase() === 'true';
+    const apiCaptures: Array<{ url: string; body: unknown }> = [];
+    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
+    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
+
+    page.on('response', (response) => {
+      const url = response.url();
+      const ct = response.headers()['content-type'] ?? '';
+      if (ct.includes('json')) {
+        response.json().then((body) => {
+          if (saveDebug) {
+            apiCaptures.push({ url, body });
+          }
+          if (url.includes('market_maker_exposures')) {
+            mmeResponses.push({ url, body: body as ApiExposureResponse });
+          }
+          if (url.includes('market_maker_contracts')) {
+            mmcResponses.push({ url, body: body as ApiContractsResponse });
+          }
+        }).catch(() => undefined);
+      }
+    });
+
+    logger.info({ url: UW_PERISCOPE_URL }, 'navigating to periscope');
+    await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
+
+    // Wait for the chart to render (look for Timeframe widget or data).
+    await waitForChartReady(page);
+
+    // Collapse the left nav sidebar to maximize chart area.
+    await clickZoomOut(page);
+
+    // TARGET_DATE overrides the date to scrape. Useful for running against
+    // the previous trading day when today's market hasn't opened yet.
+    // Must be YYYY-MM-DD. Defaults to today in CT when not set.
+    const rawTargetDate = (process.env.TARGET_DATE ?? '').trim();
+    const today =
+      /^\d{4}-\d{2}-\d{2}$/.test(rawTargetDate) ? rawTargetDate : latestTradingDay();
+
+    logger.info({ today }, 'scrapeAllPanels: target date');
+
+    // Step 1: always walk the date picker to the target date first.
+    try {
+      await walkDateToTarget(page, today);
+      await page.waitForTimeout(1_000);
+    } catch (err) {
+      logger.warn(
+        { today, err: err instanceof Error ? err.message : String(err) },
+        'walkDateToTarget(today) failed — proceeding with current chart date',
+      );
+    }
+
+    // SETUP_PAUSE_MS >= 5000: open the browser visibly (set HEADLESS=false),
+    // pause here so you can configure the page manually (e.g. set Expiry),
+    // then the scraper continues straight to capture — no automated filter.
+    // When unset or < 5000: automated setExpirySingle runs instead.
+    const setupPauseMs = Number.parseInt(
+      process.env.SETUP_PAUSE_MS ?? '0',
+      10,
+    );
+    if (setupPauseMs >= 5_000) {
+      logger.info(
+        { setupPauseMs },
+        'SETUP_PAUSE_MS set — waiting for manual page configuration',
+      );
+      await page.waitForTimeout(setupPauseMs);
+      logger.info('setup pause complete — continuing scrape');
+    } else {
+      // Step 2: automated expiry filter — set Expiry to Single mode for
+      // the target date. Falls back to DTE=[0,0] when the dialog fails.
+      let usedSingleExpiry = false;
+      try {
+        usedSingleExpiry = await setExpirySingle(page, today);
+      } catch (err) {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'setExpirySingle threw — falling back to DTE=[0,0]',
+        );
+      }
+
+      // Dismiss any dialog that may still be open before checking the table.
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+
+      if (usedSingleExpiry) {
+        // Wait for API response to come back after expiry change.
+        await page.waitForTimeout(2_000);
+        logger.info(
+          { today, mode: 'single-expiry' },
+          'live tick prep complete',
+        );
+      } else {
+        logger.info({ today }, 'Single-Expiry unavailable — using DTE=[0,0]');
+        await setDTEZero(page);
+        await page.waitForTimeout(2_000);
+      }
+    }
+
+    // Wait for network to settle after filter changes — the chart view
+    // fires new API calls when filters change.
+    await page.waitForLoadState('networkidle').catch(() => undefined);
+    // Extra settle time for any trailing API calls. // anti-bot
+    await page.waitForTimeout(2_000);
+
+    if (saveDebug) {
+      const ts = Date.now();
+      const outDir = resolve('docs/tmp');
+      const tempDir = resolve('docs/temp');
+      await mkdir(outDir, { recursive: true });
+      await mkdir(tempDir, { recursive: true });
+      const screenshotPath = resolve(outDir, `scrape-${ts}.png`);
+      const htmlPath = resolve(tempDir, `scrape-${ts}.html`);
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+      await writeFile(htmlPath, await page.content(), 'utf8');
+      if (apiCaptures.length > 0) {
+        const apiPath = resolve(tempDir, `api-${ts}.json`);
+        await writeFile(apiPath, JSON.stringify(apiCaptures, null, 2), 'utf8');
+        logger.info({ apiPath, count: apiCaptures.length }, 'api responses saved');
+      }
+      logger.info({ screenshotPath, htmlPath }, 'screenshot and html saved');
+    }
+
+    // Find the best market_maker_exposures response to use.
+    // Prefer the one with `expiry=<target date>` over `expiry=all`.
+    // If none match the target date, fall back to any specific-expiry response.
+    logger.info(
+      { mmeResponseCount: mmeResponses.length, urls: mmeResponses.map(r => r.url) },
+      'scrapeAllPanels: collected MME API responses',
+    );
+
+    let bestResponse: ApiExposureResponse | null = null;
+    for (const r of mmeResponses) {
+      if (r.url.includes(`expiry=${today}`)) {
+        bestResponse = r.body;
+        break;
+      }
+    }
+    // Fall back to any non-"all" expiry response
+    if (bestResponse === null) {
+      for (const r of mmeResponses) {
+        if (!r.url.includes('expiry=all')) {
+          bestResponse = r.body;
+          break;
+        }
+      }
+    }
+    // Last resort: use the "all" expiry response
+    if (bestResponse === null && mmeResponses.length > 0) {
+      bestResponse = mmeResponses[mmeResponses.length - 1]!.body;
+    }
+
+    if (bestResponse === null) {
+      logger.warn('scrapeAllPanels: no market_maker_exposures API response captured');
+      return { rows: [], spot: null };
+    }
+
+    // Read spot price from the page header.
+    const spot = await readSpotPrice(page);
+
+    // Read the timeframe label from the page for logging/verification.
+    const pageTimeframe = await readTimeframeLabel(page);
+
+    // Derive capturedAt from the API timestamp (slot end time).
+    const apiTimeframe = apiTimestampToTimeframe(bestResponse.timestamp);
+    const apiEndHhmm = utcToCTHhmm(bestResponse.timestamp);
+    const capturedAt = computeCapturedAt(bestResponse.date, apiEndHhmm);
+
+    const { rows, timeframe, expiry, qualifyingStrikes } = apiResponseToRows(bestResponse, capturedAt);
+
+    // Find the best market_maker_contracts response (positions).
+    let bestContracts: ApiContractsResponse | null = null;
+    for (const r of mmcResponses) {
+      if (r.url.includes(`expiry=${today}`)) {
+        bestContracts = r.body;
+        break;
+      }
+    }
+    if (bestContracts === null) {
+      for (const r of mmcResponses) {
+        if (!r.url.includes('expiry=all')) {
+          bestContracts = r.body;
+          break;
+        }
+      }
+    }
+    if (bestContracts === null && mmcResponses.length > 0) {
+      bestContracts = mmcResponses[mmcResponses.length - 1]!.body;
+    }
+
+    if (bestContracts) {
+      const positionsRows = contractsResponseToRows(bestContracts, capturedAt, qualifyingStrikes);
+      rows.push(...positionsRows);
+      logger.info(
+        { positionsRows: positionsRows.length, mmcResponseCount: mmcResponses.length },
+        'scrapeAllPanels: added positions rows from contracts API',
+      );
+    } else {
+      logger.warn('scrapeAllPanels: no market_maker_contracts API response captured');
+    }
+
+    logger.info(
+      {
+        apiTimestamp: bestResponse.timestamp,
+        apiDate: bestResponse.date,
+        apiTimeframe,
+        pageTimeframe,
+        expiry,
+        spot: spot ?? bestResponse.index_values.close,
+        rowCount: rows.length,
+        panels: [...new Set(rows.map(r => r.panel))],
+        strikes: rows.length > 0
+          ? `${rows[0]!.strike} … ${rows[rows.length - 1]!.strike}`
+          : 'none',
+      },
+      'scrapeAllPanels: parsed API response',
+    );
+
+    return {
+      rows,
+      spot: spot ?? bestResponse.index_values.close,
+    };
   });
 }
 
@@ -1108,6 +1270,9 @@ export async function scrapeAllPanels(): Promise<SnapshotRow[]> {
  * 10-min timeframe slots from `startHhmm` through `endHhmm`, capturing
  * Gamma + Charm + Vanna at each. Used to seed the database with a
  * full day's intraday history in one run.
+ *
+ * For the chart view, each timeframe change triggers a new API call.
+ * We intercept those responses to parse the data.
  *
  * The captured_at on each row is computed from the slot's END time
  * (e.g. an "08:20 - 08:30" slot stamps captured_at=08:30) so a
@@ -1122,39 +1287,43 @@ export async function scrapeBackfill(
   const endNorm = normalizeHhmm(endHhmm);
 
   return await withBrowser(async (_browser, page) => {
+    // Set up API interception
+    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
+    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
+
+    page.on('response', (response) => {
+      const url = response.url();
+      const ct = response.headers()['content-type'] ?? '';
+      if (ct.includes('json')) {
+        if (url.includes('market_maker_exposures')) {
+          response.json().then((body) => {
+            mmeResponses.push({ url, body: body as ApiExposureResponse });
+          }).catch(() => undefined);
+        }
+        if (url.includes('market_maker_contracts')) {
+          response.json().then((body) => {
+            mmcResponses.push({ url, body: body as ApiContractsResponse });
+          }).catch(() => undefined);
+        }
+      }
+    });
+
     logger.info(
       { targetDate, startHhmm: startNorm, endHhmm: endNorm },
       'backfill: starting',
     );
 
-    // Unified backfill prep: navigate, walk the date if needed, then pin
-    // Expiry=Single to the target date. DTE=[0,0] does NOT work for
-    // historical reads — UW returns "No data available" even when the
-    // chart's selected date matches the requested date (verified
-    // 2026-05-08 against multiple Nov 2025 dates). The Expiry=Single
-    // dropdown DOES list historical dates once the chart has been
-    // walked to them (rows like "11/14/2025 (0d)") so we use it for
-    // every backfill regardless of today vs. historical.
     logger.info(
       { url: UW_PERISCOPE_URL, targetDate },
       'backfill: navigating + walking date + setting Expiry=Single',
     );
     await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
-    const firstRow = page.locator('tr.table_row__wxw5u').first();
-    const emptyState = page.getByText(/no data available/i).first();
-    try {
-      await Promise.race([
-        firstRow.waitFor({ state: 'visible', timeout: 20_000 }),
-        emptyState.waitFor({ state: 'visible', timeout: 20_000 }),
-      ]);
-    } catch {
-      logger.warn('initial page render did not settle within 20s');
-    }
+    await waitForChartReady(page);
 
-    // Walk the chart date to the target. Required for historical reads
-    // because Single-Expiry's dropdown only lists dates near the chart's
-    // current selected date — clicking the calendar puts us in the right
-    // frame so the dropdown contains targetDate.
+    // Collapse the left nav sidebar to maximize chart area.
+    await clickZoomOut(page);
+
+    // Walk the chart date to the target.
     if (targetDate !== todayInCT()) {
       await walkDateToTarget(page, targetDate);
       await page.waitForTimeout(1_500);
@@ -1166,7 +1335,7 @@ export async function scrapeBackfill(
         `backfill: setExpirySingle(${targetDate}) failed — UW UI may have changed or date is outside Single-mode dropdown`,
       );
     }
-    await waitForTableReady(page);
+    await waitForChartReady(page);
 
     await walkTimeframeToTarget(page, startNorm);
     await page.waitForTimeout(1_500);
@@ -1184,16 +1353,46 @@ export async function scrapeBackfill(
         'backfill: scraping slot',
       );
 
-      const slotRows = await captureCurrentSlot(page, capturedAt);
-      allRows.push(...slotRows);
+      // Wait for the API response after the timeframe change.
+      await page.waitForLoadState('networkidle').catch(() => undefined);
+      await page.waitForTimeout(1_000);
+
+      // Find the most recent MME response for the target expiry.
+      const latestMme = [...mmeResponses]
+        .reverse()
+        .find(r => r.url.includes(`expiry=${targetDate}`))
+        ?? mmeResponses[mmeResponses.length - 1];
+
+      if (latestMme) {
+        const { rows, qualifyingStrikes } = apiResponseToRows(latestMme.body, capturedAt);
+        allRows.push(...rows);
+
+        // Also capture positions from contracts API.
+        const latestMmc = [...mmcResponses]
+          .reverse()
+          .find(r => r.url.includes(`expiry=${targetDate}`))
+          ?? mmcResponses[mmcResponses.length - 1];
+        if (latestMmc) {
+          allRows.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
+        }
+      } else {
+        logger.warn(
+          { slot: `${currentStart}-${slotEnd}` },
+          'backfill: no API response for this slot',
+        );
+      }
+
       slotsScanned += 1;
 
       const nextStart = nextTimeframe(currentStart);
       if (nextStart > endNorm) break;
 
+      // Clear old responses before advancing to avoid re-reading stale data.
+      mmeResponses.length = 0;
+      mmcResponses.length = 0;
+
       await advanceTimeframeOneSlot(page);
-      // Wait for table to re-render under the new timeframe. UW's
-      // data fetch is ~1s under DTE=0 + specific date.
+      // Wait for chart to re-render under the new timeframe.
       await page.waitForTimeout(1_500);
 
       currentStart = nextStart;
@@ -1231,6 +1430,27 @@ export async function scrapeBackfillRange(
   const dates = tradingDaysBetween(startDate, endDate);
 
   return await withBrowser(async (_browser, page) => {
+    // Set up API interception
+    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
+    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
+
+    page.on('response', (response) => {
+      const url = response.url();
+      const ct = response.headers()['content-type'] ?? '';
+      if (ct.includes('json')) {
+        if (url.includes('market_maker_exposures')) {
+          response.json().then((body) => {
+            mmeResponses.push({ url, body: body as ApiExposureResponse });
+          }).catch(() => undefined);
+        }
+        if (url.includes('market_maker_contracts')) {
+          response.json().then((body) => {
+            mmcResponses.push({ url, body: body as ApiContractsResponse });
+          }).catch(() => undefined);
+        }
+      }
+    });
+
     logger.info(
       {
         startDate,
@@ -1254,23 +1474,12 @@ export async function scrapeBackfillRange(
       };
     }
 
-    // Range backfill prep: navigate to Periscope but DON'T set DTE=0-0.
-    // Each day inside the loop walks the calendar to its date and uses
-    // setExpirySingle(date) to pin Expiry to that day's 0DTE — which is
-    // the only filter path that actually returns rows for historical
-    // dates (DTE=0-0 returns "No data available", verified 2026-05-08).
     logger.info({ url: UW_PERISCOPE_URL }, 'navigating to periscope');
     await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
-    const firstRow = page.locator('tr.table_row__wxw5u').first();
-    const emptyState = page.getByText(/no data available/i).first();
-    try {
-      await Promise.race([
-        firstRow.waitFor({ state: 'visible', timeout: 20_000 }),
-        emptyState.waitFor({ state: 'visible', timeout: 20_000 }),
-      ]);
-    } catch {
-      logger.warn('initial page render did not settle within 20s');
-    }
+    await waitForChartReady(page);
+
+    // Collapse the left nav sidebar to maximize chart area.
+    await clickZoomOut(page);
 
     let totalRowsInserted = 0;
     let daysScanned = 0;
@@ -1290,7 +1499,7 @@ export async function scrapeBackfillRange(
             `setExpirySingle(${date}) failed — date may be outside Single-mode dropdown for this chart frame`,
           );
         }
-        await waitForTableReady(page);
+        await waitForChartReady(page);
         await walkTimeframeToTarget(page, startNorm);
         await page.waitForTimeout(1_500);
 
@@ -1301,19 +1510,42 @@ export async function scrapeBackfillRange(
         while (currentStart <= endNorm) {
           const slotEnd = nextTimeframe(currentStart);
           const capturedAt = computeCapturedAt(date, slotEnd);
-          const slotRows = await captureCurrentSlot(page, capturedAt);
-          dayRows.push(...slotRows);
+
+          // Wait for API response
+          await page.waitForLoadState('networkidle').catch(() => undefined);
+          await page.waitForTimeout(1_000);
+
+          const latestMme = [...mmeResponses]
+            .reverse()
+            .find(r => r.url.includes(`expiry=${date}`))
+            ?? mmeResponses[mmeResponses.length - 1];
+
+          if (latestMme) {
+            const { rows, qualifyingStrikes } = apiResponseToRows(latestMme.body, capturedAt);
+            dayRows.push(...rows);
+
+            const latestMmc = [...mmcResponses]
+              .reverse()
+              .find(r => r.url.includes(`expiry=${date}`))
+              ?? mmcResponses[mmcResponses.length - 1];
+            if (latestMmc) {
+              dayRows.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
+            }
+          }
+
           slotsScanned += 1;
 
           const nextStart = nextTimeframe(currentStart);
           if (nextStart > endNorm) break;
+
+          mmeResponses.length = 0;
+          mmcResponses.length = 0;
           await advanceTimeframeOneSlot(page);
           await page.waitForTimeout(1_500);
           currentStart = nextStart;
         }
 
-        // Insert this day's rows. ON CONFLICT DO NOTHING in db.ts means
-        // a re-run for the same day is idempotent.
+        // Insert this day's rows.
         const inserted = await insertSnapshots(dayRows);
         totalRowsInserted += inserted;
         daysScanned += 1;

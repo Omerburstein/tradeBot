@@ -22,7 +22,7 @@
  * `~/.periscope-probe-auth.json` (gitignored — never commit).
  *
  * Step 2 — capture. Run without flags. The script reuses the saved
- * session, navigates to PERISCOPE_URL, waits for the chart to render,
+ * session, navigates to UW_PERISCOPE_URL, waits for the chart to render,
  * then writes:
  *   docs/tmp/periscope-probe/<timestamp>/page.html   — full DOM snapshot
  *   docs/tmp/periscope-probe/<timestamp>/page.png    — screenshot for cross-ref
@@ -33,15 +33,15 @@
  *   - Node 24+
  *   - Playwright installed at the repo root: `npm i -D playwright`
  *     (one-time; install Chromium with `npx playwright install chromium`)
- *   - PERISCOPE_URL env var pointing at a 4-panel Periscope view, e.g.
+ *   - UW_PERISCOPE_URL env var pointing at a 4-panel Periscope view, e.g.
  *     `https://unusualwhales.com/periscope?....` Configure your
  *     preferred panels (Gamma + Charm + Vanna + Positions) in the UW
  *     UI BEFORE running this — the probe captures whatever's rendered.
  *
  * Usage
  * -----
- *   PERISCOPE_URL='https://...' node scripts/periscope-probe.mjs --login
- *   PERISCOPE_URL='https://...' node scripts/periscope-probe.mjs
+ *   UW_PERISCOPE_URL='https://...' node scripts/periscope-probe.mjs --login
+ *   UW_PERISCOPE_URL='https://...' node scripts/periscope-probe.mjs
  */
 
 import { chromium } from 'playwright';
@@ -54,7 +54,7 @@ import process from 'node:process';
 const AUTH_PATH = join(homedir(), '.periscope-probe-auth.json');
 const OUT_ROOT = resolve(process.cwd(), 'docs/tmp/periscope-probe');
 
-const PERISCOPE_URL = process.env.PERISCOPE_URL;
+const UW_PERISCOPE_URL = process.env.UW_PERISCOPE_URL;
 const LOGIN_BASE = 'https://unusualwhales.com/login';
 
 const isLoginMode = process.argv.includes('--login');
@@ -140,14 +140,14 @@ async function loginFlow() {
   await writeFile(AUTH_PATH, JSON.stringify(state, null, 2), 'utf8');
   console.log(`▸ Saved auth state to ${AUTH_PATH} (${cookieCount} cookies)`);
   console.log(
-    '▸ Now re-run without --login (and with PERISCOPE_URL set) to capture.',
+    '▸ Now re-run without --login (and with UW_PERISCOPE_URL set) to capture.',
   );
 }
 
 async function captureFlow() {
-  if (!PERISCOPE_URL) {
+  if (!UW_PERISCOPE_URL) {
     console.error(
-      'ERROR: PERISCOPE_URL is required. Set it to your Periscope URL.',
+      'ERROR: UW_PERISCOPE_URL is required. Set it to your Periscope URL.',
     );
     process.exit(1);
   }
@@ -170,9 +170,9 @@ async function captureFlow() {
   });
   const page = await context.newPage();
 
-  console.log(`▸ Navigating to ${PERISCOPE_URL}…`);
+  console.log(`▸ Navigating to ${UW_PERISCOPE_URL}…`);
   const navStart = Date.now();
-  await page.goto(PERISCOPE_URL, { waitUntil: 'networkidle' });
+  await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
 
   // Periscope renders values via JS after the network settles. Wait a
   // bit longer for the bars/values to fully populate. The probe is
@@ -190,7 +190,7 @@ async function captureFlow() {
 
   const meta = {
     captured_at: new Date().toISOString(),
-    url: PERISCOPE_URL,
+    url: UW_PERISCOPE_URL,
     nav_duration_ms: Date.now() - navStart,
     viewport: { width: 1920, height: 1200 },
     user_agent: await page.evaluate(() => navigator.userAgent),
