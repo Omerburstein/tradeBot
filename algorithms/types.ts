@@ -136,12 +136,38 @@ export interface AlgoConfig {
   /** Weight for net MM positions rate-of-change. */
   wDPositions: number;
 
+  // ── Non-linearity (powers) ──
+  // Each factor input is passed through a sign-preserving power
+  // (signedPow(x, p) = sign(x)·|x|^p) before aggregation. p > 1 emphasizes
+  // large readings, p < 1 saturates them. Nothing is left exactly linear.
+
+  /** Exponent on per-strike gamma. */
+  pGamma: number;
+  /** Exponent on per-strike gamma change (dGamma/dt). */
+  pDGamma: number;
+  /** Exponent on per-strike net positions (saturating, < 1). */
+  pPositions: number;
+  /** Exponent on per-strike positions change (dPositions/dt). */
+  pDPositions: number;
+  /** Exponent on normalized strike distance in the distance-weight ramp. */
+  pDistance: number;
+
+  /** Span of the distance-weight ramp: weight = 1 + span·(dist/window)^pDistance. */
+  distanceWeightSpan: number;
+
   /**
    * Minimum gamma strength (a strike's |gamma| as a fraction of the window's
    * max |gamma|, 0–1) required for that strike's positions to count at all.
    * Positions where gamma is weak carry no signal regardless of size.
    */
   positionsGammaGate: number;
+
+  /**
+   * Hard cap on the absolute value of every factor z-score (and therefore the
+   * composite). A one-off anomaly can't produce z=10 and dominate — it's
+   * clamped to ±zClamp.
+   */
+  zClamp: number;
 
   /** Z-score threshold for standard entries (cone-breach). */
   entryThreshold: number;
@@ -170,7 +196,15 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   wPositions: 0.18,
   wDPositions: 0.12,
 
+  pGamma: 1.2,
+  pDGamma: 1.1,
+  pPositions: 0.5,
+  pDPositions: 0.5,
+  pDistance: 1.5,
+  distanceWeightSpan: 2.0,
+
   positionsGammaGate: 0.30,
+  zClamp: 3.5,
 
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,

@@ -120,3 +120,52 @@ export async function insertSpotPrice(
     [capturedAt, expiry, spot],
   );
 }
+
+/**
+ * Batch-insert spot price observations into `spot_prices` (one per
+ * 10-min slot). Same lazy table-create + idempotency as the single-row
+ * `insertSpotPrice`, but folds a whole day's slots into 500-row chunks
+ * so a backfill / read-all run doesn't pay one round-trip per slot.
+ *
+ * Returns the count of rows submitted (conflicts silently skipped).
+ */
+export async function insertSpotPrices(
+  spots: ReadonlyArray<{ capturedAt: string; expiry: string; spot: number }>,
+): Promise<number> {
+  if (spots.length === 0) return 0;
+
+  const sql = getDb();
+
+  await sql(
+    `CREATE TABLE IF NOT EXISTS spot_prices (
+       captured_at TIMESTAMPTZ NOT NULL,
+       date        DATE NOT NULL,
+       spot        NUMERIC(10, 2) NOT NULL,
+       PRIMARY KEY (captured_at, date)
+     )`,
+    [],
+  );
+
+  let submitted = 0;
+  for (let i = 0; i < spots.length; i += MAX_ROWS_PER_INSERT) {
+    const chunk = spots.slice(i, i + MAX_ROWS_PER_INSERT);
+
+    const placeholders: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    for (const s of chunk) {
+      placeholders.push(`($${p++}, $${p++}, $${p++})`);
+      params.push(s.capturedAt, s.expiry, s.spot);
+    }
+
+    const text =
+      `INSERT INTO spot_prices (captured_at, date, spot) ` +
+      `VALUES ${placeholders.join(', ')} ` +
+      `ON CONFLICT (captured_at, date) DO NOTHING`;
+
+    await sql(text, params);
+    submitted += chunk.length;
+  }
+
+  return submitted;
+}

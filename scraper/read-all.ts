@@ -14,8 +14,8 @@
  *
  * Optional env overrides (defaults match the live cron's analyzable
  * window and a glitch-tolerant stop):
- *   READ_ALL_START      slot-start HH:MM   (default 08:20)
- *   READ_ALL_END        slot-start HH:MM   (default 14:50)
+ *   READ_ALL_START      slot-start HH:MM ET (default 09:20)
+ *   READ_ALL_END        slot-start HH:MM ET (default 15:50)
  *   READ_ALL_MAX_EMPTY  stop after N consecutive empty/failed days (default 3)
  *   READ_ALL_FLOOR      hard lower-bound date YYYY-MM-DD (optional safety stop)
  *
@@ -61,8 +61,8 @@ const { scrapeWalkBack } = await import('./scrape.js');
 
 const logger = pino({ level: LOG_LEVEL });
 
-const startHhmm = (process.env.READ_ALL_START ?? '').trim() || '08:20';
-const endHhmm = (process.env.READ_ALL_END ?? '').trim() || '14:50';
+const startHhmm = (process.env.READ_ALL_START ?? '').trim() || '09:20';
+const endHhmm = (process.env.READ_ALL_END ?? '').trim() || '15:50';
 const maxEmptyRaw = (process.env.READ_ALL_MAX_EMPTY ?? '').trim();
 const maxConsecutiveEmpty =
   maxEmptyRaw !== '' && Number.isFinite(Number(maxEmptyRaw))

@@ -38,10 +38,10 @@ function check(label: string, cond: boolean, detail?: string): void {
   }
 }
 
-/** Format an ISO-8601 UTC instant as "HH:MM" in America/Chicago (CT). */
-function ctHhmm(iso: string): string {
+/** Format an ISO-8601 UTC instant as "HH:MM" in America/New_York (ET). */
+function etHhmm(iso: string): string {
   return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
+    timeZone: 'America/New_York',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
@@ -140,13 +140,13 @@ async function main(): Promise<void> {
   check('capturedAt is a valid ISO instant', !Number.isNaN(capturedDate.getTime()), `capturedAt="${capturedAt}"`);
 
   if (tfMatch && !Number.isNaN(capturedDate.getTime())) {
-    // Slot-END invariant: capturedAt (in CT) must equal the timeframe END.
+    // Slot-END invariant: capturedAt (in ET) must equal the timeframe END.
     const endHhmm = `${tfMatch[3]}:${tfMatch[4]}`;
-    const capturedCt = ctHhmm(capturedAt);
+    const capturedEt = etHhmm(capturedAt);
     check(
-      'capturedAt == slot END time in CT (slot-END invariant)',
-      capturedCt === endHhmm,
-      `capturedAt is ${capturedCt} CT but timeframe end is ${endHhmm}`,
+      'capturedAt == slot END time in ET (slot-END invariant)',
+      capturedEt === endHhmm,
+      `capturedAt is ${capturedEt} ET but timeframe end is ${endHhmm}`,
     );
   }
 }

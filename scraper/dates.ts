@@ -2,24 +2,33 @@
  * Date utilities for the scraper. Kept dependency-free so unit tests
  * can import them without booting `config.ts` (which validates env
  * vars at module load).
+ *
+ * TIMEZONE: all wall-clock interpretation is anchored to Eastern Time
+ * (America/New_York), matching exactly what the UW Periscope dashboard
+ * displays. ET is always one hour ahead of the SPX pit's CT, so the
+ * RTH/active-window bounds below are the ET equivalents of the old CT
+ * bounds (same real-world instants). `captured_at` remains an absolute
+ * UTC instant and is unaffected by this choice — only the wall-clock
+ * representation moved CT→ET.
  */
+
+const MARKET_TZ = 'America/New_York';
 
 /**
  * Compute the captured_at ISO timestamp for a backfilled slot.
  *
  * `date` is YYYY-MM-DD, `slotEndHhmm` is the slot's end time as
- * displayed by UW (which Periscope renders in CT for the typical
- * install). Returns the UTC ISO that corresponds to that CT
- * wall-clock instant.
+ * displayed by UW (Eastern Time — what the dashboard shows). Returns
+ * the UTC ISO that corresponds to that ET wall-clock instant.
  *
  * REGRESSION (2026-05-10): An earlier version of this function used
  * `new Date('YYYY-MM-DDTHH:MM:00').toISOString()` and relied on the
- * Railway container being configured with `TZ=America/Chicago`. When
- * the container ran in UTC (default), every backfilled `captured_at`
- * was shifted 5 hours earlier. That corrupted 5/4-5/7 snapshots and
- * caused ~$50 of stale Claude reads in the auto-playbook backfill.
+ * Railway container being configured with a fixed TZ. When the
+ * container ran in UTC (default), every backfilled `captured_at` was
+ * shifted hours earlier. That corrupted 5/4-5/7 snapshots and caused
+ * ~$50 of stale Claude reads in the auto-playbook backfill.
  *
- * This implementation computes the CT-to-UTC offset explicitly via
+ * This implementation computes the ET-to-UTC offset explicitly via
  * Intl.DateTimeFormat, which is correct regardless of container TZ
  * and handles DST transitions automatically.
  */
@@ -38,14 +47,14 @@ export function computeCapturedAt(date: string, slotEndHhmm: string): string {
       `computeCapturedAt: malformed inputs date="${date}" slotEnd="${slotEndHhmm}"`,
     );
   }
-  // Convergence loop: probe a UTC instant pretending CT values are
-  // UTC values, read back what CT actually was at that instant, and
+  // Convergence loop: probe a UTC instant pretending ET values are
+  // UTC values, read back what ET actually was at that instant, and
   // shift by the gap. Two passes suffice (one pass corrects the
   // wrong-offset guess; second pass corrects any DST cusp).
   let probeUtcMs = Date.UTC(y!, m! - 1, d!, hh!, mm!, 0);
   for (let pass = 0; pass < 2; pass += 1) {
-    const ctParts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Chicago',
+    const etPartsList = new Intl.DateTimeFormat('en-US', {
+      timeZone: MARKET_TZ,
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -55,8 +64,8 @@ export function computeCapturedAt(date: string, slotEndHhmm: string): string {
       hourCycle: 'h23',
     }).formatToParts(new Date(probeUtcMs));
     const get = (t: string) =>
-      Number.parseInt(ctParts.find((p) => p.type === t)?.value ?? '0', 10);
-    const ctMs = Date.UTC(
+      Number.parseInt(etPartsList.find((p) => p.type === t)?.value ?? '0', 10);
+    const etMs = Date.UTC(
       get('year'),
       get('month') - 1,
       get('day'),
@@ -65,57 +74,57 @@ export function computeCapturedAt(date: string, slotEndHhmm: string): string {
       get('second'),
     );
     const targetMs = Date.UTC(y!, m! - 1, d!, hh!, mm!, 0);
-    probeUtcMs += targetMs - ctMs;
+    probeUtcMs += targetMs - etMs;
   }
   return new Date(probeUtcMs).toISOString();
 }
 
 /**
- * Returns true when the given UTC instant maps to a CT wall-clock
- * time inside RTH (08:30-15:00 CT inclusive). DST-aware via
+ * Returns true when the given UTC instant maps to an ET wall-clock
+ * time inside RTH (09:30-16:00 ET inclusive). DST-aware via
  * Intl.DateTimeFormat. Mon-Fri only.
  *
  * Used by the auto-playbook webhook guard to reject stale captures
  * that landed outside trading hours.
  */
-export function isCtInRth(d: Date): boolean {
-  const { weekday, minutesSinceMidnight } = ctParts(d);
+export function isInRth(d: Date): boolean {
+  const { weekday, minutesSinceMidnight } = etParts(d);
   if (weekday === 'Sat' || weekday === 'Sun') return false;
-  return minutesSinceMidnight >= 8 * 60 + 30 && minutesSinceMidnight <= 15 * 60;
+  return minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight <= 16 * 60;
 }
 
 /**
  * Returns true when the given UTC instant is inside the scraper's
- * active polling window: Mon-Fri, 08:21-15:14 CT. DST-aware.
+ * active polling window: Mon-Fri, 09:21-16:14 ET. DST-aware.
  *
  * Window bounds:
- *   - 08:21 CT — earliest a 10-min slot ending at 08:20 could appear
+ *   - 09:21 ET — earliest a 10-min slot ending at 09:20 could appear
  *     in UW's "Latest" panel (publication lag is typically 1-3 min).
- *   - 15:14 CT — latest tick that can still capture the debrief slot
- *     ("14:50 - 15:00") within the auto-playbook's 15:15 CT wallclock
+ *   - 16:14 ET — latest tick that can still capture the debrief slot
+ *     ("15:50 - 16:00") within the auto-playbook's 16:15 ET wallclock
  *     ceiling. Beyond this the scraper has nothing useful to do.
  *
  * Outside this window the scraper resets its dedup state and sleeps
  * until the next active window.
  */
 export function isInActivePollingWindow(d: Date): boolean {
-  const { weekday, minutesSinceMidnight } = ctParts(d);
+  const { weekday, minutesSinceMidnight } = etParts(d);
   if (weekday === 'Sat' || weekday === 'Sun') return false;
   return (
-    minutesSinceMidnight >= 8 * 60 + 21 && minutesSinceMidnight <= 15 * 60 + 14
+    minutesSinceMidnight >= 9 * 60 + 21 && minutesSinceMidnight <= 16 * 60 + 14
   );
 }
 
 /**
  * Return the end time (HH:MM) of the most recently CLOSED 10-min UW
- * slot at the given instant, in CT. DST-aware. Returns null when the
- * instant is before the first 10-min boundary of the day (00:10 CT).
+ * slot at the given instant, in ET. DST-aware. Returns null when the
+ * instant is before the first 10-min boundary of the day (00:10 ET).
  *
- * Examples (all CT):
- *   08:30:00 → "08:30"  (the 08:20-08:30 slot just closed)
- *   08:32:15 → "08:30"
- *   08:39:59 → "08:30"
- *   08:40:00 → "08:40"  (the 08:30-08:40 slot just closed)
+ * Examples (all ET):
+ *   09:30:00 → "09:30"  (the 09:20-09:30 slot just closed)
+ *   09:32:15 → "09:30"
+ *   09:39:59 → "09:30"
+ *   09:40:00 → "09:40"  (the 09:30-09:40 slot just closed)
  *
  * Used by the scraper to know which slot end-time to expect from UW's
  * "Latest" panel. When lastCapturedWindowEnd === expectedWindowEnd, we
@@ -123,7 +132,7 @@ export function isInActivePollingWindow(d: Date): boolean {
  * the next 10-min boundary closes.
  */
 export function expectedWindowEnd(d: Date): string | null {
-  const { hour, minute } = ctParts(d);
+  const { hour, minute } = etParts(d);
   const totalMin = hour * 60 + minute;
   if (totalMin < 10) return null;
   const endMin = Math.floor(totalMin / 10) * 10;
@@ -143,14 +152,14 @@ export function parseSlotEnd(slotKey: string): string | null {
   return `${pad2(Number.parseInt(m[1]!, 10))}:${m[2]}`;
 }
 
-function ctParts(d: Date): {
+function etParts(d: Date): {
   hour: number;
   minute: number;
   weekday: string;
   minutesSinceMidnight: number;
 } {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
+    timeZone: MARKET_TZ,
     weekday: 'short',
     hour: '2-digit',
     minute: '2-digit',

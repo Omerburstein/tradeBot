@@ -41,7 +41,7 @@ import pino from 'pino';
 // through this module gets the full stealth bundle.
 chromiumExtra.use(StealthPlugin());
 import { LOG_LEVEL, UW_AUTH_STATE_PATH, UW_PERISCOPE_URL } from './config.js';
-import { insertSnapshots } from './db.js';
+import { insertSnapshots, insertSpotPrices } from './db.js';
 import { parseDateLabel } from './parser.js';
 import type { Panel, SnapshotRow } from './types.js';
 
@@ -179,16 +179,16 @@ function parseTimeframeStart(label: string): string | null {
 }
 
 /**
- * Today's date in America/Chicago, formatted as YYYY-MM-DD. Used by
- * the live scraper to walk the date picker to the current trading
+ * Today's date in America/New_York (ET), formatted as YYYY-MM-DD. Used
+ * by the live scraper to walk the date picker to the current trading
  * day regardless of whatever's saved in the storageState.
  *
  * `Intl.DateTimeFormat` with `en-CA` locale yields ISO-style
  * YYYY-MM-DD format directly — no manual zero-padding needed.
  */
-function todayInCT(): string {
+function todayInET(): string {
   return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Chicago',
+    timeZone: 'America/New_York',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -203,7 +203,7 @@ function prevDay(ymd: string): string {
 
 /**
  * The latest date for which UW market data is available.
- * Returns today if the market has already opened (past 08:20 CT) and
+ * Returns today if the market has already opened (past 09:20 ET) and
  * today is a trading day. Otherwise walks backwards past weekends and
  * holidays until it finds the most recent trading day.
  */
@@ -211,20 +211,20 @@ function latestTradingDay(): string {
   const now = new Date();
 
   const todayYmd = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Chicago',
+    timeZone: 'America/New_York',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
   }).format(now);
 
   const hhmm = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
+    timeZone: 'America/New_York',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
   }).format(now);
 
-  let candidate = hhmm >= '08:20' ? todayYmd : prevDay(todayYmd);
+  let candidate = hhmm >= '09:20' ? todayYmd : prevDay(todayYmd);
 
   while (true) {
     const dow = new Date(`${candidate}T12:00:00Z`).getUTCDay();
@@ -263,7 +263,7 @@ function nextTimeframe(slotStartHhmm: string): string {
   return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}`;
 }
 
-// computeCapturedAt + isCtInRth live in ./dates.ts so unit tests can
+// computeCapturedAt + isInRth live in ./dates.ts so unit tests can
 // exercise them without booting config.ts (which validates env vars
 // at module load). Imported for internal use AND re-exported so
 // existing callers (and tests) keep working unchanged.
@@ -271,13 +271,14 @@ import { computeCapturedAt } from './dates.js';
 export { computeCapturedAt };
 
 /**
- * Convert a UTC ISO timestamp (from the API response) to a CT HH:MM
- * string. Used to derive the timeframe label for DB rows.
+ * Convert a UTC ISO timestamp (from the API response) to an ET HH:MM
+ * string. Used to derive the timeframe label for DB rows so it matches
+ * exactly what the UW dashboard shows (Eastern Time).
  */
-function utcToCTHhmm(utcIso: string): string {
+function utcToETHhmm(utcIso: string): string {
   const d = new Date(utcIso);
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
+    timeZone: 'America/New_York',
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23',
@@ -290,14 +291,14 @@ function utcToCTHhmm(utcIso: string): string {
 /**
  * Derive a UW-style timeframe label from an API timestamp.
  * The API timestamp represents the slot END time.
- * Returns e.g. "08:20 - 08:30" from the end time "08:30".
+ * Returns e.g. "09:20 - 09:30" (ET) from the end time "09:30".
  */
 function apiTimestampToTimeframe(utcIso: string): string {
-  const endHhmm = utcToCTHhmm(utcIso);
+  const endHhmm = utcToETHhmm(utcIso);
   // Slot start is 10 minutes before end
   const d = new Date(utcIso);
   d.setMinutes(d.getMinutes() - 10);
-  const startHhmm = utcToCTHhmm(d.toISOString());
+  const startHhmm = utcToETHhmm(d.toISOString());
   return `${startHhmm} - ${endHhmm}`;
 }
 
@@ -817,8 +818,8 @@ export function tradingDaysBetween(
 
 /**
  * Walk the timeframe-widget chevrons until the displayed slot starts at
- * `targetStartHhmm`. Caps at 80 attempts (covers the full 8:20–15:00
- * day plus a buffer).
+ * `targetStartHhmm` (ET — the widget renders in the browser's ET tz).
+ * Caps at 80 attempts (covers the full 9:20–16:00 day plus a buffer).
  */
 async function walkTimeframeToTarget(
   page: Page,
@@ -937,7 +938,7 @@ async function withBrowser<T>(
       userAgent:
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       locale: 'en-US',
-      timezoneId: 'America/Chicago',
+      timezoneId: 'America/New_York',
     });
     // Hide navigator.webdriver before any page script runs.
     await context.addInitScript(() => {
@@ -951,26 +952,78 @@ async function withBrowser<T>(
 }
 
 /**
- * Collapse the left navigation sidebar to give the chart panel more
- * horizontal space. The sidebar has a hamburger button with
- * aria-label="Collapse sidebar" (SidebarHeader.tsx). When collapsed,
- * the aria-label changes to "Expand sidebar" — so we only click when
- * the collapse button is visible.
+ * Read the strike-axis tick labels currently rendered on the chart and return
+ * the furthest distance (in points) from `spot`, or null if none are readable.
  *
- * Called once after the page loads and the chart is ready, before any
- * date/filter manipulation begins.
+ * The strike axis is drawn as SVG `<text>` ticks (e.g. `7375` … `7600`). Other
+ * panels on the page also draw numeric SVG text, so we keep only labels within
+ * 1000 points of spot — SPX strikes always sit within a few hundred points of
+ * the underlying, while unrelated labels are far outside that band.
  */
-async function clickZoomOut(page: Page): Promise<void> {
+async function furthestVisibleStrikeDistance(
+  page: Page,
+  spot: number,
+): Promise<number | null> {
+  const strikes = await page.evaluate(() => {
+    const out: number[] = [];
+    for (const t of Array.from(document.querySelectorAll('svg text'))) {
+      const txt = t.textContent?.trim() ?? '';
+      if (/^\d{3,6}$/.test(txt)) out.push(Number(txt));
+    }
+    return out;
+  });
+  let max: number | null = null;
+  for (const s of strikes) {
+    const dist = Math.abs(s - spot);
+    if (dist > 1000) continue; // exclude numeric labels from other panels
+    if (max === null || dist > max) max = dist;
+  }
+  return max;
+}
+
+/**
+ * Zoom the chart out until the furthest visible strike is at least
+ * `minStrikeDistance` points from the current SPX price (or the zoom-out
+ * button runs out / we hit `maxClicks`). Each click widens the strike axis,
+ * so the furthest-strike distance grows monotonically toward the threshold.
+ *
+ * Called after the page loads and the chart is ready, before any date/filter
+ * manipulation begins.
+ */
+async function clickZoomOut(
+  page: Page,
+  minStrikeDistance = 120,
+  maxClicks = 12,
+): Promise<void> {
   const zoomOutBtn = page.locator('svg.lucide-zoom-out').locator('..');
-  const count = await zoomOutBtn.count();
-  if (count > 0) {
+  if ((await zoomOutBtn.count()) === 0) {
+    logger.debug('zoom-out button not found');
+    return;
+  }
+
+  for (let clicks = 0; clicks < maxClicks; clicks++) {
+    const spot = await readSpotPrice(page);
+    const dist =
+      spot !== null ? await furthestVisibleStrikeDistance(page, spot) : null;
+    if (dist !== null && dist >= minStrikeDistance) {
+      logger.info(
+        { dist, minStrikeDistance, clicks },
+        'zoom-out: furthest strike far enough — stopping',
+      );
+      return;
+    }
     await zoomOutBtn.first().click();
     // Wait for the chart to re-render after zoom change.
     await page.waitForTimeout(500);
-    logger.info('zoom-out (minimize) clicked');
-  } else {
-    logger.debug('zoom-out button not found');
   }
+
+  const spot = await readSpotPrice(page);
+  const dist =
+    spot !== null ? await furthestVisibleStrikeDistance(page, spot) : null;
+  logger.warn(
+    { dist, minStrikeDistance, maxClicks },
+    'zoom-out: hit max clicks before reaching target strike distance',
+  );
 }
 
 /**
@@ -1091,7 +1144,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
 
     // TARGET_DATE overrides the date to scrape. Useful for running against
     // the previous trading day when today's market hasn't opened yet.
-    // Must be YYYY-MM-DD. Defaults to today in CT when not set.
+    // Must be YYYY-MM-DD. Defaults to the latest trading day (ET) when not set.
     const rawTargetDate = (process.env.TARGET_DATE ?? '').trim();
     const today =
       /^\d{4}-\d{2}-\d{2}$/.test(rawTargetDate) ? rawTargetDate : latestTradingDay();
@@ -1221,7 +1274,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
 
     // Derive capturedAt from the API timestamp (slot end time).
     const apiTimeframe = apiTimestampToTimeframe(bestResponse.timestamp);
-    const apiEndHhmm = utcToCTHhmm(bestResponse.timestamp);
+    const apiEndHhmm = utcToETHhmm(bestResponse.timestamp);
     const capturedAt = computeCapturedAt(bestResponse.date, apiEndHhmm);
 
     const { rows, timeframe, expiry, qualifyingStrikes } = apiResponseToRows(bestResponse, capturedAt);
@@ -1303,7 +1356,11 @@ async function scrapeDayRows(
   endNorm: string,
   mmeResponses: Array<{ url: string; body: ApiExposureResponse }>,
   mmcResponses: Array<{ url: string; body: ApiContractsResponse }>,
-): Promise<{ rows: SnapshotRow[]; slotsScanned: number }> {
+): Promise<{
+  rows: SnapshotRow[];
+  spots: Array<{ capturedAt: string; expiry: string; spot: number }>;
+  slotsScanned: number;
+}> {
   // Drop any responses left over from the previous day's last slot so
   // the `?? last` fallback below can't read stale data for this date.
   mmeResponses.length = 0;
@@ -1322,6 +1379,7 @@ async function scrapeDayRows(
   await page.waitForTimeout(1_500);
 
   const dayRows: SnapshotRow[] = [];
+  const daySpots: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
   let currentStart = startNorm;
   let slotsScanned = 0;
 
@@ -1339,8 +1397,13 @@ async function scrapeDayRows(
       ?? mmeResponses[mmeResponses.length - 1];
 
     if (latestMme) {
-      const { rows, qualifyingStrikes } = apiResponseToRows(latestMme.body, capturedAt);
+      const { rows, qualifyingStrikes, spot, expiry } = apiResponseToRows(latestMme.body, capturedAt);
       dayRows.push(...rows);
+
+      // Record this slot's SPX spot (one observation per 10-min window).
+      if (Number.isFinite(spot) && spot > 0) {
+        daySpots.push({ capturedAt, expiry, spot });
+      }
 
       const latestMmc = [...mmcResponses]
         .reverse()
@@ -1363,7 +1426,7 @@ async function scrapeDayRows(
     currentStart = nextStart;
   }
 
-  return { rows: dayRows, slotsScanned };
+  return { rows: dayRows, spots: daySpots, slotsScanned };
 }
 
 /**
@@ -1376,7 +1439,7 @@ async function scrapeDayRows(
  * We intercept those responses to parse the data.
  *
  * The captured_at on each row is computed from the slot's END time
- * (e.g. an "08:20 - 08:30" slot stamps captured_at=08:30) so a
+ * (e.g. a "09:20 - 09:30" ET slot stamps captured_at=09:30 ET) so a
  * backfilled day reproduces the live cron's row stamping.
  */
 export async function scrapeBackfill(
@@ -1425,7 +1488,7 @@ export async function scrapeBackfill(
     await clickZoomOut(page);
 
     // Walk the chart date to the target.
-    if (targetDate !== todayInCT()) {
+    if (targetDate !== todayInET()) {
       await walkDateToTarget(page, targetDate);
       await page.waitForTimeout(1_500);
     }
@@ -1442,6 +1505,7 @@ export async function scrapeBackfill(
     await page.waitForTimeout(1_500);
 
     const allRows: SnapshotRow[] = [];
+    const allSpots: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
     let currentStart = startNorm;
     let slotsScanned = 0;
 
@@ -1465,8 +1529,13 @@ export async function scrapeBackfill(
         ?? mmeResponses[mmeResponses.length - 1];
 
       if (latestMme) {
-        const { rows, qualifyingStrikes } = apiResponseToRows(latestMme.body, capturedAt);
+        const { rows, qualifyingStrikes, spot, expiry } = apiResponseToRows(latestMme.body, capturedAt);
         allRows.push(...rows);
+
+        // Record this slot's SPX spot (one observation per 10-min window).
+        if (Number.isFinite(spot) && spot > 0) {
+          allSpots.push({ capturedAt, expiry, spot });
+        }
 
         // Also capture positions from contracts API.
         const latestMmc = [...mmcResponses]
@@ -1499,8 +1568,13 @@ export async function scrapeBackfill(
       currentStart = nextStart;
     }
 
+    // Persist per-slot spot prices. Snapshot rows are returned for the
+    // caller to insert (index.ts), but spots have no other consumer, so
+    // we write them here to keep the single-date path self-contained.
+    const spotsInserted = await insertSpotPrices(allSpots);
+
     logger.info(
-      { totalRows: allRows.length, slotsScanned },
+      { totalRows: allRows.length, spotsInserted, slotsScanned },
       'backfill: complete',
     );
     return allRows;
@@ -1592,7 +1666,7 @@ export async function scrapeBackfillRange(
       logger.info({ date, progress }, 'backfill range: starting day');
 
       try {
-        const { rows: dayRows, slotsScanned } = await scrapeDayRows(
+        const { rows: dayRows, spots: daySpots, slotsScanned } = await scrapeDayRows(
           page,
           date,
           startNorm,
@@ -1601,8 +1675,9 @@ export async function scrapeBackfillRange(
           mmcResponses,
         );
 
-        // Insert this day's rows.
+        // Insert this day's rows + per-slot spot prices.
         const inserted = await insertSnapshots(dayRows);
+        const spotsInserted = await insertSpotPrices(daySpots);
         totalRowsInserted += inserted;
         daysScanned += 1;
 
@@ -1613,6 +1688,7 @@ export async function scrapeBackfillRange(
             slotsScanned,
             rowsParsed: dayRows.length,
             inserted,
+            spotsInserted,
             totalRowsInserted,
             daysFailed: daysFailed.length,
             ms: Date.now() - dayStarted,
@@ -1740,7 +1816,7 @@ export async function scrapeWalkBack(opts: {
       logger.info({ date, consecutiveEmpty }, 'walk-back: starting day');
 
       try {
-        const { rows: dayRows, slotsScanned } = await scrapeDayRows(
+        const { rows: dayRows, spots: daySpots, slotsScanned } = await scrapeDayRows(
           page,
           date,
           startNorm,
@@ -1750,6 +1826,7 @@ export async function scrapeWalkBack(opts: {
         );
 
         const inserted = await insertSnapshots(dayRows);
+        const spotsInserted = await insertSpotPrices(daySpots);
         totalRowsInserted += inserted;
         daysScanned += 1;
 
@@ -1770,6 +1847,7 @@ export async function scrapeWalkBack(opts: {
               slotsScanned,
               rowsParsed: dayRows.length,
               inserted,
+              spotsInserted,
               totalRowsInserted,
               ms: Date.now() - dayStarted,
             },

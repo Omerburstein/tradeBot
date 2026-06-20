@@ -65,25 +65,28 @@ export function computeScore(
     // Directional sign: +1 above spot, -1 below, 0 at-the-money
     const sign = distance > 0 ? 1 : distance < 0 ? -1 : 0;
 
-    // Factor 4: Distance weighting — further strikes get MORE weight
-    // Linear ramp: ATM gets 1.0x, edge of window gets 3.0x
-    const dWeight = 1.0 + 2.0 * (absDistance / config.strikeWindow);
+    // Factor 5: Distance weighting — further strikes get MORE weight.
+    // Non-linear ramp: ATM gets 1.0x, edge of window gets (1 + span)x,
+    // curved by pDistance.
+    const dWeight =
+      1.0 + config.distanceWeightSpan * Math.pow(absDistance / config.strikeWindow, config.pDistance);
 
     // Factor 1: Gamma exposure (GEX)
     // Positive gamma above spot → MM sells into rallies (resistance, pulls price up as magnet)
     // Positive gamma below spot → MM buys dips (support, pulls price down as magnet)
-    // Net effect: gamma * sign gives directional bias
-    gexRaw += s.gamma * sign * dWeight;
+    // Net effect: gamma * sign gives directional bias, shaped by pGamma.
+    gexRaw += signedPow(s.gamma, config.pGamma) * sign * dWeight;
 
     // Factor 2: Net MM positions exposure — gated and weighted by gamma.
     // A strike's positions only count when its gamma is strong relative to
-    // the window max; positions are compressed non-linearly so an extremely
-    // large print doesn't dominate (size beyond a point adds little signal).
+    // the window max; positions are shaped by pPositions (saturating < 1) so
+    // an extremely large print doesn't dominate (size beyond a point adds
+    // little signal).
     const gammaStrength = maxAbsGamma > 0 ? Math.abs(s.gamma) / maxAbsGamma : 0;
     const positionsCounts = gammaStrength >= config.positionsGammaGate;
 
     if (positionsCounts) {
-      positionsRaw += compress(s.positions) * gammaStrength * sign * dWeight;
+      positionsRaw += signedPow(s.positions, config.pPositions) * gammaStrength * sign * dWeight;
     }
 
     // Factors 3 & 4: rate-of-change of gamma and positions across snapshots
@@ -91,22 +94,24 @@ export function computeScore(
       const prev = prevByStrike.get(s.strike);
       if (prev) {
         const deltaGamma = s.gamma - prev.gamma;
-        dGammaRaw += deltaGamma * sign * dWeight;
+        dGammaRaw += signedPow(deltaGamma, config.pDGamma) * sign * dWeight;
 
         if (positionsCounts) {
           const deltaPositions = s.positions - prev.positions;
-          dPositionsRaw += compress(deltaPositions) * gammaStrength * sign * dWeight;
+          dPositionsRaw += signedPow(deltaPositions, config.pDPositions) * gammaStrength * sign * dWeight;
         }
       }
     }
   }
 
-  // Z-score normalization using rolling lookback
+  // Z-score normalization using rolling lookback, hard-clamped to ±zClamp so
+  // a single anomalous snapshot can't blow the score out to z=10.
   const lookback = history.slice(-config.zScoreLookback);
-  const gexZ = zScore(gexRaw, lookback.map((h) => h.gexRaw));
-  const dGammaZ = zScore(dGammaRaw, lookback.map((h) => h.dGammaRaw));
-  const positionsZ = zScore(positionsRaw, lookback.map((h) => h.positionsRaw));
-  const dPositionsZ = zScore(dPositionsRaw, lookback.map((h) => h.dPositionsRaw));
+  const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
+  const gexZ = clamp(zScore(gexRaw, lookback.map((h) => h.gexRaw)));
+  const dGammaZ = clamp(zScore(dGammaRaw, lookback.map((h) => h.dGammaRaw)));
+  const positionsZ = clamp(zScore(positionsRaw, lookback.map((h) => h.positionsRaw)));
+  const dPositionsZ = clamp(zScore(dPositionsRaw, lookback.map((h) => h.dPositionsRaw)));
 
   // Composite weighted score
   const composite =
@@ -129,14 +134,15 @@ export function computeScore(
 }
 
 /**
- * Non-linear compression for net MM positions (and their deltas).
+ * Sign-preserving power transform: sign(x)·|x|^exponent.
  *
- * Position size can be extremely large at a single strike without carrying
- * proportionally more signal, so we apply a sign-preserving log transform
- * that saturates large magnitudes while staying ~linear for small ones.
+ * Used to shape every factor input non-linearly. exponent > 1 emphasizes
+ * large readings; exponent < 1 saturates them (e.g. a huge position print
+ * adds progressively less signal). exponent = 1 would be linear — by design
+ * no factor uses exactly 1.
  */
-function compress(value: number): number {
-  return Math.sign(value) * Math.log1p(Math.abs(value));
+function signedPow(value: number, exponent: number): number {
+  return Math.sign(value) * Math.pow(Math.abs(value), exponent);
 }
 
 /**

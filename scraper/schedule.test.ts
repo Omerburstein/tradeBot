@@ -8,7 +8,7 @@
  *   - US market holidays  → excluded from backfill day lists
  *   - off-market times     → outside the active polling / RTH windows
  *   - 10-min slot timing   → expectedWindowEnd / parseSlotEnd boundaries
- *   - DST correctness      → CT↔UTC offset is computed, not assumed
+ *   - DST correctness      → ET↔UTC offset is computed, not assumed
  *
  * Most assertions hit `dates.ts`, which is intentionally dependency-free.
  * Holiday/weekend enumeration lives in `scrape.ts` (`tradingDaysBetween`),
@@ -22,7 +22,7 @@
 import pino from 'pino';
 import {
   isInActivePollingWindow,
-  isCtInRth,
+  isInRth,
   expectedWindowEnd,
   parseSlotEnd,
   computeCapturedAt,
@@ -65,32 +65,32 @@ function throws(label: string, fn: () => unknown): void {
   check(label, threw, threw ? undefined : 'expected a throw, got none');
 }
 
-// ── CT instant builders ──────────────────────────────────────────────
-// Encode the CT wall-clock directly via an explicit UTC offset so the
-// gate functions (which read the instant back in America/Chicago) see
-// exactly the intended local time. CST = -06:00, CDT = -05:00.
-//   2026-01-05 Mon (winter/CST)   2026-06-15 Mon (summer/CDT)
-//   2026-01-10 Sat                2026-01-11 Sun   (both CST)
-//   2026-03-09 Mon (first weekday after spring-forward, CDT)
-const monWinter = (hms: string) => new Date(`2026-01-05T${hms}-06:00`);
-const monSummer = (hms: string) => new Date(`2026-06-15T${hms}-05:00`);
-const saturday = (hms: string) => new Date(`2026-01-10T${hms}-06:00`);
-const sunday = (hms: string) => new Date(`2026-01-11T${hms}-06:00`);
+// ── ET instant builders ──────────────────────────────────────────────
+// Encode the ET wall-clock directly via an explicit UTC offset so the
+// gate functions (which read the instant back in America/New_York) see
+// exactly the intended local time. EST = -05:00, EDT = -04:00.
+//   2026-01-05 Mon (winter/EST)   2026-06-15 Mon (summer/EDT)
+//   2026-01-10 Sat                2026-01-11 Sun   (both EST)
+//   2026-03-09 Mon (first weekday after spring-forward, EDT)
+const monWinter = (hms: string) => new Date(`2026-01-05T${hms}-05:00`);
+const monSummer = (hms: string) => new Date(`2026-06-15T${hms}-04:00`);
+const saturday = (hms: string) => new Date(`2026-01-10T${hms}-05:00`);
+const sunday = (hms: string) => new Date(`2026-01-11T${hms}-05:00`);
 
 logger.info('schedule.test: pure scheduling/calendar gates…');
 
 // ─────────────────────────────────────────────────────────────────────
-// 1. Active polling window — Mon-Fri 08:21-15:14 CT (inclusive bounds)
+// 1. Active polling window — Mon-Fri 09:21-16:14 ET (inclusive bounds)
 // ─────────────────────────────────────────────────────────────────────
 check('active: weekday inside window (12:00)', isInActivePollingWindow(monWinter('12:00:00')));
-check('active: lower bound 08:21 inclusive', isInActivePollingWindow(monWinter('08:21:00')));
-check('active: just before lower 08:20 excluded', !isInActivePollingWindow(monWinter('08:20:59')));
-check('active: upper bound 15:14 inclusive', isInActivePollingWindow(monWinter('15:14:00')));
-check('active: just after upper 15:15 excluded', !isInActivePollingWindow(monWinter('15:15:00')));
+check('active: lower bound 09:21 inclusive', isInActivePollingWindow(monWinter('09:21:00')));
+check('active: just before lower 09:20 excluded', !isInActivePollingWindow(monWinter('09:20:59')));
+check('active: upper bound 16:14 inclusive', isInActivePollingWindow(monWinter('16:14:00')));
+check('active: just after upper 16:15 excluded', !isInActivePollingWindow(monWinter('16:15:00')));
 
 // off-market times — same weekday, outside hours
 check('off-market: 03:00 pre-dawn excluded', !isInActivePollingWindow(monWinter('03:00:00')));
-check('off-market: 07:00 pre-market excluded', !isInActivePollingWindow(monWinter('07:00:00')));
+check('off-market: 08:00 pre-market excluded', !isInActivePollingWindow(monWinter('08:00:00')));
 check('off-market: 20:00 after-hours excluded', !isInActivePollingWindow(monWinter('20:00:00')));
 check('off-market: 23:59 late-night excluded', !isInActivePollingWindow(monWinter('23:59:00')));
 
@@ -100,63 +100,65 @@ check('weekend: Sunday 12:00 excluded', !isInActivePollingWindow(sunday('12:00:0
 
 // DST: summer weekday at the same wall-clock must still be inside.
 // Catches any regression to a hardcoded UTC offset.
-check('DST: summer weekday 09:00 CDT inside window', isInActivePollingWindow(monSummer('09:00:00')));
-check('DST: post-spring-forward Mon 09:00 CDT inside', isInActivePollingWindow(new Date('2026-03-09T09:00:00-05:00')));
+check('DST: summer weekday 10:00 EDT inside window', isInActivePollingWindow(monSummer('10:00:00')));
+check('DST: post-spring-forward Mon 10:00 EDT inside', isInActivePollingWindow(new Date('2026-03-09T10:00:00-04:00')));
 
 // ─────────────────────────────────────────────────────────────────────
-// 2. RTH gate — Mon-Fri 08:30-15:00 CT (used by webhook staleness guard)
+// 2. RTH gate — Mon-Fri 09:30-16:00 ET (used by webhook staleness guard)
 // ─────────────────────────────────────────────────────────────────────
-check('rth: lower bound 08:30 inclusive', isCtInRth(monWinter('08:30:00')));
-check('rth: just before 08:29 excluded', !isCtInRth(monWinter('08:29:00')));
-check('rth: upper bound 15:00 inclusive', isCtInRth(monWinter('15:00:00')));
-check('rth: just after 15:01 excluded', !isCtInRth(monWinter('15:01:00')));
-check('rth: midday weekday included', isCtInRth(monWinter('11:30:00')));
-check('rth: Saturday excluded', !isCtInRth(saturday('11:30:00')));
-check('rth: Sunday excluded', !isCtInRth(sunday('11:30:00')));
-check('rth: DST summer 09:00 CDT included', isCtInRth(monSummer('09:00:00')));
+check('rth: lower bound 09:30 inclusive', isInRth(monWinter('09:30:00')));
+check('rth: just before 09:29 excluded', !isInRth(monWinter('09:29:00')));
+check('rth: upper bound 16:00 inclusive', isInRth(monWinter('16:00:00')));
+check('rth: just after 16:01 excluded', !isInRth(monWinter('16:01:00')));
+check('rth: midday weekday included', isInRth(monWinter('12:30:00')));
+check('rth: Saturday excluded', !isInRth(saturday('12:30:00')));
+check('rth: Sunday excluded', !isInRth(sunday('12:30:00')));
+check('rth: DST summer 10:00 EDT included', isInRth(monSummer('10:00:00')));
 
 // ─────────────────────────────────────────────────────────────────────
 // 3. 10-min slot end — expectedWindowEnd (which closed slot to expect)
 // ─────────────────────────────────────────────────────────────────────
-eq('slot: 08:30:00 → "08:30" (slot just closed)', expectedWindowEnd(monWinter('08:30:00')), '08:30');
-eq('slot: 08:32:15 → "08:30"', expectedWindowEnd(monWinter('08:32:15')), '08:30');
-eq('slot: 08:39:59 → "08:30"', expectedWindowEnd(monWinter('08:39:59')), '08:30');
-eq('slot: 08:40:00 → "08:40" (next slot closed)', expectedWindowEnd(monWinter('08:40:00')), '08:40');
-eq('slot: 15:00:00 → "15:00"', expectedWindowEnd(monWinter('15:00:00')), '15:00');
+eq('slot: 09:30:00 → "09:30" (slot just closed)', expectedWindowEnd(monWinter('09:30:00')), '09:30');
+eq('slot: 09:32:15 → "09:30"', expectedWindowEnd(monWinter('09:32:15')), '09:30');
+eq('slot: 09:39:59 → "09:30"', expectedWindowEnd(monWinter('09:39:59')), '09:30');
+eq('slot: 09:40:00 → "09:40" (next slot closed)', expectedWindowEnd(monWinter('09:40:00')), '09:40');
+eq('slot: 16:00:00 → "16:00"', expectedWindowEnd(monWinter('16:00:00')), '16:00');
 eq('slot: 00:05 before first boundary → null', expectedWindowEnd(monWinter('00:05:00')), null);
 eq('slot: 00:10 first boundary → "00:10"', expectedWindowEnd(monWinter('00:10:00')), '00:10');
 
 // ─────────────────────────────────────────────────────────────────────
 // 4. Slot-label parsing — parseSlotEnd
 // ─────────────────────────────────────────────────────────────────────
-eq('parse: "08:20 - 08:30" → "08:30"', parseSlotEnd('08:20 - 08:30'), '08:30');
-eq('parse: "14:50 - 15:00" → "15:00"', parseSlotEnd('14:50 - 15:00'), '15:00');
+eq('parse: "09:20 - 09:30" → "09:30"', parseSlotEnd('09:20 - 09:30'), '09:30');
+eq('parse: "15:50 - 16:00" → "16:00"', parseSlotEnd('15:50 - 16:00'), '16:00');
 eq('parse: unpadded "9:10 - 9:20" → "09:20"', parseSlotEnd('9:10 - 9:20'), '09:20');
 eq('parse: garbage → null', parseSlotEnd('not a slot'), null);
 eq('parse: empty → null', parseSlotEnd(''), null);
 
 // ─────────────────────────────────────────────────────────────────────
-// 5. computeCapturedAt — slot-END instant, DST-aware CT→UTC
+// 5. computeCapturedAt — slot-END instant, DST-aware ET→UTC
 //    (the function whose regression corrupted 5/4-5/7 data; see dates.ts)
+//    Slot ends are ET now; the resulting UTC instants are identical to
+//    the old CT-labeled equivalents one hour earlier (09:30 ET = 08:30 CT).
 // ─────────────────────────────────────────────────────────────────────
-eq('capturedAt: winter 08:30 CST → 14:30 UTC', computeCapturedAt('2026-01-05', '08:30'), '2026-01-05T14:30:00.000Z');
-eq('capturedAt: summer 08:30 CDT → 13:30 UTC', computeCapturedAt('2026-06-15', '08:30'), '2026-06-15T13:30:00.000Z');
-eq('capturedAt: post-DST Mon 08:30 CDT → 13:30 UTC', computeCapturedAt('2026-03-09', '08:30'), '2026-03-09T13:30:00.000Z');
-eq('capturedAt: accepts unpadded hour "8:30"', computeCapturedAt('2026-06-15', '8:30'), '2026-06-15T13:30:00.000Z');
-eq('capturedAt: debrief slot 15:00 CST → 21:00 UTC', computeCapturedAt('2026-01-05', '15:00'), '2026-01-05T21:00:00.000Z');
-throws('capturedAt: malformed date throws', () => computeCapturedAt('not-a-date', '08:30'));
+eq('capturedAt: winter 09:30 EST → 14:30 UTC', computeCapturedAt('2026-01-05', '09:30'), '2026-01-05T14:30:00.000Z');
+eq('capturedAt: summer 09:30 EDT → 13:30 UTC', computeCapturedAt('2026-06-15', '09:30'), '2026-06-15T13:30:00.000Z');
+eq('capturedAt: post-DST Mon 09:30 EDT → 13:30 UTC', computeCapturedAt('2026-03-09', '09:30'), '2026-03-09T13:30:00.000Z');
+eq('capturedAt: accepts unpadded hour "9:30"', computeCapturedAt('2026-06-15', '9:30'), '2026-06-15T13:30:00.000Z');
+eq('capturedAt: debrief slot 16:00 EST → 21:00 UTC', computeCapturedAt('2026-01-05', '16:00'), '2026-01-05T21:00:00.000Z');
+throws('capturedAt: malformed date throws', () => computeCapturedAt('not-a-date', '09:30'));
 throws('capturedAt: malformed slot throws', () => computeCapturedAt('2026-01-05', 'xx:yy'));
 
-// round-trip: the CT HH:MM read back from the result equals the input
+// round-trip: the ET HH:MM read back from the result equals the input
 {
   const iso = computeCapturedAt('2026-07-04', '12:40');
   const back = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
+    timeZone: 'America/New_York',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
   }).format(new Date(iso));
-  eq('capturedAt: round-trips back to "12:40" CT', back, '12:40');
+  eq('capturedAt: round-trips back to "12:40" ET', back, '12:40');
 }
 
 // ─────────────────────────────────────────────────────────────────────
