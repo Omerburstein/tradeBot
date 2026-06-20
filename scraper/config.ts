@@ -42,7 +42,7 @@ export const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
  * scrape when a new 10-min UW slot is expected (i.e., the most
  * recently closed 10-min window has not yet been captured). Outside
  * that "publish window" — and outside the active polling window
- * (08:21-15:14 CT) — the tick is a cheap no-op. See `runTick` in
+ * (09:21-16:14 ET) — the tick is a cheap no-op. See `runTick` in
  * index.ts and `expectedWindowEnd` in dates.ts.
  */
 export const MS_PER_TICK = 60 * 1000;

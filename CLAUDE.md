@@ -4,7 +4,7 @@
 
 Production Railway-deployed scraper for [Unusual Whales Periscope](https://unusualwhales.com/dashboard/4) — a dashboard showing SPX options Greeks (Gamma, Charm, Vanna) by strike price. The scraper polls every minute during RTH, captures the three Greek panels, parses them, and bulk-inserts snapshots into Neon Postgres. A webhook fires on each new insert to trigger an auto-playbook Vercel app.
 
-**Domain**: 0DTE SPX options Greeks — capturing Market Maker positioning (Gamma, Charm, Vanna) in 10-min slots, Mon–Fri 08:20–15:00 CT.
+**Domain**: 0DTE SPX options Greeks — capturing Market Maker positioning (Gamma, Charm, Vanna) in 10-min slots, Mon–Fri 09:20–16:00 ET.
 
 ---
 
@@ -16,7 +16,7 @@ scraper/
 ├── scrape.ts         # Playwright automation, anti-detection, HTML parsing orchestration (~1400 lines)
 ├── parser.ts         # Pure HTML → SnapshotRow[] (node-html-parser, no DOM)
 ├── db.ts             # Neon Postgres batch inserts (500 rows/call)
-├── dates.ts          # Timezone utilities (CT↔UTC, RTH/active-window gates)
+├── dates.ts          # Timezone utilities (ET↔UTC, RTH/active-window gates)
 ├── config.ts         # Env var validation + MS_PER_TICK constant
 ├── types.ts          # Panel type + SnapshotRow interface
 ├── webhook.ts        # Auto-playbook webhook poster (non-blocking, 3-attempt retry)
@@ -37,11 +37,12 @@ scraper/
 
 ## Critical Invariants
 
-### Timestamps
-- `capturedAt` always represents slot **END** time (e.g., the 08:20–08:30 slot → `capturedAt = 08:30 CT`)
-- **Never** use wall-clock time as `capturedAt`; use `computeCapturedAt(date, slotEndHhmm)` in `dates.ts`
-- All timestamps stored as UTC ISO-8601 TIMESTAMPTZ in Postgres
-- **Do NOT assume container TZ=America/Chicago** — `computeCapturedAt` computes CT→UTC offset explicitly via `Intl.DateTimeFormat`. This was a regression (corrupted 5/4–5/7 data). Do not revert to `new Date(...).toISOString()` + env TZ.
+### Timestamps & Timezone
+- **All wall-clock representation is Eastern Time (ET / America/New_York)** — matching exactly what the UW Periscope dashboard displays. The `timeframe` label, the slot-END gates, dedup, and the headless browser's `timezoneId` all speak ET. (Converted from CT on 2026-06-20 so DB labels match the dashboard; ET is always +1h from the SPX pit's CT, so the same real-world instants are preserved.)
+- `capturedAt` always represents slot **END** time (e.g., the 09:20–09:30 slot → `capturedAt = 09:30 ET`). It is an absolute UTC instant and is unaffected by the CT→ET choice — only the wall-clock representation moved.
+- **Never** use wall-clock time as `capturedAt`; use `computeCapturedAt(date, slotEndHhmm)` in `dates.ts` (slotEndHhmm is ET).
+- All timestamps stored as UTC ISO-8601 TIMESTAMPTZ in Postgres.
+- **Do NOT assume container TZ** — `computeCapturedAt` computes the ET→UTC offset explicitly via `Intl.DateTimeFormat`. This was a regression (corrupted 5/4–5/7 data). Do not revert to `new Date(...).toISOString()` + env TZ.
 
 ### Anti-Bot Timing
 - `waitForTimeout` calls with comments like `// anti-bot`, `// stealth`, or `// empirically tuned` are **intentional pacing delays** — do NOT replace them with locator-based waits
@@ -58,7 +59,7 @@ scraper/
 - Unique constraint: `(captured_at, expiry, panel, strike)` → inserts are idempotent (`ON CONFLICT DO NOTHING`)
 
 ### Schedule-Aware Dedup
-- `lastCapturedWindowEnd` tracks the last captured slot's end time (e.g., `"08:30"`)
+- `lastCapturedWindowEnd` tracks the last captured slot's end time (e.g., `"09:30"`, ET)
 - If `expectedWindowEnd(now) === lastCapturedWindowEnd`, skip Playwright entirely (no new data yet)
 - This resets to `null` on overnight/weekend transitions
 
@@ -145,7 +146,7 @@ Always run this after editing TypeScript files. The project has no automated tes
 
 ## Deployment (Railway)
 
-- Runs as `npm start` → continuous 1-min polling loop during active window (Mon–Fri 08:21–15:14 CT)
+- Runs as `npm start` → continuous 1-min polling loop during active window (Mon–Fri 09:21–16:14 ET)
 - Fires one tick immediately on boot to avoid missing data after container restart
 - SIGTERM handler flushes Sentry then exits cleanly (Railway restart-safe)
 - Observability: Sentry for errors + pino JSON logs to stdout (Railway log pipeline)

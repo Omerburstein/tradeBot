@@ -12,8 +12,8 @@
  *   6. SIGTERM handler clears the interval, flushes Sentry, exits 0.
  *
  * Schedule-aware dedup:
- *   - The scraper wakes every minute during 08:21-15:14 CT (Mon-Fri).
- *   - It tracks `lastCapturedWindowEnd` — the end-time (e.g. "08:30")
+ *   - The scraper wakes every minute during 09:21-16:14 ET (Mon-Fri).
+ *   - It tracks `lastCapturedWindowEnd` — the end-time (e.g. "09:30")
  *     of the last UW slot it successfully captured.
  *   - When the most recently CLOSED 10-min window's end matches
  *     `lastCapturedWindowEnd`, the tick is a cheap no-op (skip scrape
@@ -25,8 +25,8 @@
  *     subsequent ticks until the next 10-min boundary closes.
  *
  * This pattern absorbs UW's 1-3 min publication lag without polling
- * blindly, and ensures the first analyzable slot ("08:20 - 08:30")
- * and the debrief slot ("14:50 - 15:00") are captured as soon as UW
+ * blindly, and ensures the first analyzable slot ("09:20 - 09:30")
+ * and the debrief slot ("15:50 - 16:00") are captured as soon as UW
  * publishes them, rather than 10 min later on the next 10-min tick.
  *
  * One-shot test mode: set FORCE_TICK=true to bypass the window gate,
@@ -108,7 +108,7 @@ let intervalHandle: NodeJS.Timeout | null = null;
 let tickInFlight = false;
 
 // Dedup state: the end-time (HH:MM) of the last UW slot we successfully
-// captured (e.g. "08:30" after capturing "08:20 - 08:30"). Reset to null
+// captured (e.g. "09:30" after capturing "09:20 - 09:30"). Reset to null
 // when we leave the active polling window so the next trading day
 // starts fresh. Used by runTick to short-circuit ticks where the
 // current expected 10-min window has already been captured.
@@ -363,8 +363,8 @@ const forceTick =
   (process.env.FORCE_TICK ?? '').trim().toLowerCase() === 'true';
 
 const backfillDate = (process.env.BACKFILL_DATE ?? '').trim();
-const backfillStart = (process.env.BACKFILL_START ?? '').trim() || '08:20';
-const backfillEnd = (process.env.BACKFILL_END ?? '').trim() || '14:50';
+const backfillStart = (process.env.BACKFILL_START ?? '').trim() || '09:20';
+const backfillEnd = (process.env.BACKFILL_END ?? '').trim() || '15:50';
 const backfillDateStart = (process.env.BACKFILL_DATE_START ?? '').trim();
 const backfillDateEnd = (process.env.BACKFILL_DATE_END ?? '').trim();
 
