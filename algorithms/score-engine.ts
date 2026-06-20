@@ -1,15 +1,19 @@
 /**
  * Score engine: computes the composite directional score from a snapshot.
  *
- * Five factors (user requirements):
+ * Factors (user requirements):
  *   1. Gamma exposure (GEX) — directional gamma pressure per strike
- *   2. Put/call positions — only with large gamma (deferred; uses gamma sign as proxy)
+ *   2. Net MM positions — directional positioning pressure per strike, but
+ *      only where gamma is strong at the SAME strike, and compressed
+ *      non-linearly so an extremely large position print can't dominate
  *   3. dGamma/dt — rate of change of gamma across successive snapshots
- *   4. Distance weighting — further strikes contribute MORE score
- *   5. Cone — handled separately in cone.ts (trigger gate, not a score factor)
+ *   4. dPositions/dt — rate of change of net MM positions (same gating)
+ *   5. Distance weighting — further strikes contribute MORE score
+ *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
- * Charm and vanna are included as additional Greek signals that amplify
- * the gamma-based core signal.
+ * Gamma carries the most weight. Charm and vanna are intentionally excluded
+ * from the composite score; the signal is built from gamma and net
+ * market-maker positions and their respective rates of change.
  */
 
 import type { AlgoConfig, ScoreComponents, Snapshot, StrikeData } from './types.js';
@@ -32,15 +36,25 @@ export function computeScore(
 
   let gexRaw = 0;
   let dGammaRaw = 0;
-  let charmRaw = 0;
-  let vannaRaw = 0;
+  let positionsRaw = 0;
+  let dPositionsRaw = 0;
 
-  // Build a lookup for previous snapshot's strikes for dGamma computation
+  // Build a lookup for previous snapshot's strikes for dGamma/dPositions computation
   const prevByStrike = new Map<number, StrikeData>();
   if (previous) {
     for (const s of previous.strikes) {
       prevByStrike.set(s.strike, s);
     }
+  }
+
+  // Pre-pass: largest |gamma| in the window. Positions are only meaningful
+  // where gamma is strong, so each strike's positions contribution is gated
+  // and weighted by its gamma strength relative to this max.
+  let maxAbsGamma = 0;
+  for (const s of strikes) {
+    if (Math.abs(s.strike - spot) > config.strikeWindow) continue;
+    const ag = Math.abs(s.gamma);
+    if (ag > maxAbsGamma) maxAbsGamma = ag;
   }
 
   for (const s of strikes) {
@@ -61,18 +75,28 @@ export function computeScore(
     // Net effect: gamma * sign gives directional bias
     gexRaw += s.gamma * sign * dWeight;
 
-    // Charm bias: charm decay amplifies gamma effects into close
-    charmRaw += s.charm * sign * dWeight;
+    // Factor 2: Net MM positions exposure — gated and weighted by gamma.
+    // A strike's positions only count when its gamma is strong relative to
+    // the window max; positions are compressed non-linearly so an extremely
+    // large print doesn't dominate (size beyond a point adds little signal).
+    const gammaStrength = maxAbsGamma > 0 ? Math.abs(s.gamma) / maxAbsGamma : 0;
+    const positionsCounts = gammaStrength >= config.positionsGammaGate;
 
-    // Vanna bias: vanna amplifies during vol regime changes
-    vannaRaw += s.vanna * sign * dWeight;
+    if (positionsCounts) {
+      positionsRaw += compress(s.positions) * gammaStrength * sign * dWeight;
+    }
 
-    // Factor 3: dGamma/dt — rate of change of gamma positioning
+    // Factors 3 & 4: rate-of-change of gamma and positions across snapshots
     if (previous) {
       const prev = prevByStrike.get(s.strike);
       if (prev) {
         const deltaGamma = s.gamma - prev.gamma;
         dGammaRaw += deltaGamma * sign * dWeight;
+
+        if (positionsCounts) {
+          const deltaPositions = s.positions - prev.positions;
+          dPositionsRaw += compress(deltaPositions) * gammaStrength * sign * dWeight;
+        }
       }
     }
   }
@@ -81,27 +105,38 @@ export function computeScore(
   const lookback = history.slice(-config.zScoreLookback);
   const gexZ = zScore(gexRaw, lookback.map((h) => h.gexRaw));
   const dGammaZ = zScore(dGammaRaw, lookback.map((h) => h.dGammaRaw));
-  const charmZ = zScore(charmRaw, lookback.map((h) => h.charmRaw));
-  const vannaZ = zScore(vannaRaw, lookback.map((h) => h.vannaRaw));
+  const positionsZ = zScore(positionsRaw, lookback.map((h) => h.positionsRaw));
+  const dPositionsZ = zScore(dPositionsRaw, lookback.map((h) => h.dPositionsRaw));
 
   // Composite weighted score
   const composite =
     config.wGex * gexZ +
     config.wDGamma * dGammaZ +
-    config.wCharm * charmZ +
-    config.wVanna * vannaZ;
+    config.wPositions * positionsZ +
+    config.wDPositions * dPositionsZ;
 
   return {
     gexRaw,
     gexZ,
     dGammaRaw,
     dGammaZ,
-    charmRaw,
-    charmZ,
-    vannaRaw,
-    vannaZ,
+    positionsRaw,
+    positionsZ,
+    dPositionsRaw,
+    dPositionsZ,
     composite,
   };
+}
+
+/**
+ * Non-linear compression for net MM positions (and their deltas).
+ *
+ * Position size can be extremely large at a single strike without carrying
+ * proportionally more signal, so we apply a sign-preserving log transform
+ * that saturates large magnitudes while staying ~linear for small ones.
+ */
+function compress(value: number): number {
+  return Math.sign(value) * Math.log1p(Math.abs(value));
 }
 
 /**

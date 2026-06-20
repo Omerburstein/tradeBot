@@ -15,6 +15,8 @@ export interface StrikeData {
   gamma: number;
   charm: number;
   vanna: number;
+  /** Net market-maker contracts at this strike (call qty + put qty). */
+  positions: number;
 }
 
 /**
@@ -41,10 +43,12 @@ export interface ScoreComponents {
   gexZ: number;
   dGammaRaw: number;
   dGammaZ: number;
-  charmRaw: number;
-  charmZ: number;
-  vannaRaw: number;
-  vannaZ: number;
+  /** Net MM positions exposure (directional, distance-weighted). */
+  positionsRaw: number;
+  positionsZ: number;
+  /** Rate of change of net MM positions across successive snapshots. */
+  dPositionsRaw: number;
+  dPositionsZ: number;
   composite: number;
 }
 
@@ -127,10 +131,17 @@ export interface AlgoConfig {
   wGex: number;
   /** Weight for gamma rate-of-change. */
   wDGamma: number;
-  /** Weight for charm bias. */
-  wCharm: number;
-  /** Weight for vanna bias. */
-  wVanna: number;
+  /** Weight for net MM positions exposure. */
+  wPositions: number;
+  /** Weight for net MM positions rate-of-change. */
+  wDPositions: number;
+
+  /**
+   * Minimum gamma strength (a strike's |gamma| as a fraction of the window's
+   * max |gamma|, 0–1) required for that strike's positions to count at all.
+   * Positions where gamma is weak carry no signal regardless of size.
+   */
+  positionsGammaGate: number;
 
   /** Z-score threshold for standard entries (cone-breach). */
   entryThreshold: number;
@@ -154,10 +165,12 @@ export interface AlgoConfig {
 
 /** Sensible defaults — tune via backtest. */
 export const DEFAULT_CONFIG: AlgoConfig = {
-  wGex: 0.40,
+  wGex: 0.45,
   wDGamma: 0.25,
-  wCharm: 0.20,
-  wVanna: 0.15,
+  wPositions: 0.18,
+  wDPositions: 0.12,
+
+  positionsGammaGate: 0.30,
 
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,

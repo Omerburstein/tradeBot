@@ -235,6 +235,22 @@ function latestTradingDay(): string {
   }
 }
 
+/**
+ * The previous trading day before `ymd` (Mon-Fri, US-market non-holiday).
+ * Pure calendar arithmetic in UTC — used by the walk-back reader to step
+ * backwards through history one session at a time.
+ */
+function prevTradingDay(ymd: string): string {
+  let candidate = prevDay(ymd);
+  while (true) {
+    const dow = new Date(`${candidate}T12:00:00Z`).getUTCDay();
+    if (dow >= 1 && dow <= 5 && !US_MARKET_HOLIDAYS.has(candidate)) {
+      return candidate;
+    }
+    candidate = prevDay(candidate);
+  }
+}
+
 /** Advance an HH:MM string by 10 minutes. "08:20" → "08:30", "08:50" → "09:00". */
 function nextTimeframe(slotStartHhmm: string): string {
   const [hStr, mStr] = slotStartHhmm.split(':');
@@ -1266,6 +1282,91 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
 }
 
 /**
+ * Scrape one trading day into SnapshotRow[]: navigate the chart to
+ * `date`, set Expiry=Single, then iterate 10-min slots from `startNorm`
+ * through `endNorm`, parsing the intercepted MME + MMC API responses.
+ *
+ * The two response arrays are owned by the caller (so the same browser
+ * page / listener can be reused across many days) and are cleared at
+ * entry to avoid reading a prior day's stale slot. Throws if the date
+ * cannot be selected (e.g. outside the Single-mode dropdown) — callers
+ * decide whether that's fatal or just "no more history".
+ *
+ * Shared by scrapeBackfillRange (fixed date list) and scrapeWalkBack
+ * (descending walk until history runs out) so per-day scrape behavior
+ * lives in exactly one place.
+ */
+async function scrapeDayRows(
+  page: Page,
+  date: string,
+  startNorm: string,
+  endNorm: string,
+  mmeResponses: Array<{ url: string; body: ApiExposureResponse }>,
+  mmcResponses: Array<{ url: string; body: ApiContractsResponse }>,
+): Promise<{ rows: SnapshotRow[]; slotsScanned: number }> {
+  // Drop any responses left over from the previous day's last slot so
+  // the `?? last` fallback below can't read stale data for this date.
+  mmeResponses.length = 0;
+  mmcResponses.length = 0;
+
+  await walkDateToTarget(page, date);
+  await page.waitForTimeout(1_500);
+  const ok = await setExpirySingle(page, date);
+  if (!ok) {
+    throw new Error(
+      `setExpirySingle(${date}) failed — date may be outside Single-mode dropdown for this chart frame`,
+    );
+  }
+  await waitForChartReady(page);
+  await walkTimeframeToTarget(page, startNorm);
+  await page.waitForTimeout(1_500);
+
+  const dayRows: SnapshotRow[] = [];
+  let currentStart = startNorm;
+  let slotsScanned = 0;
+
+  while (currentStart <= endNorm) {
+    const slotEnd = nextTimeframe(currentStart);
+    const capturedAt = computeCapturedAt(date, slotEnd);
+
+    // Wait for API response
+    await page.waitForLoadState('networkidle').catch(() => undefined);
+    await page.waitForTimeout(1_000);
+
+    const latestMme = [...mmeResponses]
+      .reverse()
+      .find(r => r.url.includes(`expiry=${date}`))
+      ?? mmeResponses[mmeResponses.length - 1];
+
+    if (latestMme) {
+      const { rows, qualifyingStrikes } = apiResponseToRows(latestMme.body, capturedAt);
+      dayRows.push(...rows);
+
+      const latestMmc = [...mmcResponses]
+        .reverse()
+        .find(r => r.url.includes(`expiry=${date}`))
+        ?? mmcResponses[mmcResponses.length - 1];
+      if (latestMmc) {
+        dayRows.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
+      }
+    }
+
+    slotsScanned += 1;
+
+    const nextStart = nextTimeframe(currentStart);
+    if (nextStart > endNorm) break;
+
+    mmeResponses.length = 0;
+    mmcResponses.length = 0;
+    await advanceTimeframeOneSlot(page);
+    await page.waitForTimeout(1_500);
+    currentStart = nextStart;
+  }
+
+  return { rows: dayRows, slotsScanned };
+}
+
+/**
  * Backfill mode: walk to a specific historical date, then iterate
  * 10-min timeframe slots from `startHhmm` through `endHhmm`, capturing
  * Gamma + Charm + Vanna at each. Used to seed the database with a
@@ -1491,59 +1592,14 @@ export async function scrapeBackfillRange(
       logger.info({ date, progress }, 'backfill range: starting day');
 
       try {
-        await walkDateToTarget(page, date);
-        await page.waitForTimeout(1_500);
-        const ok = await setExpirySingle(page, date);
-        if (!ok) {
-          throw new Error(
-            `setExpirySingle(${date}) failed — date may be outside Single-mode dropdown for this chart frame`,
-          );
-        }
-        await waitForChartReady(page);
-        await walkTimeframeToTarget(page, startNorm);
-        await page.waitForTimeout(1_500);
-
-        const dayRows: SnapshotRow[] = [];
-        let currentStart = startNorm;
-        let slotsScanned = 0;
-
-        while (currentStart <= endNorm) {
-          const slotEnd = nextTimeframe(currentStart);
-          const capturedAt = computeCapturedAt(date, slotEnd);
-
-          // Wait for API response
-          await page.waitForLoadState('networkidle').catch(() => undefined);
-          await page.waitForTimeout(1_000);
-
-          const latestMme = [...mmeResponses]
-            .reverse()
-            .find(r => r.url.includes(`expiry=${date}`))
-            ?? mmeResponses[mmeResponses.length - 1];
-
-          if (latestMme) {
-            const { rows, qualifyingStrikes } = apiResponseToRows(latestMme.body, capturedAt);
-            dayRows.push(...rows);
-
-            const latestMmc = [...mmcResponses]
-              .reverse()
-              .find(r => r.url.includes(`expiry=${date}`))
-              ?? mmcResponses[mmcResponses.length - 1];
-            if (latestMmc) {
-              dayRows.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
-            }
-          }
-
-          slotsScanned += 1;
-
-          const nextStart = nextTimeframe(currentStart);
-          if (nextStart > endNorm) break;
-
-          mmeResponses.length = 0;
-          mmcResponses.length = 0;
-          await advanceTimeframeOneSlot(page);
-          await page.waitForTimeout(1_500);
-          currentStart = nextStart;
-        }
+        const { rows: dayRows, slotsScanned } = await scrapeDayRows(
+          page,
+          date,
+          startNorm,
+          endNorm,
+          mmeResponses,
+          mmcResponses,
+        );
 
         // Insert this day's rows.
         const inserted = await insertSnapshots(dayRows);
@@ -1589,6 +1645,184 @@ export async function scrapeBackfillRange(
       daysScanned,
       daysFailed,
       totalDays: dates.length,
+    };
+  });
+}
+
+/**
+ * Read-all mode: start at the latest trading day and walk BACKWARDS one
+ * trading session at a time, scraping + inserting each day, until UW
+ * runs out of history. Unlike scrapeBackfillRange there is no fixed
+ * start date — the script discovers the history floor itself, so it
+ * keeps working as UW's available range slides.
+ *
+ * Stop condition: `maxConsecutiveEmpty` consecutive days that either
+ * produced 0 rows or failed to scrape (e.g. the date is no longer in
+ * the Single-mode Expiry dropdown). A single transient glitch won't
+ * stop the walk — the counter resets on the next non-empty day — but a
+ * genuine end-of-history (or repeated failure) terminates cleanly.
+ *
+ * Rows are inserted per-day (idempotent via ON CONFLICT DO NOTHING), so
+ * a kill mid-walk leaves all prior days durably in the DB and a re-run
+ * just re-confirms them. An optional `floorDate` is a hard lower bound
+ * (inclusive) for safety / partial runs.
+ */
+export async function scrapeWalkBack(opts: {
+  startHhmm: string;
+  endHhmm: string;
+  maxConsecutiveEmpty?: number;
+  floorDate?: string;
+}): Promise<{
+  totalRowsInserted: number;
+  daysScanned: number;
+  daysWithData: number;
+  daysEmpty: string[];
+  daysFailed: string[];
+  oldestDateWithData: string | null;
+  newestDateScanned: string | null;
+}> {
+  const startNorm = normalizeHhmm(opts.startHhmm);
+  const endNorm = normalizeHhmm(opts.endHhmm);
+  const maxEmpty = opts.maxConsecutiveEmpty ?? 3;
+
+  return await withBrowser(async (_browser, page) => {
+    // Set up API interception (same shape as the backfill paths).
+    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
+    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
+
+    page.on('response', (response) => {
+      const url = response.url();
+      const ct = response.headers()['content-type'] ?? '';
+      if (ct.includes('json')) {
+        if (url.includes('market_maker_exposures')) {
+          response.json().then((body) => {
+            mmeResponses.push({ url, body: body as ApiExposureResponse });
+          }).catch(() => undefined);
+        }
+        if (url.includes('market_maker_contracts')) {
+          response.json().then((body) => {
+            mmcResponses.push({ url, body: body as ApiContractsResponse });
+          }).catch(() => undefined);
+        }
+      }
+    });
+
+    const firstDate = latestTradingDay();
+    logger.info(
+      { firstDate, startHhmm: startNorm, endHhmm: endNorm, maxEmpty, floorDate: opts.floorDate ?? null },
+      'walk-back: starting from latest trading day',
+    );
+
+    logger.info({ url: UW_PERISCOPE_URL }, 'navigating to periscope');
+    await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
+    await waitForChartReady(page);
+
+    // Collapse the left nav sidebar to maximize chart area.
+    await clickZoomOut(page);
+
+    let date: string = firstDate;
+    let consecutiveEmpty = 0;
+    let totalRowsInserted = 0;
+    let daysScanned = 0;
+    let daysWithData = 0;
+    const daysEmpty: string[] = [];
+    const daysFailed: string[] = [];
+    let oldestDateWithData: string | null = null;
+    let stopReason = 'unknown';
+
+    while (true) {
+      if (opts.floorDate != null && date < opts.floorDate) {
+        stopReason = `reached floorDate ${opts.floorDate}`;
+        break;
+      }
+
+      const dayStarted = Date.now();
+      logger.info({ date, consecutiveEmpty }, 'walk-back: starting day');
+
+      try {
+        const { rows: dayRows, slotsScanned } = await scrapeDayRows(
+          page,
+          date,
+          startNorm,
+          endNorm,
+          mmeResponses,
+          mmcResponses,
+        );
+
+        const inserted = await insertSnapshots(dayRows);
+        totalRowsInserted += inserted;
+        daysScanned += 1;
+
+        if (dayRows.length === 0) {
+          consecutiveEmpty += 1;
+          daysEmpty.push(date);
+          logger.info(
+            { date, slotsScanned, consecutiveEmpty, ms: Date.now() - dayStarted },
+            'walk-back: day returned 0 rows (likely past history floor)',
+          );
+        } else {
+          consecutiveEmpty = 0;
+          daysWithData += 1;
+          oldestDateWithData = date; // walking backwards → each success is older
+          logger.info(
+            {
+              date,
+              slotsScanned,
+              rowsParsed: dayRows.length,
+              inserted,
+              totalRowsInserted,
+              ms: Date.now() - dayStarted,
+            },
+            'walk-back: day complete',
+          );
+        }
+      } catch (err) {
+        consecutiveEmpty += 1;
+        daysFailed.push(date);
+        logger.error(
+          {
+            date,
+            consecutiveEmpty,
+            err: err instanceof Error ? err.message : String(err),
+            ms: Date.now() - dayStarted,
+          },
+          'walk-back: day failed — counting toward stop threshold',
+        );
+        // Escape any stuck modal/popover state before the next day.
+        await page.keyboard.press('Escape').catch(() => undefined);
+        await page.keyboard.press('Escape').catch(() => undefined);
+      }
+
+      if (consecutiveEmpty >= maxEmpty) {
+        stopReason = `${consecutiveEmpty} consecutive empty/failed days — history floor reached`;
+        break;
+      }
+
+      date = prevTradingDay(date);
+    }
+
+    logger.info(
+      {
+        stopReason,
+        totalRowsInserted,
+        daysScanned,
+        daysWithData,
+        daysEmpty: daysEmpty.length,
+        daysFailed,
+        oldestDateWithData,
+        newestDateScanned: firstDate,
+      },
+      'walk-back: complete',
+    );
+
+    return {
+      totalRowsInserted,
+      daysScanned,
+      daysWithData,
+      daysEmpty,
+      daysFailed,
+      oldestDateWithData,
+      newestDateScanned: firstDate,
     };
   });
 }

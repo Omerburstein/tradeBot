@@ -11,8 +11,12 @@ dist/
 .env.local
 enviroment_vras.txt
 
-# Probe captures
+# Probe captures + scrape/debug artifacts
 docs/tmp/
+docs/temp/
+
+# Claude Code transient worktree state
+.claude/worktrees/
 
 # OS / editor
 .DS_Store

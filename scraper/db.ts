@@ -12,6 +12,18 @@ import type { SnapshotRow } from './types.js';
 
 const MAX_ROWS_PER_INSERT = 500;
 
+/**
+ * Panels for which a value of exactly 0 is treated as noise and excluded
+ * from the database. A zero charm/vanna/positions reading carries no
+ * signal worth persisting, whereas gamma's zero is meaningful (it's the
+ * anchor) and is always kept.
+ */
+const SKIP_ZERO_PANELS: ReadonlySet<SnapshotRow['panel']> = new Set([
+  'charm',
+  'vanna',
+  'positions',
+]);
+
 let client: NeonQueryFunction<false, false> | null = null;
 
 export function getDb(): NeonQueryFunction<false, false> {
@@ -29,13 +41,18 @@ export function getDb(): NeonQueryFunction<false, false> {
  * (not necessarily inserted — conflicts are silently skipped).
  */
 export async function insertSnapshots(rows: SnapshotRow[]): Promise<number> {
-  if (rows.length === 0) return 0;
+  // Drop charm/vanna/positions rows whose value is exactly 0 — they carry
+  // no signal. Gamma zeros (the anchor) are retained.
+  const insertable = rows.filter(
+    (row) => !(SKIP_ZERO_PANELS.has(row.panel) && row.value === 0),
+  );
+  if (insertable.length === 0) return 0;
 
   const sql = getDb();
   let submitted = 0;
 
-  for (let i = 0; i < rows.length; i += MAX_ROWS_PER_INSERT) {
-    const chunk = rows.slice(i, i + MAX_ROWS_PER_INSERT);
+  for (let i = 0; i < insertable.length; i += MAX_ROWS_PER_INSERT) {
+    const chunk = insertable.slice(i, i + MAX_ROWS_PER_INSERT);
 
     // Build a flat parameter list and a $1,$2,... VALUES list. The Neon
     // serverless driver's tagged-template form doesn't expand arrays into

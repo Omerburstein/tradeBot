@@ -1,0 +1,20 @@
+#!/bin/sh
+#
+# pre-push gate — runs the local correctness checks before any push.
+# Blocks the push (non-zero exit) if either fails.
+#
+# Scope: tsc typecheck + the dependency-free unit tests only. The
+# integration test (npm run test:integration) is intentionally NOT run
+# here — it needs live UW auth, network, and a DB, so it would fail on
+# every offline push. Run it manually when you have credentials.
+#
+# Enabled via:  git config core.hooksPath .githooks
+set -e
+
+echo "[pre-push] tsc --noEmit …"
+npx tsc --noEmit
+
+echo "[pre-push] npm run test:unit …"
+npm run --silent test:unit
+
+echo "[pre-push] all checks passed ✓"
