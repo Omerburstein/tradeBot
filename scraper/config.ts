@@ -31,7 +31,7 @@ export const UW_AUTH_STATE_PATH =
 // the route.
 export const UW_PERISCOPE_URL =
   process.env.UW_PERISCOPE_URL ??
-  'https://unusualwhales.com/dashboard/6';
+  'https://unusualwhales.com/dashboard/4';
 
 export const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 

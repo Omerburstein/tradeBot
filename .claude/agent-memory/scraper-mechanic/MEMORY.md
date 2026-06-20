@@ -1,0 +1,1 @@
+- [Chart view migration](project_chart_view_migration.md) — Scraper uses API interception on dashboard/4 instead of HTML table scraping on dashboard/6

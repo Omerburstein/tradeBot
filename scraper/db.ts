@@ -65,9 +65,41 @@ export async function insertSnapshots(rows: SnapshotRow[]): Promise<number> {
       `ON CONFLICT (captured_at, expiry, panel, strike) DO NOTHING`;
 
     // Neon v1 routes (text, params) call form through sql.query().
-    await sql.query(text, params);
+    await sql(text, params);
     submitted += chunk.length;
   }
 
   return submitted;
+}
+
+/**
+ * Insert a spot price observation into `spot_prices`.
+ *
+ * The table is created lazily if it doesn't exist (migration-free).
+ * Uses ON CONFLICT DO NOTHING so repeated inserts for the same
+ * (captured_at, expiry) are idempotent.
+ */
+export async function insertSpotPrice(
+  capturedAt: string,
+  expiry: string,
+  spot: number,
+): Promise<void> {
+  const sql = getDb();
+
+  await sql(
+    `CREATE TABLE IF NOT EXISTS spot_prices (
+       captured_at TIMESTAMPTZ NOT NULL,
+       date        DATE NOT NULL,
+       spot        NUMERIC(10, 2) NOT NULL,
+       PRIMARY KEY (captured_at, date)
+     )`,
+    [],
+  );
+
+  await sql(
+    `INSERT INTO spot_prices (captured_at, date, spot)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (captured_at, date) DO NOTHING`,
+    [capturedAt, expiry, spot],
+  );
 }
