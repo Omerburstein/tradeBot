@@ -16,10 +16,12 @@
  *   - Time gate: forced exit before 0DTE decay chaos (14:50 CT)
  */
 
+import type pino from 'pino';
 import { ConeTracker } from './cone.js';
 import {
   checkDailyLimits,
   checkStopLoss,
+  checkTakeProfit,
   checkTimeGates,
   computePositionSize,
   createFlatState,
@@ -50,11 +52,19 @@ export class SignalGenerator {
   private scoreHistory: ScoreComponents[] = [];
   private previousSnapshot: Snapshot | null = null;
   private trades: TradeRecord[] = [];
+  private logger?: pino.Logger;
 
-  constructor(config: AlgoConfig) {
+  /**
+   * @param config  Algorithm configuration.
+   * @param logger  Optional pino logger; when provided, every entry/exit
+   *                action is logged at info level. Omit to run silently
+   *                (e.g. inside the tuner's inner loop).
+   */
+  constructor(config: AlgoConfig, logger?: pino.Logger) {
     this.config = config;
     this.cone = new ConeTracker(config);
     this.state = createFlatState();
+    this.logger = logger;
   }
 
   /**
@@ -156,6 +166,12 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
     }
 
+    // Take-profit check: fixed target enforcing the configured risk:reward
+    const tpCheck = checkTakeProfit(this.state, snapshot.spot, config);
+    if (tpCheck.hit) {
+      return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
+    }
+
     // Cone returned: price fell back inside the band — breakout failed
     if (cone.crossed === 'returned') {
       return this.makeSignal('exit', score, cone, snapshot, 'medium', 'cone returned: failed breakout, price back inside band');
@@ -250,6 +266,21 @@ export class SignalGenerator {
         contracts,
         config.risk.slippagePerSide,
       );
+
+      this.logger?.info(
+        {
+          event: 'ENTRY',
+          order: direction === 'long' ? 'BUY' : 'SELL', // open
+          side: direction,
+          time: snapshot.capturedAt,
+          fillPrice: round2(this.state.entryPrice!),
+          contracts,
+          confidence: signal.confidence,
+          composite: round2(signal.score.composite),
+          reason: signal.reason,
+        },
+        `ENTRY ${direction.toUpperCase()} ${contracts}x @ ${this.state.entryPrice!.toFixed(2)} — ${signal.reason}`,
+      );
     } else if (signal.action === 'exit' && this.state.position !== 'flat') {
       const { newState, realizedPnl } = recordExit(
         this.state,
@@ -269,6 +300,21 @@ export class SignalGenerator {
         pnl: realizedPnl,
         reason: signal.reason,
       });
+
+      this.logger?.info(
+        {
+          event: 'EXIT',
+          order: this.state.position === 'long' ? 'SELL' : 'BUY', // close
+          side: this.state.position,
+          time: snapshot.capturedAt,
+          entryPrice: round2(this.state.entryPrice!),
+          exitPrice: round2(snapshot.spot),
+          contracts: this.state.contracts,
+          pnl: round2(realizedPnl),
+          reason: signal.reason,
+        },
+        `EXIT  ${(this.state.position as string).toUpperCase()} ${this.state.contracts}x @ ${snapshot.spot.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
+      );
 
       this.state = newState;
     }
@@ -295,4 +341,9 @@ export class SignalGenerator {
       timestamp: snapshot.capturedAt,
     };
   }
+}
+
+/** Round to 2 decimals for tidy log fields. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }

@@ -98,23 +98,11 @@ export function simulate(
 
   for (const day of tradingDays) {
     const daySnapshots = byDay.get(day)!;
-    const generator = new SignalGenerator(config);
+    // Passing the logger makes the generator emit an ENTRY/EXIT line per action.
+    const generator = new SignalGenerator(config, logger);
 
     for (const snapshot of daySnapshots) {
-      const signal = generator.processSnapshot(snapshot);
-
-      if (logger && signal.action !== 'hold') {
-        logger.debug(
-          {
-            time: signal.timestamp,
-            action: signal.action,
-            composite: signal.score.composite.toFixed(2),
-            cone: signal.cone.state,
-            reason: signal.reason,
-          },
-          'signal',
-        );
-      }
+      generator.processSnapshot(snapshot);
     }
 
     const finalState = generator.getState();

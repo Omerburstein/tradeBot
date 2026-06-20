@@ -106,6 +106,12 @@ export interface RiskParams {
   maxRiskPerTrade: number;
   /** Hard stop-loss in SPX points from entry. */
   stopLossPoints: number;
+  /**
+   * Reward-to-risk ratio for the fixed profit target. The take-profit sits at
+   * stopLossPoints × riskRewardRatio from entry, so riskRewardRatio = 3 gives
+   * a 1:3 risk:reward (risk 1 point to make 3).
+   */
+  riskRewardRatio: number;
   /** Profit threshold (SPX pts) to activate trailing stop. */
   trailingStopActivation: number;
   /** Distance (SPX pts) the trailing stop trails behind HWM. */
@@ -221,6 +227,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     accountEquity: 50_000,
     maxRiskPerTrade: 0.01,
     stopLossPoints: 10,
+    riskRewardRatio: 3, // 1:3 risk:reward → take-profit at 30 pts
     trailingStopActivation: 5,
     trailingStopDistance: 7,
     maxDailyLoss: 0.02,
