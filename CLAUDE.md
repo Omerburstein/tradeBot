@@ -150,3 +150,25 @@ Always run this after editing TypeScript files. The project has no automated tes
 - Fires one tick immediately on boot to avoid missing data after container restart
 - SIGTERM handler flushes Sentry then exits cleanly (Railway restart-safe)
 - Observability: Sentry for errors + pino JSON logs to stdout (Railway log pipeline)
+
+---
+
+## Git Workflow
+
+**Commit and push automatically** after completing a change — do NOT wait
+to be asked each time. The standard end-of-task flow is:
+
+1. `npx tsc --noEmit` (the correctness gate — must pass first)
+2. `git add -A && git commit` with a clear message (end with the
+   `Co-Authored-By: Claude ...` trailer)
+3. `git push origin HEAD:Adapt-scraper-to-own-usage`
+
+Notes:
+- The working branch is `Adapt-scraper-to-own-usage`. The local checkout
+  is confusingly named `remotes/origin/Adapt-scraper-to-own-usage`, so
+  **push with the explicit refspec** `HEAD:Adapt-scraper-to-own-usage`
+  (a bare `git push` may fail / target the wrong ref).
+- A `pre-push` hook runs `tsc --noEmit` + `npm run test:unit`. **Never
+  bypass it** (`--no-verify`) — if it fails, fix the underlying issue.
+- Do not commit transient artifacts: `docs/temp/` (scrape/debug dumps)
+  and `.claude/worktrees/` are gitignored — keep it that way.
