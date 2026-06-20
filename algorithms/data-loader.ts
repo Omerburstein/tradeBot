@@ -24,12 +24,12 @@ export async function loadDay(
 ): Promise<Snapshot[]> {
   const sql = getDb();
 
-  // Step 1: Get all snapshot rows for this expiry date across the 3 panels
+  // Step 1: Get all snapshot rows for this expiry date across the panels
   const rows = await sql(
     `SELECT captured_at, expiry, panel, strike, value, timeframe
      FROM periscope_snapshots
      WHERE expiry = $1
-       AND panel IN ('gamma', 'charm', 'vanna')
+       AND panel IN ('gamma', 'charm', 'vanna', 'positions')
      ORDER BY captured_at, strike`,
     [date],
   );
@@ -41,6 +41,8 @@ export async function loadDay(
 
   // Step 3: Group rows by captured_at
   const byTime = new Map<string, { timeframe: string; expiry: string; strikes: Map<number, Partial<StrikeData>> }>();
+
+  type GreekPanel = 'gamma' | 'charm' | 'vanna' | 'positions';
 
   for (const row of rows) {
     const capturedAt = String(row.captured_at);
@@ -57,11 +59,11 @@ export async function loadDay(
     const strike = Number(row.strike);
     let sd = group.strikes.get(strike);
     if (!sd) {
-      sd = { strike, gamma: 0, charm: 0, vanna: 0 };
+      sd = { strike, gamma: 0, charm: 0, vanna: 0, positions: 0 };
       group.strikes.set(strike, sd);
     }
 
-    const panel = String(row.panel) as 'gamma' | 'charm' | 'vanna';
+    const panel = String(row.panel) as GreekPanel;
     sd[panel] = Number(row.value);
   }
 

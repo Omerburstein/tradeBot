@@ -3,12 +3,14 @@
  * into actionable entry/exit signals.
  *
  * Entry logic (user requirements):
- *   - LONG: composite > +1.5 AND dGamma rising AND (cone crossed down OR strong inside signal)
- *   - SHORT: composite < -1.5 AND dGamma falling AND (cone crossed up OR strong inside signal)
+ *   The cone is treated as support/resistance, NOT a magnet. A breakout
+ *   through a band is a continuation signal — trade in the breakout direction.
+ *   - LONG:  composite > +1.5 AND dGamma rising  AND (broke UP through resistance OR strong inside signal)
+ *   - SHORT: composite < -1.5 AND dGamma falling AND (broke DOWN through support  OR strong inside signal)
  *
  * Exit logic:
  *   - Signal fade: composite drops below ±0.5
- *   - Cone returned: price re-enters cone after breach (mean-reversion played out)
+ *   - Cone returned: price falls back inside the cone after a breakout (failed breakout)
  *   - Reversal: composite flips past ±1.0 in opposing direction
  *   - Stop-loss: hard or trailing stop hit
  *   - Time gate: forced exit before 0DTE decay chaos (14:50 CT)
@@ -154,9 +156,9 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
     }
 
-    // Cone returned: mean-reversion played out
+    // Cone returned: price fell back inside the band — breakout failed
     if (cone.crossed === 'returned') {
-      return this.makeSignal('exit', score, cone, snapshot, 'medium', 'cone returned: mean-reversion target reached');
+      return this.makeSignal('exit', score, cone, snapshot, 'medium', 'cone returned: failed breakout, price back inside band');
     }
 
     // Signal fade: directional score dropped below exit threshold
@@ -180,9 +182,9 @@ export class SignalGenerator {
     const { config } = this;
 
     // ── LONG ENTRY ──
-    // Cone crossed down + bullish signal (mean-reversion long)
+    // Price broke UP through resistance (continuation long)
     // OR inside cone with very strong bullish signal
-    const longConeTrigger = cone.crossed === 'down';
+    const longConeTrigger = cone.crossed === 'up';
     const longStrongInside = cone.state === 'inside' && score.composite > config.strongEntryThreshold;
 
     if (
@@ -192,13 +194,14 @@ export class SignalGenerator {
     ) {
       const confidence = this.assessConfidence(score, longConeTrigger);
       const reason = longConeTrigger
-        ? `long entry: cone breach down + bullish gamma (z=${score.composite.toFixed(2)})`
+        ? `long entry: cone breakout up + bullish gamma (z=${score.composite.toFixed(2)})`
         : `long entry: strong inside-cone signal (z=${score.composite.toFixed(2)})`;
       return this.makeSignal('enter_long', score, cone, snapshot, confidence, reason);
     }
 
     // ── SHORT ENTRY ──
-    const shortConeTrigger = cone.crossed === 'up';
+    // Price broke DOWN through support (continuation short)
+    const shortConeTrigger = cone.crossed === 'down';
     const shortStrongInside = cone.state === 'inside' && score.composite < -config.strongEntryThreshold;
 
     if (
@@ -208,7 +211,7 @@ export class SignalGenerator {
     ) {
       const confidence = this.assessConfidence(score, shortConeTrigger);
       const reason = shortConeTrigger
-        ? `short entry: cone breach up + bearish gamma (z=${score.composite.toFixed(2)})`
+        ? `short entry: cone breakout down + bearish gamma (z=${score.composite.toFixed(2)})`
         : `short entry: strong inside-cone signal (z=${score.composite.toFixed(2)})`;
       return this.makeSignal('enter_short', score, cone, snapshot, confidence, reason);
     }
