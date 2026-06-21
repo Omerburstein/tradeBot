@@ -1136,6 +1136,8 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     const apiCaptures: Array<{ url: string; body: unknown }> = [];
     const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
     const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
+    const straddleResponses: Array<{ url: string; body: ApiStraddleResponse }> = [];
+    const tideResponses: Array<{ url: string; body: ApiNetFlowResponse }> = [];
 
     page.on('response', (response) => {
       const url = response.url();
@@ -1150,6 +1152,12 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           }
           if (url.includes('market_maker_contracts')) {
             mmcResponses.push({ url, body: body as ApiContractsResponse });
+          }
+          if (url.includes('/straddle')) {
+            straddleResponses.push({ url, body: body as ApiStraddleResponse });
+          }
+          if (url.includes('net-flow-ticks')) {
+            tideResponses.push({ url, body: body as ApiNetFlowResponse });
           }
         }).catch(() => undefined);
       }
@@ -1348,6 +1356,55 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
       },
       'scrapeAllPanels: parsed API response',
     );
+
+    // ── Market Tide (per 10-min slot) + Cone (once/day) ──
+    // Both endpoints load on dashboard/4, so their responses were captured
+    // above. Persist them here so the live tick stores them too — keyed by
+    // the same trading date the Greeks were scraped for. Best-effort: a
+    // failure here must not drop the Greek snapshot the caller inserts.
+    const tradeDate = bestResponse.date;
+    try {
+      const tideResp =
+        [...tideResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
+        ?? tideResponses[tideResponses.length - 1];
+      if (tideResp) {
+        const tideInserted = await insertMarketTide(netFlowToTideRows(tideResp.body, tradeDate));
+        logger.info({ tradeDate, tideInserted }, 'scrapeAllPanels: stored Market Tide');
+      } else {
+        logger.warn({ tradeDate }, 'scrapeAllPanels: no net-flow-ticks (Market Tide) response captured');
+      }
+    } catch (err) {
+      logger.warn(
+        { tradeDate, err: err instanceof Error ? err.message : String(err) },
+        'scrapeAllPanels: Market Tide store failed — non-blocking',
+      );
+    }
+
+    try {
+      if (await coneSnapshotExists(tradeDate)) {
+        logger.debug({ tradeDate }, 'scrapeAllPanels: cone already stored — skipping');
+      } else {
+        const straddleResp =
+          [...straddleResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
+          ?? straddleResponses[straddleResponses.length - 1];
+        const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
+        if (straddle != null) {
+          const inserted = await insertConeSnapshot({
+            date: tradeDate,
+            straddle,
+            capturedAt: new Date().toISOString(),
+          });
+          logger.info({ tradeDate, straddle, inserted }, 'scrapeAllPanels: stored Cone');
+        } else {
+          logger.warn({ tradeDate }, 'scrapeAllPanels: no straddle (Cone) value captured');
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        { tradeDate, err: err instanceof Error ? err.message : String(err) },
+        'scrapeAllPanels: Cone store failed — non-blocking',
+      );
+    }
 
     return {
       rows,
