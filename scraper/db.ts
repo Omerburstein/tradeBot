@@ -261,12 +261,14 @@ export async function coneSnapshotExists(date: string): Promise<boolean> {
 export async function insertConeSnapshot(row: ConeSnapshotRow): Promise<boolean> {
   const sql = getDb();
 
+  // Match the canonical shared-DB schema: PK (captured_at, date). This is
+  // a no-op when the table already exists; it only shapes a fresh DB.
   await sql(
     `CREATE TABLE IF NOT EXISTS cone_snapshots (
+       captured_at  TIMESTAMPTZ NOT NULL,
        date         DATE NOT NULL,
        straddle     NUMERIC(10, 2) NOT NULL,
-       captured_at  TIMESTAMPTZ NOT NULL,
-       PRIMARY KEY (date)
+       PRIMARY KEY (captured_at, date)
      )`,
     [],
   );
