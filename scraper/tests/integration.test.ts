@@ -16,9 +16,9 @@
  */
 
 import pino from 'pino';
-import { scrapeAllPanels } from './scrape.js';
-import { LOG_LEVEL } from './config.js';
-import type { Panel, SnapshotRow } from './types.js';
+import { scrapeAllPanels } from '../scrape/index.js';
+import { LOG_LEVEL } from '../core/config.js';
+import type { Panel, SnapshotRow } from '../core/types.js';
 
 const logger = pino({ level: LOG_LEVEL });
 

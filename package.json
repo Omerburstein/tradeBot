@@ -3,12 +3,12 @@
   "scripts": {
     "start": "node --env-file=.env --import=tsx/esm scraper/index.ts",
     "tick": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/index.ts",
-    "read-all": "node --env-file=.env --import=tsx/esm scraper/read-all.ts",
-    "probe": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/probe.ts",
-    "discover": "node --env-file=.env --import=tsx/esm scraper/discover.ts",
-    "test:unit": "node --import=tsx/esm scraper/schedule.test.ts",
-    "test:integration": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/integration.test.ts",
-    "periscope-probe": "node --env-file=.env scraper/periscope-probe.mjs",
+    "read-all": "node --env-file=.env --import=tsx/esm scraper/tools/read-all.ts",
+    "probe": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/tools/probe.ts",
+    "discover": "node --env-file=.env --import=tsx/esm scraper/tools/discover.ts",
+    "test:unit": "node --import=tsx/esm scraper/tests/schedule.test.ts",
+    "test:integration": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/tests/integration.test.ts",
+    "periscope-probe": "node --env-file=.env scraper/tools/periscope-probe.mjs",
     "backtest": "node --env-file=.env --import=tsx/esm algorithms/backtest.ts",
     "tune": "node --env-file=.env --import=tsx/esm algorithms/tuner.ts"
   },
