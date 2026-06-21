@@ -8,7 +8,7 @@
 
 import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import { DATABASE_URL } from './config.js';
-import type { SnapshotRow } from './types.js';
+import type { SnapshotRow, MarketTideRow, ConeSnapshotRow } from './types.js';
 
 const MAX_ROWS_PER_INSERT = 500;
 
@@ -168,4 +168,109 @@ export async function insertSpotPrices(
   }
 
   return submitted;
+}
+
+/**
+ * Batch-insert Market Tide observations into `market_tide` (one per
+ * 10-min slot). Lazy table-create + idempotent on captured_at.
+ * Returns the count of rows submitted (conflicts silently skipped).
+ */
+export async function insertMarketTide(
+  rows: ReadonlyArray<MarketTideRow>,
+): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  const sql = getDb();
+
+  await sql(
+    `CREATE TABLE IF NOT EXISTS market_tide (
+       captured_at        TIMESTAMPTZ NOT NULL,
+       date               DATE NOT NULL,
+       net_call_premium   NUMERIC(18, 4) NOT NULL,
+       net_put_premium    NUMERIC(18, 4) NOT NULL,
+       net_volume         BIGINT NOT NULL,
+       PRIMARY KEY (captured_at)
+     )`,
+    [],
+  );
+
+  let submitted = 0;
+  for (let i = 0; i < rows.length; i += MAX_ROWS_PER_INSERT) {
+    const chunk = rows.slice(i, i + MAX_ROWS_PER_INSERT);
+
+    const placeholders: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    for (const r of chunk) {
+      placeholders.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+      params.push(
+        r.capturedAt,
+        r.date,
+        r.netCallPremium,
+        r.netPutPremium,
+        r.netVolume,
+      );
+    }
+
+    const text =
+      `INSERT INTO market_tide ` +
+      `(captured_at, date, net_call_premium, net_put_premium, net_volume) ` +
+      `VALUES ${placeholders.join(', ')} ` +
+      `ON CONFLICT (captured_at) DO NOTHING`;
+
+    await sql(text, params);
+    submitted += chunk.length;
+  }
+
+  return submitted;
+}
+
+/**
+ * True if a Cone snapshot already exists for `date`. Used to skip
+ * re-scraping/inserting the once-per-day cone param.
+ *
+ * Tolerates a missing table (returns false) so the first-ever run — when
+ * `cone_snapshots` hasn't been lazily created yet — proceeds to scrape.
+ */
+export async function coneSnapshotExists(date: string): Promise<boolean> {
+  const sql = getDb();
+  try {
+    const rows = (await sql(
+      `SELECT 1 FROM cone_snapshots WHERE date = $1 LIMIT 1`,
+      [date],
+    )) as unknown[];
+    return rows.length > 0;
+  } catch {
+    // Table doesn't exist yet (or transient) — treat as "not present".
+    return false;
+  }
+}
+
+/**
+ * Insert the Cone (expected-move) param for a trading day into
+ * `cone_snapshots`. Lazy table-create + idempotent on the date PK.
+ * Returns true if a row was inserted (false if it already existed).
+ */
+export async function insertConeSnapshot(row: ConeSnapshotRow): Promise<boolean> {
+  const sql = getDb();
+
+  await sql(
+    `CREATE TABLE IF NOT EXISTS cone_snapshots (
+       date         DATE NOT NULL,
+       straddle     NUMERIC(10, 2) NOT NULL,
+       captured_at  TIMESTAMPTZ NOT NULL,
+       PRIMARY KEY (date)
+     )`,
+    [],
+  );
+
+  const result = (await sql(
+    `INSERT INTO cone_snapshots (date, straddle, captured_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (date) DO NOTHING
+     RETURNING date`,
+    [row.date, row.straddle, row.capturedAt],
+  )) as unknown[];
+
+  return result.length > 0;
 }

@@ -41,9 +41,20 @@ import pino from 'pino';
 // through this module gets the full stealth bundle.
 chromiumExtra.use(StealthPlugin());
 import { LOG_LEVEL, UW_AUTH_STATE_PATH, UW_PERISCOPE_URL } from './config.js';
-import { insertSnapshots, insertSpotPrices } from './db.js';
+import {
+  insertSnapshots,
+  insertSpotPrices,
+  insertMarketTide,
+  insertConeSnapshot,
+  coneSnapshotExists,
+} from './db.js';
 import { parseDateLabel } from './parser.js';
-import type { Panel, SnapshotRow } from './types.js';
+import type {
+  Panel,
+  SnapshotRow,
+  MarketTideRow,
+  ConeSnapshotRow,
+} from './types.js';
 
 /** Result of a single slot capture: rows + metadata for the caller. */
 export interface ScrapeResult {
@@ -111,6 +122,34 @@ interface ApiContractsResponse {
   };
 }
 
+/**
+ * Shape of the `bsoc/SPX/straddle?date=...` response — the ATM straddle
+ * price for the day (the Cone / expected-move param). e.g. {"straddle":"40.90"}
+ */
+interface ApiStraddleResponse {
+  straddle: string;
+}
+
+/**
+ * Shape of a single `net-flow-ticks` data point (one per minute).
+ */
+interface ApiNetFlowRow {
+  timestamp: string; // e.g. "2026-06-18T09:30:00-04:00"
+  date: string;      // e.g. "2026-06-18"
+  net_call_premium: string;
+  net_put_premium: string;
+  net_volume: number;
+}
+
+/**
+ * Shape of the `net-flow-ticks?date=...` response body (Market Tide).
+ * `data` is the full trading day at 1-min granularity (~390 points).
+ */
+interface ApiNetFlowResponse {
+  data: ApiNetFlowRow[];
+  prices?: unknown;
+}
+
 // US equity-options market holidays. SPX trading is closed on these
 // dates. Maintained inline because the periscope-scraper service does
 // not pull a holiday calendar from anywhere else; if the user backfills
@@ -176,23 +215,6 @@ function parseTimeframeStart(label: string): string | null {
   const m = label.match(TIMEFRAME_PATTERN);
   if (m?.[1] == null) return null;
   return normalizeHhmm(m[1]);
-}
-
-/**
- * Today's date in America/New_York (ET), formatted as YYYY-MM-DD. Used
- * by the live scraper to walk the date picker to the current trading
- * day regardless of whatever's saved in the storageState.
- *
- * `Intl.DateTimeFormat` with `en-CA` locale yields ISO-style
- * YYYY-MM-DD format directly — no manual zero-padding needed.
- */
-function todayInET(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
 }
 
 function prevDay(ymd: string): string {
@@ -1335,36 +1357,122 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
 }
 
 /**
- * Scrape one trading day into SnapshotRow[]: navigate the chart to
- * `date`, set Expiry=Single, then iterate 10-min slots from `startNorm`
- * through `endNorm`, parsing the intercepted MME + MMC API responses.
- *
- * The two response arrays are owned by the caller (so the same browser
- * page / listener can be reused across many days) and are cleared at
- * entry to avoid reading a prior day's stale slot. Throws if the date
- * cannot be selected (e.g. outside the Single-mode dropdown) — callers
- * decide whether that's fatal or just "no more history".
- *
- * Shared by scrapeBackfillRange (fixed date list) and scrapeWalkBack
- * (descending walk until history runs out) so per-day scrape behavior
- * lives in exactly one place.
+ * All intercepted dashboard/4 JSON responses we care about, grouped by
+ * endpoint. One listener fills every bucket so each scrape path attaches
+ * interception identically instead of duplicating the response handler.
  */
-async function scrapeDayRows(
+interface ApiCaptures {
+  mme: Array<{ url: string; body: ApiExposureResponse }>;
+  mmc: Array<{ url: string; body: ApiContractsResponse }>;
+  straddle: Array<{ url: string; body: ApiStraddleResponse }>;
+  tide: Array<{ url: string; body: ApiNetFlowResponse }>;
+}
+
+/**
+ * Attach a single `response` listener that routes every JSON response
+ * into the right ApiCaptures bucket (Greeks exposures, contracts,
+ * straddle/cone, net-flow/tide). Returns the live arrays; the caller
+ * clears them between days.
+ */
+function attachApiCaptures(page: Page): ApiCaptures {
+  const caps: ApiCaptures = { mme: [], mmc: [], straddle: [], tide: [] };
+  page.on('response', (response) => {
+    const url = response.url();
+    const ct = response.headers()['content-type'] ?? '';
+    if (!ct.includes('json')) return;
+    response
+      .json()
+      .then((body) => {
+        if (url.includes('market_maker_exposures')) {
+          caps.mme.push({ url, body: body as ApiExposureResponse });
+        } else if (url.includes('market_maker_contracts')) {
+          caps.mmc.push({ url, body: body as ApiContractsResponse });
+        } else if (url.includes('/straddle')) {
+          caps.straddle.push({ url, body: body as ApiStraddleResponse });
+        } else if (url.includes('net-flow-ticks')) {
+          caps.tide.push({ url, body: body as ApiNetFlowResponse });
+        }
+      })
+      .catch(() => undefined);
+  });
+  return caps;
+}
+
+/** Parse the ATM straddle (cone param) from a straddle response. */
+function parseStraddle(body: ApiStraddleResponse): number | null {
+  const v = Number.parseFloat(body.straddle);
+  return Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Convert a net-flow-ticks response (1-min Market Tide series) into
+ * 10-min-aligned MarketTideRow[]. UW timestamps carry a whole-hour ET
+ * offset, so UTC minutes equal ET minutes — `getUTCMinutes() % 10`
+ * cleanly selects the slot boundaries (09:30, 09:40, …, 16:00).
+ */
+function netFlowToTideRows(body: ApiNetFlowResponse, date: string): MarketTideRow[] {
+  const out: MarketTideRow[] = [];
+  for (const pt of body.data ?? []) {
+    const d = new Date(pt.timestamp);
+    if (Number.isNaN(d.getTime())) continue;
+    if (d.getUTCMinutes() % 10 !== 0) continue;
+    const ncp = Number.parseFloat(pt.net_call_premium);
+    const npp = Number.parseFloat(pt.net_put_premium);
+    const nv = Number(pt.net_volume);
+    if (!Number.isFinite(ncp) || !Number.isFinite(npp) || !Number.isFinite(nv)) {
+      continue;
+    }
+    out.push({
+      capturedAt: d.toISOString(),
+      date: pt.date ?? date,
+      netCallPremium: ncp,
+      netPutPremium: npp,
+      netVolume: nv,
+    });
+  }
+  return out;
+}
+
+/** Outcome of scraping + persisting one trading day. */
+interface DayStoreSummary {
+  /** Greek/positions snapshot rows parsed (0 ⇒ likely past history floor). */
+  rowsParsed: number;
+  snapshotsInserted: number;
+  spotsInserted: number;
+  tidePointsInserted: number;
+  /** A new cone row was written. */
+  coneInserted: boolean;
+  /** Cone skipped because a snapshot already existed for this date. */
+  coneSkipped: boolean;
+  slotsScanned: number;
+}
+
+/**
+ * Scrape one trading day AND persist everything for it: navigate the
+ * chart to `date`, set Expiry=Single, iterate 10-min slots from
+ * `startNorm`..`endNorm` capturing Greeks/positions + per-slot spot,
+ * then store Market Tide (per 10-min slot) and the Cone param
+ * (straddle, once/day — skipped if already in the DB).
+ *
+ * This is THE shared per-day scraper: scrapeBackfill (single date),
+ * scrapeBackfillRange (fixed list), and scrapeWalkBack (descending walk)
+ * all route through it, so scrape + insert behavior lives in one place.
+ * Throws if the date can't be selected (callers decide if that's fatal
+ * or just "no more history").
+ */
+async function scrapeAndStoreDay(
   page: Page,
   date: string,
   startNorm: string,
   endNorm: string,
-  mmeResponses: Array<{ url: string; body: ApiExposureResponse }>,
-  mmcResponses: Array<{ url: string; body: ApiContractsResponse }>,
-): Promise<{
-  rows: SnapshotRow[];
-  spots: Array<{ capturedAt: string; expiry: string; spot: number }>;
-  slotsScanned: number;
-}> {
-  // Drop any responses left over from the previous day's last slot so
-  // the `?? last` fallback below can't read stale data for this date.
-  mmeResponses.length = 0;
-  mmcResponses.length = 0;
+  caps: ApiCaptures,
+): Promise<DayStoreSummary> {
+  // Drop any responses left over from the previous day so the `?? last`
+  // fallbacks below can't read stale data for this date.
+  caps.mme.length = 0;
+  caps.mmc.length = 0;
+  caps.straddle.length = 0;
+  caps.tide.length = 0;
 
   await walkDateToTarget(page, date);
   await page.waitForTimeout(1_500);
@@ -1391,10 +1499,10 @@ async function scrapeDayRows(
     await page.waitForLoadState('networkidle').catch(() => undefined);
     await page.waitForTimeout(1_000);
 
-    const latestMme = [...mmeResponses]
+    const latestMme = [...caps.mme]
       .reverse()
       .find(r => r.url.includes(`expiry=${date}`))
-      ?? mmeResponses[mmeResponses.length - 1];
+      ?? caps.mme[caps.mme.length - 1];
 
     if (latestMme) {
       const { rows, qualifyingStrikes, spot, expiry } = apiResponseToRows(latestMme.body, capturedAt);
@@ -1405,10 +1513,10 @@ async function scrapeDayRows(
         daySpots.push({ capturedAt, expiry, spot });
       }
 
-      const latestMmc = [...mmcResponses]
+      const latestMmc = [...caps.mmc]
         .reverse()
         .find(r => r.url.includes(`expiry=${date}`))
-        ?? mmcResponses[mmcResponses.length - 1];
+        ?? caps.mmc[caps.mmc.length - 1];
       if (latestMmc) {
         dayRows.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
       }
@@ -1419,24 +1527,68 @@ async function scrapeDayRows(
     const nextStart = nextTimeframe(currentStart);
     if (nextStart > endNorm) break;
 
-    mmeResponses.length = 0;
-    mmcResponses.length = 0;
+    // Clear only the per-slot Greek responses — straddle/tide are
+    // fetched once per day and must survive the whole slot loop.
+    caps.mme.length = 0;
+    caps.mmc.length = 0;
     await advanceTimeframeOneSlot(page);
     await page.waitForTimeout(1_500);
     currentStart = nextStart;
   }
 
-  return { rows: dayRows, spots: daySpots, slotsScanned };
+  // ── Persist Greeks/positions + per-slot spot ──
+  const snapshotsInserted = await insertSnapshots(dayRows);
+  const spotsInserted = await insertSpotPrices(daySpots);
+
+  // ── Market Tide: one net-flow-ticks call covers the whole day ──
+  const tideResp =
+    [...caps.tide].reverse().find(r => r.url.includes(`date=${date}`))
+    ?? caps.tide[caps.tide.length - 1];
+  let tidePointsInserted = 0;
+  if (tideResp) {
+    tidePointsInserted = await insertMarketTide(netFlowToTideRows(tideResp.body, date));
+  } else {
+    logger.warn({ date }, 'scrapeAndStoreDay: no net-flow-ticks (Market Tide) response captured');
+  }
+
+  // ── Cone (once/day): skip entirely if already stored for this date ──
+  let coneInserted = false;
+  let coneSkipped = false;
+  if (await coneSnapshotExists(date)) {
+    coneSkipped = true;
+  } else {
+    const straddleResp =
+      [...caps.straddle].reverse().find(r => r.url.includes(`date=${date}`))
+      ?? caps.straddle[caps.straddle.length - 1];
+    const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
+    if (straddle != null) {
+      const cone: ConeSnapshotRow = {
+        date,
+        straddle,
+        capturedAt: new Date().toISOString(),
+      };
+      coneInserted = await insertConeSnapshot(cone);
+    } else {
+      logger.warn({ date }, 'scrapeAndStoreDay: no straddle (Cone) value captured');
+    }
+  }
+
+  return {
+    rowsParsed: dayRows.length,
+    snapshotsInserted,
+    spotsInserted,
+    tidePointsInserted,
+    coneInserted,
+    coneSkipped,
+    slotsScanned,
+  };
 }
 
 /**
- * Backfill mode: walk to a specific historical date, then iterate
- * 10-min timeframe slots from `startHhmm` through `endHhmm`, capturing
- * Gamma + Charm + Vanna at each. Used to seed the database with a
- * full day's intraday history in one run.
- *
- * For the chart view, each timeframe change triggers a new API call.
- * We intercept those responses to parse the data.
+ * Backfill mode: scrape + persist a single historical date. A thin
+ * wrapper around the shared `scrapeAndStoreDay` (the same per-day scraper
+ * used by the range + walk-back paths) so single-date runs capture and
+ * store Greeks, spot, Market Tide, and the Cone identically.
  *
  * The captured_at on each row is computed from the slot's END time
  * (e.g. a "09:20 - 09:30" ET slot stamps captured_at=09:30 ET) so a
@@ -1446,40 +1598,16 @@ export async function scrapeBackfill(
   targetDate: string,
   startHhmm: string,
   endHhmm: string,
-): Promise<SnapshotRow[]> {
+): Promise<DayStoreSummary> {
   const startNorm = normalizeHhmm(startHhmm);
   const endNorm = normalizeHhmm(endHhmm);
 
   return await withBrowser(async (_browser, page) => {
-    // Set up API interception
-    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
-    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
-
-    page.on('response', (response) => {
-      const url = response.url();
-      const ct = response.headers()['content-type'] ?? '';
-      if (ct.includes('json')) {
-        if (url.includes('market_maker_exposures')) {
-          response.json().then((body) => {
-            mmeResponses.push({ url, body: body as ApiExposureResponse });
-          }).catch(() => undefined);
-        }
-        if (url.includes('market_maker_contracts')) {
-          response.json().then((body) => {
-            mmcResponses.push({ url, body: body as ApiContractsResponse });
-          }).catch(() => undefined);
-        }
-      }
-    });
+    const caps = attachApiCaptures(page);
 
     logger.info(
-      { targetDate, startHhmm: startNorm, endHhmm: endNorm },
-      'backfill: starting',
-    );
-
-    logger.info(
-      { url: UW_PERISCOPE_URL, targetDate },
-      'backfill: navigating + walking date + setting Expiry=Single',
+      { targetDate, startHhmm: startNorm, endHhmm: endNorm, url: UW_PERISCOPE_URL },
+      'backfill: starting — navigating to periscope',
     );
     await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
     await waitForChartReady(page);
@@ -1487,97 +1615,10 @@ export async function scrapeBackfill(
     // Collapse the left nav sidebar to maximize chart area.
     await clickZoomOut(page);
 
-    // Walk the chart date to the target.
-    if (targetDate !== todayInET()) {
-      await walkDateToTarget(page, targetDate);
-      await page.waitForTimeout(1_500);
-    }
+    const summary = await scrapeAndStoreDay(page, targetDate, startNorm, endNorm, caps);
 
-    const ok = await setExpirySingle(page, targetDate);
-    if (!ok) {
-      throw new Error(
-        `backfill: setExpirySingle(${targetDate}) failed — UW UI may have changed or date is outside Single-mode dropdown`,
-      );
-    }
-    await waitForChartReady(page);
-
-    await walkTimeframeToTarget(page, startNorm);
-    await page.waitForTimeout(1_500);
-
-    const allRows: SnapshotRow[] = [];
-    const allSpots: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
-    let currentStart = startNorm;
-    let slotsScanned = 0;
-
-    while (currentStart <= endNorm) {
-      const slotEnd = nextTimeframe(currentStart);
-      const capturedAt = computeCapturedAt(targetDate, slotEnd);
-
-      logger.info(
-        { slot: `${currentStart}-${slotEnd}`, capturedAt },
-        'backfill: scraping slot',
-      );
-
-      // Wait for the API response after the timeframe change.
-      await page.waitForLoadState('networkidle').catch(() => undefined);
-      await page.waitForTimeout(1_000);
-
-      // Find the most recent MME response for the target expiry.
-      const latestMme = [...mmeResponses]
-        .reverse()
-        .find(r => r.url.includes(`expiry=${targetDate}`))
-        ?? mmeResponses[mmeResponses.length - 1];
-
-      if (latestMme) {
-        const { rows, qualifyingStrikes, spot, expiry } = apiResponseToRows(latestMme.body, capturedAt);
-        allRows.push(...rows);
-
-        // Record this slot's SPX spot (one observation per 10-min window).
-        if (Number.isFinite(spot) && spot > 0) {
-          allSpots.push({ capturedAt, expiry, spot });
-        }
-
-        // Also capture positions from contracts API.
-        const latestMmc = [...mmcResponses]
-          .reverse()
-          .find(r => r.url.includes(`expiry=${targetDate}`))
-          ?? mmcResponses[mmcResponses.length - 1];
-        if (latestMmc) {
-          allRows.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
-        }
-      } else {
-        logger.warn(
-          { slot: `${currentStart}-${slotEnd}` },
-          'backfill: no API response for this slot',
-        );
-      }
-
-      slotsScanned += 1;
-
-      const nextStart = nextTimeframe(currentStart);
-      if (nextStart > endNorm) break;
-
-      // Clear old responses before advancing to avoid re-reading stale data.
-      mmeResponses.length = 0;
-      mmcResponses.length = 0;
-
-      await advanceTimeframeOneSlot(page);
-      // Wait for chart to re-render under the new timeframe.
-      await page.waitForTimeout(1_500);
-
-      currentStart = nextStart;
-    }
-
-    // Persist per-slot spot prices. Snapshot rows are returned for the
-    // caller to insert (index.ts), but spots have no other consumer, so
-    // we write them here to keep the single-date path self-contained.
-    const spotsInserted = await insertSpotPrices(allSpots);
-
-    logger.info(
-      { totalRows: allRows.length, spotsInserted, slotsScanned },
-      'backfill: complete',
-    );
-    return allRows;
+    logger.info({ targetDate, ...summary }, 'backfill: complete');
+    return summary;
   });
 }
 
@@ -1605,26 +1646,7 @@ export async function scrapeBackfillRange(
   const dates = tradingDaysBetween(startDate, endDate);
 
   return await withBrowser(async (_browser, page) => {
-    // Set up API interception
-    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
-    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
-
-    page.on('response', (response) => {
-      const url = response.url();
-      const ct = response.headers()['content-type'] ?? '';
-      if (ct.includes('json')) {
-        if (url.includes('market_maker_exposures')) {
-          response.json().then((body) => {
-            mmeResponses.push({ url, body: body as ApiExposureResponse });
-          }).catch(() => undefined);
-        }
-        if (url.includes('market_maker_contracts')) {
-          response.json().then((body) => {
-            mmcResponses.push({ url, body: body as ApiContractsResponse });
-          }).catch(() => undefined);
-        }
-      }
-    });
+    const caps = attachApiCaptures(page);
 
     logger.info(
       {
@@ -1666,29 +1688,15 @@ export async function scrapeBackfillRange(
       logger.info({ date, progress }, 'backfill range: starting day');
 
       try {
-        const { rows: dayRows, spots: daySpots, slotsScanned } = await scrapeDayRows(
-          page,
-          date,
-          startNorm,
-          endNorm,
-          mmeResponses,
-          mmcResponses,
-        );
-
-        // Insert this day's rows + per-slot spot prices.
-        const inserted = await insertSnapshots(dayRows);
-        const spotsInserted = await insertSpotPrices(daySpots);
-        totalRowsInserted += inserted;
+        const summary = await scrapeAndStoreDay(page, date, startNorm, endNorm, caps);
+        totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
 
         logger.info(
           {
             date,
             progress,
-            slotsScanned,
-            rowsParsed: dayRows.length,
-            inserted,
-            spotsInserted,
+            ...summary,
             totalRowsInserted,
             daysFailed: daysFailed.length,
             ms: Date.now() - dayStarted,
@@ -1762,26 +1770,7 @@ export async function scrapeWalkBack(opts: {
   const maxEmpty = opts.maxConsecutiveEmpty ?? 3;
 
   return await withBrowser(async (_browser, page) => {
-    // Set up API interception (same shape as the backfill paths).
-    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
-    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
-
-    page.on('response', (response) => {
-      const url = response.url();
-      const ct = response.headers()['content-type'] ?? '';
-      if (ct.includes('json')) {
-        if (url.includes('market_maker_exposures')) {
-          response.json().then((body) => {
-            mmeResponses.push({ url, body: body as ApiExposureResponse });
-          }).catch(() => undefined);
-        }
-        if (url.includes('market_maker_contracts')) {
-          response.json().then((body) => {
-            mmcResponses.push({ url, body: body as ApiContractsResponse });
-          }).catch(() => undefined);
-        }
-      }
-    });
+    const caps = attachApiCaptures(page);
 
     const firstDate = latestTradingDay();
     logger.info(
@@ -1816,25 +1805,15 @@ export async function scrapeWalkBack(opts: {
       logger.info({ date, consecutiveEmpty }, 'walk-back: starting day');
 
       try {
-        const { rows: dayRows, spots: daySpots, slotsScanned } = await scrapeDayRows(
-          page,
-          date,
-          startNorm,
-          endNorm,
-          mmeResponses,
-          mmcResponses,
-        );
-
-        const inserted = await insertSnapshots(dayRows);
-        const spotsInserted = await insertSpotPrices(daySpots);
-        totalRowsInserted += inserted;
+        const summary = await scrapeAndStoreDay(page, date, startNorm, endNorm, caps);
+        totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
 
-        if (dayRows.length === 0) {
+        if (summary.rowsParsed === 0) {
           consecutiveEmpty += 1;
           daysEmpty.push(date);
           logger.info(
-            { date, slotsScanned, consecutiveEmpty, ms: Date.now() - dayStarted },
+            { date, ...summary, consecutiveEmpty, ms: Date.now() - dayStarted },
             'walk-back: day returned 0 rows (likely past history floor)',
           );
         } else {
@@ -1844,10 +1823,7 @@ export async function scrapeWalkBack(opts: {
           logger.info(
             {
               date,
-              slotsScanned,
-              rowsParsed: dayRows.length,
-              inserted,
-              spotsInserted,
+              ...summary,
               totalRowsInserted,
               ms: Date.now() - dayStarted,
             },
