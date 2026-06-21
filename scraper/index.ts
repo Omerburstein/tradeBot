@@ -357,6 +357,26 @@ process.on('SIGINT', () => {
   void shutdown('SIGINT');
 });
 
+/**
+ * Exit a one-shot run (FORCE_TICK / backfill) without slamming the event
+ * loop. Calling process.exit() immediately after Playwright + libuv
+ * teardown can race on Windows — uv_async_send fires on an already-closing
+ * handle, crashing with "Assertion failed: !(handle->flags &
+ * UV_HANDLE_CLOSING), src\\win\\async.c". Flushing telemetry then letting
+ * the loop drain naturally (with an unref'd hard-exit fallback so we still
+ * always terminate) sidesteps the race.
+ */
+async function gracefulExit(code: number): Promise<void> {
+  try {
+    await Sentry.close(2000);
+  } catch {
+    // never block exit on telemetry teardown
+  }
+  process.exitCode = code;
+  // Safety net: if some handle keeps the loop alive, force-exit shortly.
+  setTimeout(() => process.exit(code), 2_000).unref();
+}
+
 logger.info('periscope-scraper starting');
 
 const forceTick =
@@ -397,11 +417,8 @@ if (backfillDateStart !== '' && backfillDateEnd !== '') {
       'backfill range failed at top level',
     );
   }
-  await Sentry.flush(2000);
-  process.exit(0);
-}
-
-if (backfillDate !== '') {
+  await gracefulExit(0);
+} else if (backfillDate !== '') {
   logger.info(
     { backfillDate, backfillStart, backfillEnd },
     'BACKFILL_DATE set — running historical backfill then exiting',
@@ -419,22 +436,18 @@ if (backfillDate !== '') {
     Sentry.captureException(err);
     logger.error({ err, ms: Date.now() - startedAt }, 'backfill failed');
   }
-  await Sentry.flush(2000);
-  process.exit(0);
-}
-
-if (forceTick) {
+  await gracefulExit(0);
+} else if (forceTick) {
   logger.info(
     'FORCE_TICK=true — running one tick (RTH gate bypassed) then exiting',
   );
   await runTick({ bypassMarketHours: true });
-  await Sentry.flush(2000);
-  process.exit(0);
+  await gracefulExit(0);
+} else {
+  // Fire one tick immediately so a Railway restart mid-session resumes promptly.
+  await runTick();
+
+  intervalHandle = setInterval(() => {
+    void runTick();
+  }, MS_PER_TICK);
 }
-
-// Fire one tick immediately so a Railway restart mid-session resumes promptly.
-await runTick();
-
-intervalHandle = setInterval(() => {
-  void runTick();
-}, MS_PER_TICK);
