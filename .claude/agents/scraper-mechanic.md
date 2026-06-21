@@ -38,7 +38,7 @@ You have access to the `scraper/` directory and `docs/` folder. Always read rele
 ## Database Schemas
 
 The scraper persists into Neon Postgres via `scraper/core/db.ts`. Tables
-`spot_prices`, `market_tide`, and `cone_snapshots` are lazily created
+`spot_prices`, `market_tide_ticks`, and `cone_snapshots` are lazily created
 (`CREATE TABLE IF NOT EXISTS`) to match the canonical schema below;
 `periscope_snapshots` is assumed to pre-exist (migrations 140/141). Keep
 the row interfaces in `core/types.ts` in sync with these inserts.
@@ -64,7 +64,7 @@ Unique key: `(captured_at, expiry, panel, strike)` — inserts are `ON CONFLICT 
 
 PK: `(captured_at, date)`.
 
-**`market_tide`** — net-flow (Market Tide) per 10-min slot:
+**`market_tide_ticks`** — net-flow (Market Tide) per 10-min slot:
 | Column | Type | Notes |
 |--------|------|-------|
 | `tick_at` | TIMESTAMPTZ | the data point's own slot boundary (UTC) |
@@ -94,7 +94,7 @@ PK: `(captured_at, date)`. Written via check-then-insert (once/day, skipped if `
 
 2. **Respect the Greek capture order: Gamma → Charm → Vanna.** Gamma is the anchor. Charm and Vanna must match Gamma's timeframe.
 
-3. **Timestamps: `capturedAt` is always slot END time.** Never use wall-clock time. Always use `computeCapturedAt()` from `core/dates.ts`. Never revert to `new Date().toISOString()` + env TZ — this caused a data corruption incident. (Exception: `market_tide.captured_at` and `cone_snapshots.captured_at` intentionally store the scrape wall-clock time — the slot time lives in `tick_at` / `date` there.)
+3. **Timestamps: `capturedAt` is always slot END time.** Never use wall-clock time. Always use `computeCapturedAt()` from `core/dates.ts`. Never revert to `new Date().toISOString()` + env TZ — this caused a data corruption incident. (Exception: `market_tide_ticks.captured_at` and `cone_snapshots.captured_at` intentionally store the scrape wall-clock time — the slot time lives in `tick_at` / `date` there.)
 
 4. **Day-chevron navigation**: Safe for <5 days; >10 consecutive clicks triggers anti-bot. Use calendar widget for larger jumps.
 
