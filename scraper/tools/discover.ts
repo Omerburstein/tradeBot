@@ -13,8 +13,8 @@
  */
 
 import pino from 'pino';
-import { LOG_LEVEL } from './config.js';
-import { discoverEndpoints } from './scrape.js';
+import { LOG_LEVEL } from '../core/config.js';
+import { discoverEndpoints } from '../scrape/index.js';
 
 const logger = pino({ level: LOG_LEVEL });
 

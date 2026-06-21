@@ -7,9 +7,9 @@
  * Run via:  npm run probe
  */
 
-import { scrapeAllPanels } from './scrape.js';
+import { scrapeAllPanels } from '../scrape/index.js';
 import pino from 'pino';
-import { LOG_LEVEL } from './config.js';
+import { LOG_LEVEL } from '../core/config.js';
 
 const logger = pino({ level: LOG_LEVEL });
 

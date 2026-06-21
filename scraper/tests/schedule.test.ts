@@ -26,15 +26,15 @@ import {
   expectedWindowEnd,
   parseSlotEnd,
   computeCapturedAt,
-} from './dates.js';
+} from '../core/dates.js';
 
-// scrape.ts → config.ts throws at import if DATABASE_URL is unset. This
-// test never opens a connection; the stub just satisfies the load-time
-// guard. Set BEFORE the dynamic import below (static imports are hoisted,
-// so tradingDaysBetween must come in via await import()).
+// The scrape engine → core/config.ts throws at import if DATABASE_URL is
+// unset. This test never opens a connection; the stub just satisfies the
+// load-time guard. Set BEFORE the dynamic import below (static imports are
+// hoisted, so tradingDaysBetween must come in via await import()).
 process.env.DATABASE_URL ??=
   'postgres://stub:stub@localhost:5432/stub?sslmode=require';
-const { tradingDaysBetween } = await import('./scrape.js');
+const { tradingDaysBetween } = await import('../scrape/index.js');
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 

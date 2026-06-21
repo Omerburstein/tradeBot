@@ -7,7 +7,7 @@
  * the gamma panel's header if the dedicated table doesn't exist yet.
  */
 
-import { getDb } from '../scraper/db.js';
+import { getDb } from '../scraper/core/db.js';
 import type { Snapshot, StrikeData } from './types.js';
 
 /**

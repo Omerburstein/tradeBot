@@ -12,15 +12,35 @@ Production Railway-deployed scraper for [Unusual Whales Periscope](https://unusu
 
 ```
 scraper/
-├── index.ts          # Entry point: main loop, lifecycle, schedule-aware dedup
-├── scrape.ts         # Playwright automation, anti-detection, HTML parsing orchestration (~1400 lines)
-├── parser.ts         # Pure HTML → SnapshotRow[] (node-html-parser, no DOM)
-├── db.ts             # Neon Postgres batch inserts (500 rows/call)
-├── dates.ts          # Timezone utilities (ET↔UTC, RTH/active-window gates)
-├── config.ts         # Env var validation + MS_PER_TICK constant
-├── types.ts          # Panel type + SnapshotRow interface
-├── webhook.ts        # Auto-playbook webhook poster (non-blocking, 3-attempt retry)
-└── periscope-probe.mjs  # Phase-0 dev tool: headed login + selector discovery
+├── index.ts              # Entry point: main loop, lifecycle, schedule-aware dedup
+├── core/                 # Shared infrastructure
+│   ├── config.ts         # Env var validation + MS_PER_TICK constant
+│   ├── types.ts          # Panel type + SnapshotRow interface
+│   ├── dates.ts          # Timezone utilities (ET↔UTC, RTH/active-window gates)
+│   ├── db.ts             # Neon Postgres batch inserts (500 rows/call)
+│   ├── parser.ts         # Pure HTML → SnapshotRow[] (node-html-parser, no DOM)
+│   ├── webhook.ts        # Auto-playbook webhook poster (non-blocking, 3-attempt retry)
+│   └── logger.ts         # Shared Pino logger for the scrape/ engine
+├── scrape/               # Playwright scrape engine (split from the old ~2000-line scrape.ts)
+│   ├── index.ts          # Barrel: public API (scrapeAllPanels, scrapeBackfill, …)
+│   ├── browser.ts        # Stealth init + withBrowser lifecycle
+│   ├── api-types.ts      # API response interfaces + ApiCaptures + ScrapeResult
+│   ├── api-transforms.ts # Pure API payload → SnapshotRow[]/MarketTideRow[] transforms
+│   ├── captures.ts       # attachApiCaptures response router
+│   ├── trading-calendar.ts # Holidays + trading-day arithmetic
+│   ├── timeframe.ts      # Timeframe HH:MM math + widget walkers
+│   ├── navigation.ts     # Expiry/DTE filters + date-picker walkers
+│   ├── chart.ts          # Chart-ready wait, zoom-out, spot/strike readers
+│   ├── panels.ts         # scrapeAllPanels (live single-slot tick)
+│   └── orchestrate.ts    # Per-day scraper + backfill/range/walk-back/discover
+├── tools/                # Dev/probe utilities
+│   ├── probe.ts          # One-shot scrapeAllPanels runner
+│   ├── discover.ts       # Dump all JSON XHRs for endpoint discovery
+│   ├── read-all.ts       # Walk-back history reader
+│   └── periscope-probe.mjs # Phase-0 dev tool: headed login + selector discovery
+└── tests/
+    ├── schedule.test.ts  # Dependency-free unit tests (pre-push gate)
+    └── integration.test.ts # Live auth + DB integration test
 ```
 
 ---
@@ -40,7 +60,7 @@ scraper/
 ### Timestamps & Timezone
 - **All wall-clock representation is Eastern Time (ET / America/New_York)** — matching exactly what the UW Periscope dashboard displays. The `timeframe` label, the slot-END gates, dedup, and the headless browser's `timezoneId` all speak ET. (Converted from CT on 2026-06-20 so DB labels match the dashboard; ET is always +1h from the SPX pit's CT, so the same real-world instants are preserved.)
 - `capturedAt` always represents slot **END** time (e.g., the 09:20–09:30 slot → `capturedAt = 09:30 ET`). It is an absolute UTC instant and is unaffected by the CT→ET choice — only the wall-clock representation moved.
-- **Never** use wall-clock time as `capturedAt`; use `computeCapturedAt(date, slotEndHhmm)` in `dates.ts` (slotEndHhmm is ET).
+- **Never** use wall-clock time as `capturedAt`; use `computeCapturedAt(date, slotEndHhmm)` in `core/dates.ts` (slotEndHhmm is ET).
 - All timestamps stored as UTC ISO-8601 TIMESTAMPTZ in Postgres.
 - **Do NOT assume container TZ** — `computeCapturedAt` computes the ET→UTC offset explicitly via `Intl.DateTimeFormat`. This was a regression (corrupted 5/4–5/7 data). Do not revert to `new Date(...).toISOString()` + env TZ.
 
@@ -55,7 +75,7 @@ scraper/
 - If UW publishes a new slot mid-capture (timeframe drift), the scraper detects it and walks back to the gamma timeframe
 
 ### DB Schema Sync
-- `SnapshotRow` in `types.ts` must stay in sync with `insertSnapshots` in `db.ts`
+- `SnapshotRow` in `core/types.ts` must stay in sync with `insertSnapshots` in `core/db.ts`
 - Unique constraint: `(captured_at, expiry, panel, strike)` → inserts are idempotent (`ON CONFLICT DO NOTHING`)
 
 ### Schedule-Aware Dedup
@@ -127,7 +147,7 @@ Always run this after editing TypeScript files. The project has no automated tes
 
 1. **Headless Single-date dropdown**: UW returns an "All" placeholder in headless mode instead of the date list. Workaround: fall back to `walkDateToTarget` + `DTE=[0,0]`. The headed probe (`periscope-probe.mjs`) gets the full list — likely UW's headless-detection guard.
 
-2. **`US_MARKET_HOLIDAYS` is hardcoded** in `scrape.ts` (2025–2026). Update annually in December. Used to skip backfill days (perf optimization, not a correctness gate).
+2. **`US_MARKET_HOLIDAYS` is hardcoded** in `scrape/trading-calendar.ts` (2025–2026). Update annually in December. Used to skip backfill days (perf optimization, not a correctness gate).
 
 3. **Radix popovers**: Multiple poppers can be mounted simultaneously. Locators filter by content to avoid clicking wrong ones. Close animation from one click can block the next; scraper settles + uses `force: true` + retries.
 
@@ -139,7 +159,7 @@ Always run this after editing TypeScript files. The project has no automated tes
 
 ## Auth State Management
 
-- **Local dev**: Run `node scraper/periscope-probe.mjs --login` for a headed browser login → saves `~/.periscope-probe-auth.json`
+- **Local dev**: Run `node scraper/tools/periscope-probe.mjs --login` for a headed browser login → saves `~/.periscope-probe-auth.json`
 - **Railway**: Set `UW_AUTH_STATE_B64` (base64 of the storageState JSON). `index.ts` decodes it to `UW_AUTH_STATE_PATH` at boot. **Never commit or log the raw storageState JSON.**
 
 ---

@@ -5,7 +5,7 @@
  * trade state, and configuration for the algorithm pipeline.
  */
 
-import type { Panel } from '../scraper/types.js';
+import type { Panel } from '../scraper/core/types.js';
 
 // ── Data Model ──
 

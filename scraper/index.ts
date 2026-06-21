@@ -76,12 +76,12 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
 
 // Now safe to load config (and capture its throws via the Sentry above).
 const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow } =
-  await import('./config.js');
-const { expectedWindowEnd, parseSlotEnd } = await import('./dates.js');
-const { insertSnapshots, insertSpotPrice } = await import('./db.js');
+  await import('./core/config.js');
+const { expectedWindowEnd, parseSlotEnd } = await import('./core/dates.js');
+const { insertSnapshots, insertSpotPrice } = await import('./core/db.js');
 const { scrapeAllPanels, scrapeBackfill, scrapeBackfillRange } =
-  await import('./scrape.js');
-const { loadWebhookConfig, postPlaybookWebhook } = await import('./webhook.js');
+  await import('./scrape/index.js');
+const { loadWebhookConfig, postPlaybookWebhook } = await import('./core/webhook.js');
 
 const logger = pino({ level: LOG_LEVEL });
 

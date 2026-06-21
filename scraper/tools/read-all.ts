@@ -56,8 +56,8 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
   }
 }
 
-const { LOG_LEVEL } = await import('./config.js');
-const { scrapeWalkBack } = await import('./scrape.js');
+const { LOG_LEVEL } = await import('../core/config.js');
+const { scrapeWalkBack } = await import('../scrape/index.js');
 
 const logger = pino({ level: LOG_LEVEL });
 
