@@ -248,8 +248,15 @@ export async function coneSnapshotExists(date: string): Promise<boolean> {
 
 /**
  * Insert the Cone (expected-move) param for a trading day into
- * `cone_snapshots`. Lazy table-create + idempotent on the date PK.
- * Returns true if a row was inserted (false if it already existed).
+ * `cone_snapshots`. Returns true if a row was inserted (false if one
+ * already existed for the date).
+ *
+ * Uses a check-then-insert rather than ON CONFLICT: the cone_snapshots
+ * table may predate this code (created elsewhere without a unique
+ * constraint on `date`), which makes `ON CONFLICT (date)` fail with
+ * "no unique or exclusion constraint matching the ON CONFLICT
+ * specification". The cone is written once/day by a single serialized
+ * writer, so a check-then-insert is race-safe here.
  */
 export async function insertConeSnapshot(row: ConeSnapshotRow): Promise<boolean> {
   const sql = getDb();
@@ -264,13 +271,16 @@ export async function insertConeSnapshot(row: ConeSnapshotRow): Promise<boolean>
     [],
   );
 
-  const result = (await sql(
-    `INSERT INTO cone_snapshots (date, straddle, captured_at)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (date) DO NOTHING
-     RETURNING date`,
-    [row.date, row.straddle, row.capturedAt],
+  const existing = (await sql(
+    `SELECT 1 FROM cone_snapshots WHERE date = $1 LIMIT 1`,
+    [row.date],
   )) as unknown[];
+  if (existing.length > 0) return false;
 
-  return result.length > 0;
+  await sql(
+    `INSERT INTO cone_snapshots (date, straddle, captured_at)
+     VALUES ($1, $2, $3)`,
+    [row.date, row.straddle, row.capturedAt],
+  );
+  return true;
 }
