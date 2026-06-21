@@ -25,3 +25,30 @@ export interface SnapshotRow {
    */
   timeframe: string;
 }
+
+/**
+ * One Market Tide observation (a 10-min-aligned point from UW's
+ * `net-flow-ticks` series). Persisted to the `market_tide` table.
+ */
+export interface MarketTideRow {
+  /** ISO-8601 UTC timestamp of the tick; TIMESTAMPTZ in Postgres. */
+  capturedAt: string;
+  /** Trading date (YYYY-MM-DD); DATE in Postgres. */
+  date: string;
+  netCallPremium: number;
+  netPutPremium: number;
+  netVolume: number;
+}
+
+/**
+ * The Cone (expected-move) param for a trading day — UW's ATM straddle
+ * price. Persisted once per day to the `cone_snapshots` table.
+ */
+export interface ConeSnapshotRow {
+  /** Trading date (YYYY-MM-DD); DATE primary key in Postgres. */
+  date: string;
+  /** ATM straddle price (= expected move in SPX points). */
+  straddle: number;
+  /** ISO-8601 UTC timestamp of when this was scraped. */
+  capturedAt: string;
+}

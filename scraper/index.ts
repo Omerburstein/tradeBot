@@ -408,10 +408,11 @@ if (backfillDate !== '') {
   );
   const startedAt = Date.now();
   try {
-    const rows = await scrapeBackfill(backfillDate, backfillStart, backfillEnd);
-    const inserted = await insertSnapshots(rows);
+    // scrapeBackfill now scrapes AND persists everything for the day
+    // (snapshots, spot, Market Tide, Cone) and returns a summary.
+    const summary = await scrapeBackfill(backfillDate, backfillStart, backfillEnd);
     logger.info(
-      { rows: rows.length, inserted, ms: Date.now() - startedAt },
+      { ...summary, ms: Date.now() - startedAt },
       'backfill complete',
     );
   } catch (err) {
