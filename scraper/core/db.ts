@@ -171,7 +171,7 @@ export async function insertSpotPrices(
 }
 
 /**
- * Batch-insert Market Tide observations into `market_tide` (one per
+ * Batch-insert Market Tide observations into `market_tide_ticks` (one per
  * 10-min slot). `tick_at` is the data point's own slot boundary;
  * `captured_at` is the scrape wall-clock time. Lazy table-create matches
  * the canonical schema and is idempotent on (tick_at, date) — re-scraping
@@ -186,7 +186,7 @@ export async function insertMarketTide(
   const sql = getDb();
 
   await sql(
-    `CREATE TABLE IF NOT EXISTS market_tide (
+    `CREATE TABLE IF NOT EXISTS market_tide_ticks (
        tick_at            TIMESTAMPTZ NOT NULL,
        date               DATE NOT NULL,
        net_call_premium   NUMERIC(18, 4) NOT NULL,
@@ -218,7 +218,7 @@ export async function insertMarketTide(
     }
 
     const text =
-      `INSERT INTO market_tide ` +
+      `INSERT INTO market_tide_ticks ` +
       `(tick_at, date, net_call_premium, net_put_premium, net_volume, captured_at) ` +
       `VALUES ${placeholders.join(', ')} ` +
       `ON CONFLICT (tick_at, date) DO NOTHING`;

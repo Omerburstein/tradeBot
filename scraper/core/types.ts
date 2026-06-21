@@ -28,7 +28,7 @@ export interface SnapshotRow {
 
 /**
  * One Market Tide observation (a 10-min-aligned point from UW's
- * `net-flow-ticks` series). Persisted to the `market_tide` table.
+ * `net-flow-ticks` series). Persisted to the `market_tide_ticks` table.
  */
 export interface MarketTideRow {
   /**
