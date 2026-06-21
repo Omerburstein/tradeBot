@@ -12,16 +12,81 @@ You are working on a production Railway-deployed scraper for Unusual Whales Peri
 
 ## Your Knowledge Base
 
-You have access to the `scraper/` directory and `docs/` folder. Always read relevant files before answering questions. Key files:
-- `scraper/scrape.ts` — Main Playwright automation (~1400 lines), anti-detection, HTML parsing orchestration
-- `scraper/parser.ts` — Pure HTML → SnapshotRow[] parsing
+You have access to the `scraper/` directory and `docs/` folder. Always read relevant files before answering questions. The scrape engine was split out of the old `scrape.ts` monolith into `scraper/scrape/` (behind a barrel `index.ts`); shared infra lives in `scraper/core/`. Key files:
+- `scraper/scrape/` — Playwright scrape engine, split by concern:
+  - `index.ts` — Barrel re-exporting the public API (scrapeAllPanels, scrapeBackfill, …)
+  - `browser.ts` — Stealth init + `withBrowser` lifecycle
+  - `panels.ts` — `scrapeAllPanels` (live single-slot tick)
+  - `orchestrate.ts` — Per-day scraper + backfill / range / walk-back / discover
+  - `navigation.ts` — Expiry/DTE filters + date-picker walkers
+  - `timeframe.ts` — Timeframe HH:MM math + widget walkers
+  - `chart.ts` — Chart-ready wait, zoom-out, spot/strike readers
+  - `captures.ts` — `attachApiCaptures` response router
+  - `api-transforms.ts` — Pure API payload → SnapshotRow[]/MarketTideRow[] transforms
+  - `api-types.ts` — API response interfaces + ApiCaptures + ScrapeResult
+  - `trading-calendar.ts` — Holidays + trading-day arithmetic (`US_MARKET_HOLIDAYS`)
+- `scraper/core/parser.ts` — Pure HTML → SnapshotRow[] parsing
 - `scraper/index.ts` — Main loop, lifecycle, schedule-aware dedup
-- `scraper/dates.ts` — Timezone utilities, RTH/active-window gates
-- `scraper/types.ts` — Panel type + SnapshotRow interface
-- `scraper/db.ts` — Neon Postgres batch inserts
-- `scraper/config.ts` — Env var validation
-- `scraper/periscope-probe.mjs` — Headed login + selector discovery tool
+- `scraper/core/dates.ts` — Timezone utilities, RTH/active-window gates
+- `scraper/core/types.ts` — Panel/SnapshotRow/MarketTideRow/ConeSnapshotRow interfaces
+- `scraper/core/db.ts` — Neon Postgres batch inserts
+- `scraper/core/config.ts` — Env var validation
+- `scraper/core/logger.ts` — Shared Pino logger for the scrape engine
+- `scraper/tools/periscope-probe.mjs` — Headed login + selector discovery tool
 - `docs/` — Any supplementary documentation, screenshots, or notes
+
+## Database Schemas
+
+The scraper persists into Neon Postgres via `scraper/core/db.ts`. Tables
+`spot_prices`, `market_tide`, and `cone_snapshots` are lazily created
+(`CREATE TABLE IF NOT EXISTS`) to match the canonical schema below;
+`periscope_snapshots` is assumed to pre-exist (migrations 140/141). Keep
+the row interfaces in `core/types.ts` in sync with these inserts.
+
+**`periscope_snapshots`** — per-strike Greeks/positions, one row per (slot, strike, panel):
+| Column | Type | Notes |
+|--------|------|-------|
+| `captured_at` | TIMESTAMPTZ | slot END time (UTC); `computeCapturedAt()` |
+| `expiry` | DATE | option expiry / trade date |
+| `panel` | TEXT | CHECK in (`gamma`,`charm`,`vanna`,`positions`) |
+| `strike` | INTEGER | SPX strike |
+| `value` | NUMERIC | Greek/positions value |
+| `timeframe` | TEXT | UW slot label, e.g. `"09:20 - 09:30"` |
+
+Unique key: `(captured_at, expiry, panel, strike)` — inserts are `ON CONFLICT DO NOTHING`.
+
+**`spot_prices`** — one SPX spot observation per 10-min slot:
+| Column | Type | Notes |
+|--------|------|-------|
+| `captured_at` | TIMESTAMPTZ | slot END time (UTC) |
+| `date` | DATE | trade date |
+| `spot` | NUMERIC(10,2) | SPX index level |
+
+PK: `(captured_at, date)`.
+
+**`market_tide`** — net-flow (Market Tide) per 10-min slot:
+| Column | Type | Notes |
+|--------|------|-------|
+| `tick_at` | TIMESTAMPTZ | the data point's own slot boundary (UTC) |
+| `date` | DATE | trade date |
+| `net_call_premium` | NUMERIC(18,4) | |
+| `net_put_premium` | NUMERIC(18,4) | |
+| `net_volume` | BIGINT | |
+| `captured_at` | TIMESTAMPTZ | scrape wall-clock time (when stored) |
+
+PK: `(tick_at, date)`. Note the two timestamps differ: `tick_at` is the
+slot the premiums belong to; `captured_at` is when the scrape ran. (This
+fixed an earlier bug where the tick time was written into `captured_at`
+and no `tick_at` existed, so inserts into a `tick_at NOT NULL` table failed.)
+
+**`cone_snapshots`** — once-per-day ATM straddle (expected-move / Cone param):
+| Column | Type | Notes |
+|--------|------|-------|
+| `captured_at` | TIMESTAMPTZ | scrape time |
+| `date` | DATE | trade date |
+| `straddle` | NUMERIC(10,2) | ATM straddle price = expected move in SPX points |
+
+PK: `(captured_at, date)`. Written via check-then-insert (once/day, skipped if `date` already present).
 
 ## Critical Rules You Must Follow
 
@@ -29,7 +94,7 @@ You have access to the `scraper/` directory and `docs/` folder. Always read rele
 
 2. **Respect the Greek capture order: Gamma → Charm → Vanna.** Gamma is the anchor. Charm and Vanna must match Gamma's timeframe.
 
-3. **Timestamps: `capturedAt` is always slot END time.** Never use wall-clock time. Always use `computeCapturedAt()` from `dates.ts`. Never revert to `new Date().toISOString()` + env TZ — this caused a data corruption incident.
+3. **Timestamps: `capturedAt` is always slot END time.** Never use wall-clock time. Always use `computeCapturedAt()` from `core/dates.ts`. Never revert to `new Date().toISOString()` + env TZ — this caused a data corruption incident. (Exception: `market_tide.captured_at` and `cone_snapshots.captured_at` intentionally store the scrape wall-clock time — the slot time lives in `tick_at` / `date` there.)
 
 4. **Day-chevron navigation**: Safe for <5 days; >10 consecutive clicks triggers anti-bot. Use calendar widget for larger jumps.
 
@@ -37,7 +102,7 @@ You have access to the `scraper/` directory and `docs/` folder. Always read rele
 
 6. **Always run `npx tsc --noEmit`** after suggesting TypeScript changes. There is no test suite — type checking is the primary correctness gate.
 
-7. **Keep `SnapshotRow` in `types.ts` in sync with `insertSnapshots` in `db.ts`.**
+7. **Keep the row interfaces in `core/types.ts` in sync with the inserts in `core/db.ts`** (`SnapshotRow`↔`insertSnapshots`, `MarketTideRow`↔`insertMarketTide`, `ConeSnapshotRow`↔`insertConeSnapshot`).
 
 ## How You Work
 

@@ -172,7 +172,10 @@ export async function insertSpotPrices(
 
 /**
  * Batch-insert Market Tide observations into `market_tide` (one per
- * 10-min slot). Lazy table-create + idempotent on captured_at.
+ * 10-min slot). `tick_at` is the data point's own slot boundary;
+ * `captured_at` is the scrape wall-clock time. Lazy table-create matches
+ * the canonical schema and is idempotent on (tick_at, date) — re-scraping
+ * a day re-confirms its slots without duplicating them.
  * Returns the count of rows submitted (conflicts silently skipped).
  */
 export async function insertMarketTide(
@@ -184,12 +187,13 @@ export async function insertMarketTide(
 
   await sql(
     `CREATE TABLE IF NOT EXISTS market_tide (
-       captured_at        TIMESTAMPTZ NOT NULL,
+       tick_at            TIMESTAMPTZ NOT NULL,
        date               DATE NOT NULL,
        net_call_premium   NUMERIC(18, 4) NOT NULL,
        net_put_premium    NUMERIC(18, 4) NOT NULL,
        net_volume         BIGINT NOT NULL,
-       PRIMARY KEY (captured_at)
+       captured_at        TIMESTAMPTZ NOT NULL,
+       PRIMARY KEY (tick_at, date)
      )`,
     [],
   );
@@ -202,21 +206,22 @@ export async function insertMarketTide(
     const params: unknown[] = [];
     let p = 1;
     for (const r of chunk) {
-      placeholders.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+      placeholders.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
       params.push(
-        r.capturedAt,
+        r.tickAt,
         r.date,
         r.netCallPremium,
         r.netPutPremium,
         r.netVolume,
+        r.capturedAt,
       );
     }
 
     const text =
       `INSERT INTO market_tide ` +
-      `(captured_at, date, net_call_premium, net_put_premium, net_volume) ` +
+      `(tick_at, date, net_call_premium, net_put_premium, net_volume, captured_at) ` +
       `VALUES ${placeholders.join(', ')} ` +
-      `ON CONFLICT (captured_at) DO NOTHING`;
+      `ON CONFLICT (tick_at, date) DO NOTHING`;
 
     await sql(text, params);
     submitted += chunk.length;
