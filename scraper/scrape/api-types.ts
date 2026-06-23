@@ -4,11 +4,13 @@
  * grouping. Pure types — no runtime code — so every engine module can
  * import them without pulling in browser or DB dependencies.
  */
-import type { SnapshotRow } from '../core/types.js';
+import type { SnapshotRow, PositionRow } from '../core/types.js';
 
 /** Result of a single slot capture: rows + metadata for the caller. */
 export interface ScrapeResult {
   rows: SnapshotRow[];
+  /** Positions (call/put qty per strike) — persisted to the `positions` table. */
+  positionRows: PositionRow[];
   /** SPX spot price at capture time (from the API index_values or page header). */
   spot: number | null;
 }

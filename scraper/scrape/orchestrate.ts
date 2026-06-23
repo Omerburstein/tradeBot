@@ -13,13 +13,14 @@ import { UW_PERISCOPE_URL } from '../core/config.js';
 import {
   insertSnapshots,
   insertSpotPrices,
+  insertPositions,
   insertMarketTide,
   insertConeSnapshot,
   coneSnapshotExists,
 } from '../core/db.js';
 import { computeCapturedAt } from '../core/dates.js';
 import { logger } from '../core/logger.js';
-import type { SnapshotRow, ConeSnapshotRow } from '../core/types.js';
+import type { SnapshotRow, PositionRow, ConeSnapshotRow } from '../core/types.js';
 import { withBrowser } from './browser.js';
 import { attachApiCaptures } from './captures.js';
 import { clickZoomOut, waitForChartReady } from './chart.js';
@@ -45,9 +46,10 @@ import type { ApiCaptures } from './api-types.js';
 
 /** Outcome of scraping + persisting one trading day. */
 interface DayStoreSummary {
-  /** Greek/positions snapshot rows parsed (0 ⇒ likely past history floor). */
+  /** Greek snapshot rows parsed (0 ⇒ likely past history floor). */
   rowsParsed: number;
   snapshotsInserted: number;
+  positionsInserted: number;
   spotsInserted: number;
   tidePointsInserted: number;
   /** A new cone row was written. */
@@ -97,6 +99,7 @@ async function scrapeAndStoreDay(
   await page.waitForTimeout(1_500);
 
   const dayRows: SnapshotRow[] = [];
+  const dayPositions: PositionRow[] = [];
   const daySpots: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
   let currentStart = startNorm;
   let slotsScanned = 0;
@@ -128,7 +131,7 @@ async function scrapeAndStoreDay(
         .find(r => r.url.includes(`expiry=${date}`))
         ?? caps.mmc[caps.mmc.length - 1];
       if (latestMmc) {
-        dayRows.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
+        dayPositions.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
       }
     }
 
@@ -146,8 +149,9 @@ async function scrapeAndStoreDay(
     currentStart = nextStart;
   }
 
-  // ── Persist Greeks/positions + per-slot spot ──
+  // ── Persist Greeks + positions + per-slot spot ──
   const snapshotsInserted = await insertSnapshots(dayRows);
+  const positionsInserted = await insertPositions(dayPositions);
   const spotsInserted = await insertSpotPrices(daySpots);
 
   // ── Market Tide: one net-flow-ticks call covers the whole day ──
@@ -186,6 +190,7 @@ async function scrapeAndStoreDay(
   return {
     rowsParsed: dayRows.length,
     snapshotsInserted,
+    positionsInserted,
     spotsInserted,
     tidePointsInserted,
     coneInserted,
