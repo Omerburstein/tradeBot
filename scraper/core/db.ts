@@ -280,63 +280,55 @@ export async function insertPositions(
 }
 
 /**
- * True if a Cone snapshot already exists for `date`. Used to skip
- * re-scraping/inserting the once-per-day cone param.
- *
- * Tolerates a missing table (returns false) so the first-ever run — when
- * `cone_snapshots` hasn't been lazily created yet — proceeds to scrape.
+ * True if a Cone snapshot already exists for `date` (YYYY-MM-DD ET).
+ * Checks by casting captured_at to the ET date rather than storing a
+ * redundant `date` column. Tolerates a missing table (returns false).
  */
 export async function coneSnapshotExists(date: string): Promise<boolean> {
   const sql = getDb();
   try {
     const rows = (await sql(
-      `SELECT 1 FROM cone_snapshots WHERE date = $1 LIMIT 1`,
+      `SELECT 1 FROM cone_snapshots
+       WHERE (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+       LIMIT 1`,
       [date],
     )) as unknown[];
     return rows.length > 0;
   } catch {
-    // Table doesn't exist yet (or transient) — treat as "not present".
     return false;
   }
 }
 
 /**
- * Insert the Cone (expected-move) param for a trading day into
+ * Insert the Cone (expected-move) coordinates for a trading day into
  * `cone_snapshots`. Returns true if a row was inserted (false if one
- * already existed for the date).
- *
- * Uses a check-then-insert rather than ON CONFLICT: the cone_snapshots
- * table may predate this code (created elsewhere without a unique
- * constraint on `date`), which makes `ON CONFLICT (date)` fail with
- * "no unique or exclusion constraint matching the ON CONFLICT
- * specification". The cone is written once/day by a single serialized
- * writer, so a check-then-insert is race-safe here.
+ * already existed for that ET date).
  */
 export async function insertConeSnapshot(row: ConeSnapshotRow): Promise<boolean> {
   const sql = getDb();
 
-  // Match the canonical shared-DB schema: PK (captured_at, date). This is
-  // a no-op when the table already exists; it only shapes a fresh DB.
   await sql(
     `CREATE TABLE IF NOT EXISTS cone_snapshots (
-       captured_at  TIMESTAMPTZ NOT NULL,
-       date         DATE NOT NULL,
-       straddle     NUMERIC(10, 2) NOT NULL,
-       PRIMARY KEY (captured_at, date)
+       captured_at  TIMESTAMPTZ   NOT NULL PRIMARY KEY,
+       spx_open     NUMERIC(10,2) NOT NULL,
+       cone_upper   NUMERIC(10,2) NOT NULL,
+       cone_lower   NUMERIC(10,2) NOT NULL
      )`,
     [],
   );
 
   const existing = (await sql(
-    `SELECT 1 FROM cone_snapshots WHERE date = $1 LIMIT 1`,
-    [row.date],
+    `SELECT 1 FROM cone_snapshots
+     WHERE (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+     LIMIT 1`,
+    [row.capturedAt],
   )) as unknown[];
   if (existing.length > 0) return false;
 
   await sql(
-    `INSERT INTO cone_snapshots (date, straddle, captured_at)
-     VALUES ($1, $2, $3)`,
-    [row.date, row.straddle, row.capturedAt],
+    `INSERT INTO cone_snapshots (captured_at, spx_open, cone_upper, cone_lower)
+     VALUES ($1, $2, $3, $4)`,
+    [row.capturedAt, row.spxOpen, row.coneUpper, row.coneLower],
   );
   return true;
 }
