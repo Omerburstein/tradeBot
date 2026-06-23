@@ -39,6 +39,7 @@ import {
 } from './api-transforms.js';
 import {
   latestTradingDay,
+  nextTradingDay,
   prevTradingDay,
   tradingDaysBetween,
 } from './trading-calendar.js';
@@ -94,59 +95,104 @@ async function scrapeAndStoreDay(
       `setExpirySingle(${date}) failed — date may be outside Single-mode dropdown for this chart frame`,
     );
   }
-  await waitForChartReady(page);
-  await walkTimeframeToTarget(page, startNorm);
-  await page.waitForTimeout(1_500);
 
   const dayRows: SnapshotRow[] = [];
   const dayPositions: PositionRow[] = [];
   const daySpots: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
-  let currentStart = startNorm;
   let slotsScanned = 0;
 
-  while (currentStart <= endNorm) {
-    const slotEnd = nextTimeframe(currentStart);
-    const capturedAt = computeCapturedAt(date, slotEnd);
-
-    // Wait for API response
-    await page.waitForLoadState('networkidle').catch(() => undefined);
-    await page.waitForTimeout(1_000);
-
-    const latestMme = [...caps.mme]
-      .reverse()
-      .find(r => r.url.includes(`expiry=${date}`))
-      ?? caps.mme[caps.mme.length - 1];
-
-    if (latestMme) {
-      const { rows, qualifyingStrikes, spot, expiry } = apiResponseToRows(latestMme.body, capturedAt);
-      dayRows.push(...rows);
-
-      // Record this slot's SPX spot (one observation per 10-min window).
-      if (Number.isFinite(spot) && spot > 0) {
-        daySpots.push({ capturedAt, expiry, spot });
-      }
-
-      const latestMmc = [...caps.mmc]
-        .reverse()
-        .find(r => r.url.includes(`expiry=${date}`))
-        ?? caps.mmc[caps.mmc.length - 1];
-      if (latestMmc) {
-        dayPositions.push(...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes));
-      }
-    }
-
-    slotsScanned += 1;
-
-    const nextStart = nextTimeframe(currentStart);
-    if (nextStart > endNorm) break;
-
-    // Clear only the per-slot Greek responses — straddle/tide are
-    // fetched once per day and must survive the whole slot loop.
-    caps.mme.length = 0;
-    caps.mmc.length = 0;
-    await advanceTimeframeOneSlot(page);
+  /**
+   * Walk every 10-min slot from startNorm..endNorm for the currently
+   * selected expiry, pushing Greeks/positions/spot into the day arrays.
+   * `expiry` is the expiry currently selected in the Expiry filter — used
+   * both to pick the right URL-matched API response AND to stamp the rows
+   * (the response BODY's `date` is the session date, not the expiry, so it
+   * can't label non-0DTE rows). Returns the slot count walked.
+   */
+  async function walkSlotsForExpiry(expiry: string): Promise<number> {
+    await waitForChartReady(page);
+    await walkTimeframeToTarget(page, startNorm);
     await page.waitForTimeout(1_500);
-    currentStart = nextStart;
+
+    let currentStart = startNorm;
+    let walked = 0;
+    while (currentStart <= endNorm) {
+      const slotEnd = nextTimeframe(currentStart);
+      const capturedAt = computeCapturedAt(date, slotEnd);
+
+      // Wait for API response
+      await page.waitForLoadState('networkidle').catch(() => undefined);
+      await page.waitForTimeout(1_000);
+
+      const latestMme = [...caps.mme]
+        .reverse()
+        .find(r => r.url.includes(`expiry=${expiry}`))
+        ?? caps.mme[caps.mme.length - 1];
+
+      if (latestMme) {
+        const { rows, qualifyingStrikes, spot } = apiResponseToRows(
+          latestMme.body,
+          capturedAt,
+          expiry,
+        );
+        dayRows.push(...rows);
+
+        // Record this slot's SPX spot (one observation per 10-min window).
+        if (Number.isFinite(spot) && spot > 0) {
+          daySpots.push({ capturedAt, expiry, spot });
+        }
+
+        const latestMmc = [...caps.mmc]
+          .reverse()
+          .find(r => r.url.includes(`expiry=${expiry}`))
+          ?? caps.mmc[caps.mmc.length - 1];
+        if (latestMmc) {
+          dayPositions.push(
+            ...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes, expiry),
+          );
+        }
+      }
+
+      walked += 1;
+
+      const nextStart = nextTimeframe(currentStart);
+      if (nextStart > endNorm) break;
+
+      // Clear only the per-slot Greek responses — straddle/tide are
+      // fetched once per day and must survive the whole slot loop.
+      caps.mme.length = 0;
+      caps.mmc.length = 0;
+      await advanceTimeframeOneSlot(page);
+      await page.waitForTimeout(1_500);
+      currentStart = nextStart;
+    }
+    return walked;
+  }
+
+  // Pass 1: the session-day expiry (0DTE).
+  slotsScanned += await walkSlotsForExpiry(date);
+
+  // Pass 2: the next trading day's expiry (1DTE+). The dialog is already in
+  // Single mode, so skipModeSwitch avoids toggling it back to Multi. A
+  // failure here is non-fatal — pass-1 rows are already collected.
+  const nextExpiry = nextTradingDay(date);
+  caps.mme.length = 0;
+  caps.mmc.length = 0;
+  try {
+    const nextOk = await setExpirySingle(page, nextExpiry, { skipModeSwitch: true });
+    if (nextOk) {
+      slotsScanned += await walkSlotsForExpiry(nextExpiry);
+    } else {
+      logger.warn(
+        { date, nextExpiry },
+        'scrapeAndStoreDay: next expiry not selectable — storing session-day expiry only',
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      { date, nextExpiry, err: err instanceof Error ? err.message : String(err) },
+      'scrapeAndStoreDay: next-expiry walk failed — non-blocking',
+    );
   }
 
   // ── Persist Greeks + positions + per-slot spot ──
