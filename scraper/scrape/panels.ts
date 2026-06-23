@@ -8,15 +8,11 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { UW_PERISCOPE_URL } from '../core/config.js';
-import {
-  insertMarketTide,
-  insertConeSnapshot,
-  coneSnapshotExists,
-} from '../core/db.js';
 import { computeCapturedAt, isInRth } from '../core/dates.js';
 import { logger } from '../core/logger.js';
 import type { SnapshotRow, PositionRow } from '../core/types.js';
 import { withBrowser } from './browser.js';
+import { attachApiCaptures } from './captures.js';
 import { clickZoomOut, readSpotPrice, waitForChartReady } from './chart.js';
 import { readTimeframeLabel } from './timeframe.js';
 import { setDTEZero, setExpirySingle, walkDateToTarget } from './navigation.js';
@@ -25,62 +21,28 @@ import {
   apiResponseToRows,
   apiTimestampToTimeframe,
   contractsResponseToRows,
-  netFlowToTideRows,
-  parseStraddle,
   utcToETHhmm,
 } from './api-transforms.js';
-import type {
-  ApiCandleEntry,
-  ApiContractsResponse,
-  ApiExposureResponse,
-  ApiNetFlowResponse,
-  ApiSpxTickResponse,
-  ApiStraddleResponse,
-  ScrapeResult,
-} from './api-types.js';
+import { pickBestMme, pickBestMmc, storeMarketTide, storeCone } from './api-helpers.js';
+import type { ScrapeResult } from './api-types.js';
 
 export async function scrapeAllPanels(): Promise<ScrapeResult> {
   return await withBrowser(async (_browser, page) => {
-    // Intercept market_maker_exposures API responses. We collect ALL
-    // JSON responses and filter for the one we need after page settles.
-    const saveDebug = (process.env.SAVE_SCREENSHOT ?? '').trim().toLowerCase() === 'true';
-    const apiCaptures: Array<{ url: string; body: unknown }> = [];
-    const mmeResponses: Array<{ url: string; body: ApiExposureResponse }> = [];
-    const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
-    const straddleResponses: Array<{ url: string; body: ApiStraddleResponse }> = [];
-    const tideResponses: Array<{ url: string; body: ApiNetFlowResponse }> = [];
-    const candleResponses: Array<{ url: string; body: ApiCandleEntry[] }> = [];
-    const tickResponses: Array<{ url: string; body: ApiSpxTickResponse }> = [];
+    // Route all JSON responses into typed ApiCaptures buckets.
+    const caps = attachApiCaptures(page);
 
-    page.on('response', (response) => {
-      const url = response.url();
-      const ct = response.headers()['content-type'] ?? '';
-      if (ct.includes('json')) {
-        response.json().then((body) => {
-          if (saveDebug) {
-            apiCaptures.push({ url, body });
-          }
-          if (url.includes('market_maker_exposures')) {
-            mmeResponses.push({ url, body: body as ApiExposureResponse });
-          }
-          if (url.includes('market_maker_contracts')) {
-            mmcResponses.push({ url, body: body as ApiContractsResponse });
-          }
-          if (url.includes('/straddle')) {
-            straddleResponses.push({ url, body: body as ApiStraddleResponse });
-          }
-          if (url.includes('net-flow-ticks')) {
-            tideResponses.push({ url, body: body as ApiNetFlowResponse });
-          }
-          if (url.includes('index_candles')) {
-            candleResponses.push({ url, body: body as ApiCandleEntry[] });
-          }
-          if (url.includes('one_minute_ticks')) {
-            tickResponses.push({ url, body: body as ApiSpxTickResponse });
-          }
-        }).catch(() => undefined);
-      }
-    });
+    // Optional: capture every JSON response to disk for debugging.
+    const saveDebug = (process.env.SAVE_SCREENSHOT ?? '').trim().toLowerCase() === 'true';
+    const allApiCaptures: Array<{ url: string; body: unknown }> = [];
+    if (saveDebug) {
+      page.on('response', (response) => {
+        const ct = response.headers()['content-type'] ?? '';
+        if (!ct.includes('json')) return;
+        response.json()
+          .then((body) => allApiCaptures.push({ url: response.url(), body }))
+          .catch(() => undefined);
+      });
+    }
 
     logger.info({ url: UW_PERISCOPE_URL }, 'navigating to periscope');
     await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
@@ -173,42 +135,21 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
       const htmlPath = resolve(tempDir, `scrape-${ts}.html`);
       await page.screenshot({ path: screenshotPath, fullPage: true });
       await writeFile(htmlPath, await page.content(), 'utf8');
-      if (apiCaptures.length > 0) {
+      if (allApiCaptures.length > 0) {
         const apiPath = resolve(tempDir, `api-${ts}.json`);
-        await writeFile(apiPath, JSON.stringify(apiCaptures, null, 2), 'utf8');
-        logger.info({ apiPath, count: apiCaptures.length }, 'api responses saved');
+        await writeFile(apiPath, JSON.stringify(allApiCaptures, null, 2), 'utf8');
+        logger.info({ apiPath, count: allApiCaptures.length }, 'api responses saved');
       }
       logger.info({ screenshotPath, htmlPath }, 'screenshot and html saved');
     }
 
-    // Find the best market_maker_exposures response to use.
-    // Prefer the one with `expiry=<target date>` over `expiry=all`.
-    // If none match the target date, fall back to any specific-expiry response.
+    // Find the best market_maker_exposures response for today's expiry.
     logger.info(
-      { mmeResponseCount: mmeResponses.length, urls: mmeResponses.map(r => r.url) },
+      { mmeResponseCount: caps.mme.length, urls: caps.mme.map(r => r.url) },
       'scrapeAllPanels: collected MME API responses',
     );
 
-    let bestResponse: ApiExposureResponse | null = null;
-    for (const r of mmeResponses) {
-      if (r.url.includes(`expiry=${today}`)) {
-        bestResponse = r.body;
-        break;
-      }
-    }
-    // Fall back to any non-"all" expiry response
-    if (bestResponse === null) {
-      for (const r of mmeResponses) {
-        if (!r.url.includes('expiry=all')) {
-          bestResponse = r.body;
-          break;
-        }
-      }
-    }
-    // Last resort: use the "all" expiry response
-    if (bestResponse === null && mmeResponses.length > 0) {
-      bestResponse = mmeResponses[mmeResponses.length - 1]!.body;
-    }
+    const bestResponse = pickBestMme(caps.mme, today);
 
     if (bestResponse === null) {
       logger.warn('scrapeAllPanels: no market_maker_exposures API response captured');
@@ -231,10 +172,10 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     // ── Next-expiry (next trading day / 1DTE+) ──────────────────────────────
     // After capturing today's expiry, switch the Expiry filter to the next
     // trading day. The response listener is still running — new API responses
-    // append to the same arrays, distinguished by `expiry=<date>` in the URL.
+    // append to caps.mme/mmc, distinguished by `expiry=<date>` in the URL.
     const nextExpiry = nextTradingDay(today);
-    const mmeBefore = mmeResponses.length;
-    const mmcBefore = mmcResponses.length;
+    const mmeBefore = caps.mme.length;
+    const mmcBefore = caps.mmc.length;
 
     let nextExpiryRows: SnapshotRow[] = [];
     let nextExpiryPositionRows: PositionRow[] = [];
@@ -250,27 +191,13 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
         await page.waitForLoadState('networkidle').catch(() => undefined);
         await page.waitForTimeout(2_500); // anti-bot settle + refetch
 
-        // Only consider responses that arrived AFTER the expiry switch, and
-        // pick the one that is actually for nextExpiry. Match on the URL
-        // param OR the response body's own `date` field (the API echoes the
-        // expiry there). Fall back to any non-"all" newly-arrived response,
-        // then the last one — mirroring today's 3-tier selection.
-        const newMME = mmeResponses.slice(mmeBefore);
+        // Only consider responses that arrived AFTER the expiry switch.
+        const newMME = caps.mme.slice(mmeBefore);
         logger.info(
           { nextExpiry, newMMECount: newMME.length, urls: newMME.map(r => r.url) },
           'scrapeAllPanels: next-expiry MME responses after switch',
         );
-        // Match on the URL expiry param — the response BODY's `date` is the
-        // trading-session date, not the expiry, so it can't be used here.
-        let nextMMEResp: ApiExposureResponse | null =
-          newMME.find(r => r.url.includes(`expiry=${nextExpiry}`))?.body ?? null;
-        if (nextMMEResp === null) {
-          nextMMEResp = newMME.find(r => !r.url.includes('expiry=all'))?.body ?? null;
-        }
-        if (nextMMEResp === null && newMME.length > 0) {
-          nextMMEResp = newMME[newMME.length - 1]!.body;
-        }
-
+        const nextMMEResp = pickBestMme(newMME, nextExpiry);
         if (nextMMEResp) {
           // Pass nextExpiry explicitly so rows are stamped with the real
           // expiry, not the session date (apiData.date).
@@ -285,15 +212,8 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           logger.warn({ nextExpiry }, 'scrapeAllPanels: no MME response for next expiry');
         }
 
-        const newMMC = mmcResponses.slice(mmcBefore);
-        let nextMMCResp: ApiContractsResponse | null =
-          newMMC.find(r => r.url.includes(`expiry=${nextExpiry}`))?.body ?? null;
-        if (nextMMCResp === null) {
-          nextMMCResp = newMMC.find(r => !r.url.includes('expiry=all'))?.body ?? null;
-        }
-        if (nextMMCResp === null && newMMC.length > 0) {
-          nextMMCResp = newMMC[newMMC.length - 1]!.body;
-        }
+        const newMMC = caps.mmc.slice(mmcBefore);
+        const nextMMCResp = pickBestMmc(newMMC, nextExpiry);
         if (nextMMCResp) {
           nextExpiryPositionRows = contractsResponseToRows(
             nextMMCResp,
@@ -321,32 +241,13 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     // Find the best market_maker_contracts response (positions) for today.
     // Only search responses captured before the next-expiry filter switch
     // to avoid accidentally using next-expiry contracts for today's rows.
-    const todayMMCResponses = mmcResponses.slice(0, mmcBefore);
-    let bestContracts: ApiContractsResponse | null = null;
-    for (const r of todayMMCResponses) {
-      if (r.url.includes(`expiry=${today}`)) {
-        bestContracts = r.body;
-        break;
-      }
-    }
-    if (bestContracts === null) {
-      for (const r of todayMMCResponses) {
-        if (!r.url.includes('expiry=all')) {
-          bestContracts = r.body;
-          break;
-        }
-      }
-    }
-    if (bestContracts === null && todayMMCResponses.length > 0) {
-      bestContracts = todayMMCResponses[todayMMCResponses.length - 1]!.body;
-    }
-
+    const bestContracts = pickBestMmc(caps.mmc.slice(0, mmcBefore), today);
     const positionRows = bestContracts
       ? contractsResponseToRows(bestContracts, capturedAt, qualifyingStrikes)
       : [];
     if (bestContracts) {
       logger.info(
-        { positionRows: positionRows.length, mmcResponseCount: mmcResponses.length },
+        { positionRows: positionRows.length, mmcResponseCount: caps.mmc.length },
         'scrapeAllPanels: parsed positions rows from contracts API',
       );
     } else {
@@ -376,68 +277,16 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     // the same trading date the Greeks were scraped for. Best-effort: a
     // failure here must not drop the Greek snapshot the caller inserts.
     const tradeDate = bestResponse.date;
-    try {
-      const tideResp =
-        [...tideResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
-        ?? tideResponses[tideResponses.length - 1];
-      if (tideResp) {
-        const tideInserted = await insertMarketTide(netFlowToTideRows(tideResp.body).slice(-1));
-        logger.info({ tradeDate, tideInserted }, 'scrapeAllPanels: stored Market Tide');
-      } else {
-        logger.warn({ tradeDate }, 'scrapeAllPanels: no net-flow-ticks (Market Tide) response captured');
-      }
-    } catch (err) {
-      logger.warn(
-        { tradeDate, err: err instanceof Error ? err.message : String(err) },
-        'scrapeAllPanels: Market Tide store failed — non-blocking',
-      );
-    }
+    await storeMarketTide(caps, tradeDate, { slotOnly: true });
 
-    try {
-      if (!isInRth(new Date())) {
-        // Premarket/postmarket tick: don't store a cone built outside
-        // trading hours (it would carry an out-of-hours captured_at). The
-        // cone is stored on the first in-RTH tick of the day instead.
-        logger.debug({ tradeDate }, 'scrapeAllPanels: outside RTH — skipping cone');
-      } else if (await coneSnapshotExists(tradeDate)) {
-        logger.debug({ tradeDate }, 'scrapeAllPanels: cone already stored — skipping');
-      } else {
-        const straddleResp =
-          [...straddleResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
-          ?? straddleResponses[straddleResponses.length - 1];
-        const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
-        // Cone apex = SPX's *settled* open = the first RTH one-minute bar's
-        // CLOSE (the opening print spikes then settles). Do NOT use the daily
-        // candle `o` (raw spike) or `prev_close` (prior session). The candle
-        // `o` is only a fallback when ticks are unavailable. Verified against
-        // the chart's axis labels: midpoint of the cone bounds == data[0].close
-        // and half-width == straddle. See orchestrate.ts for the same logic.
-        const tickResp = tickResponses
-          .find(r => r.url.includes(`date=${tradeDate}`));
-        const firstBar = tickResp?.body.data?.[0];
-        const candleEntry = candleResponses
-          .flatMap(r => r.body)
-          .find(e => e.date === tradeDate);
-        const spxOpen = firstBar
-          ? Number.parseFloat(firstBar.close)
-          : candleEntry ? Number.parseFloat(candleEntry.o) : null;
-        if (straddle != null && spxOpen != null) {
-          const inserted = await insertConeSnapshot({
-            capturedAt: new Date().toISOString(),
-            spxOpen,
-            coneUpper: spxOpen + straddle,
-            coneLower: spxOpen - straddle,
-          });
-          logger.info({ tradeDate, spxOpen, straddle, inserted }, 'scrapeAllPanels: stored Cone');
-        } else {
-          logger.warn({ tradeDate, straddle, spxOpen }, 'scrapeAllPanels: missing cone data');
-        }
-      }
-    } catch (err) {
-      logger.warn(
-        { tradeDate, err: err instanceof Error ? err.message : String(err) },
-        'scrapeAllPanels: Cone store failed — non-blocking',
-      );
+    if (!isInRth(new Date())) {
+      // Premarket/postmarket tick: don't store a cone built outside
+      // trading hours (it would carry an out-of-hours captured_at). The
+      // cone is stored on the first in-RTH tick of the day instead.
+      logger.debug({ tradeDate }, 'scrapeAllPanels: outside RTH — skipping cone');
+    } else {
+      const { inserted, skipped } = await storeCone(caps, tradeDate);
+      logger.debug({ tradeDate, inserted, skipped }, 'scrapeAllPanels: cone result');
     }
 
     return {

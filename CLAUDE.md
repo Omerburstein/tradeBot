@@ -26,6 +26,7 @@ scraper/
 │   ├── browser.ts        # Stealth init + withBrowser lifecycle
 │   ├── api-types.ts      # API response interfaces + ApiCaptures + ScrapeResult
 │   ├── api-transforms.ts # Pure API payload → SnapshotRow[]/MarketTideRow[] transforms
+│   ├── api-helpers.ts    # Shared helpers: pickBestMme/Mmc, storeMarketTide, storeCone
 │   ├── captures.ts       # attachApiCaptures response router
 │   ├── trading-calendar.ts # Holidays + trading-day arithmetic
 │   ├── timeframe.ts      # Timeframe HH:MM math + widget walkers
@@ -73,6 +74,18 @@ scraper/
 - Greeks are captured in order: **Gamma → Charm → Vanna**
 - Gamma is the **anchor**: Charm and Vanna must match Gamma's timeframe or the scraper realigns
 - If UW publishes a new slot mid-capture (timeframe drift), the scraper detects it and walks back to the gamma timeframe
+
+### Scraping Path Consistency
+
+All scraping paths — the live tick (`panels.ts`) and every backfill path (`orchestrate.ts`: single-date, range, walk-back) — **must behave identically** for any shared concern. This is enforced structurally:
+
+- **API capture**: both paths call `attachApiCaptures(page)` from `captures.ts` — never inline a response listener again.
+- **Response selection** (best MME / MMC): both call `pickBestMme` / `pickBestMmc` from `api-helpers.ts`.
+- **Market Tide + Cone storage**: both call `storeMarketTide` / `storeCone` from `api-helpers.ts`.
+
+**When you change any of those four concerns, change it in `api-helpers.ts` or `captures.ts` — not in `panels.ts` or `orchestrate.ts`.** The individual files only hold path-specific logic (navigation, expiry switching, slot walking, RTH guards).
+
+---
 
 ### DB Schema Sync
 - `SnapshotRow` in `core/types.ts` must stay in sync with `insertSnapshots` in `core/db.ts`

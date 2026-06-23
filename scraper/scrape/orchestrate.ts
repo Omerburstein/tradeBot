@@ -14,13 +14,10 @@ import {
   insertSnapshots,
   insertSpotPrices,
   insertPositions,
-  insertMarketTide,
-  insertConeSnapshot,
-  coneSnapshotExists,
 } from '../core/db.js';
 import { computeCapturedAt } from '../core/dates.js';
 import { logger } from '../core/logger.js';
-import type { SnapshotRow, PositionRow, ConeSnapshotRow } from '../core/types.js';
+import type { SnapshotRow, PositionRow } from '../core/types.js';
 import { withBrowser } from './browser.js';
 import { attachApiCaptures } from './captures.js';
 import { clickZoomOut, waitForChartReady } from './chart.js';
@@ -34,9 +31,8 @@ import {
 import {
   apiResponseToRows,
   contractsResponseToRows,
-  netFlowToTideRows,
-  parseStraddle,
 } from './api-transforms.js';
+import { pickBestMme, pickBestMmc, storeMarketTide, storeCone } from './api-helpers.js';
 import {
   latestTradingDay,
   nextTradingDay,
@@ -126,14 +122,11 @@ async function scrapeAndStoreDay(
       await page.waitForLoadState('networkidle').catch(() => undefined);
       await page.waitForTimeout(1_000);
 
-      const latestMme = [...caps.mme]
-        .reverse()
-        .find(r => r.url.includes(`expiry=${expiry}`))
-        ?? caps.mme[caps.mme.length - 1];
+      const latestMme = pickBestMme(caps.mme, expiry);
 
       if (latestMme) {
         const { rows, qualifyingStrikes, spot } = apiResponseToRows(
-          latestMme.body,
+          latestMme,
           capturedAt,
           expiry,
         );
@@ -144,13 +137,10 @@ async function scrapeAndStoreDay(
           daySpots.push({ capturedAt, expiry, spot });
         }
 
-        const latestMmc = [...caps.mmc]
-          .reverse()
-          .find(r => r.url.includes(`expiry=${expiry}`))
-          ?? caps.mmc[caps.mmc.length - 1];
+        const latestMmc = pickBestMmc(caps.mmc, expiry);
         if (latestMmc) {
           dayPositions.push(
-            ...contractsResponseToRows(latestMmc.body, capturedAt, qualifyingStrikes, expiry),
+            ...contractsResponseToRows(latestMmc, capturedAt, qualifyingStrikes, expiry),
           );
         }
       }
@@ -203,54 +193,10 @@ async function scrapeAndStoreDay(
   const spotsInserted = await insertSpotPrices(daySpots);
 
   // ── Market Tide: one net-flow-ticks call covers the whole day ──
-  const tideResp =
-    [...caps.tide].reverse().find(r => r.url.includes(`date=${date}`))
-    ?? caps.tide[caps.tide.length - 1];
-  let tidePointsInserted = 0;
-  if (tideResp) {
-    tidePointsInserted = await insertMarketTide(netFlowToTideRows(tideResp.body));
-  } else {
-    logger.warn({ date }, 'scrapeAndStoreDay: no net-flow-ticks (Market Tide) response captured');
-  }
+  const tidePointsInserted = await storeMarketTide(caps, date);
 
   // ── Cone (once/day): skip entirely if already stored for this date ──
-  let coneInserted = false;
-  let coneSkipped = false;
-  if (await coneSnapshotExists(date)) {
-    coneSkipped = true;
-  } else {
-    const straddleResp =
-      [...caps.straddle].reverse().find(r => r.url.includes(`date=${date}`))
-      ?? caps.straddle[caps.straddle.length - 1];
-    const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
-    // Cone apex = the SPX *settled* open, which UW anchors the cone to.
-    // The first RTH one-minute bar's CLOSE is that value: SPX's opening
-    // print spikes (e.g. 7366.51) then settles within the first minute
-    // (e.g. 7351.73), and the dashboard's cone midpoint = that close.
-    // Verified against the chart's axis labels: midpoint of the two cone
-    // bound labels == data[0].close, and half-width == straddle.
-    // Do NOT use the daily candle `o` (the raw spike) or `prev_close`
-    // (the prior session's close) — both place the apex in the wrong spot.
-    const tickResp = caps.ticks.find(r => r.url.includes(`date=${date}`));
-    const firstBar = tickResp?.body.data?.[0];
-    const candleEntry = caps.candles
-      .flatMap(r => r.body)
-      .find(e => e.date === date);
-    const spxOpen = firstBar
-      ? Number.parseFloat(firstBar.close)
-      : candleEntry ? Number.parseFloat(candleEntry.o) : null;
-    if (straddle != null && spxOpen != null) {
-      const cone: ConeSnapshotRow = {
-        capturedAt: new Date().toISOString(),
-        spxOpen,
-        coneUpper: spxOpen + straddle,
-        coneLower: spxOpen - straddle,
-      };
-      coneInserted = await insertConeSnapshot(cone);
-    } else {
-      logger.warn({ date, straddle, spxOpen }, 'scrapeAndStoreDay: missing cone data');
-    }
-  }
+  const { inserted: coneInserted, skipped: coneSkipped } = await storeCone(caps, date);
 
   return {
     rowsParsed: dayRows.length,
