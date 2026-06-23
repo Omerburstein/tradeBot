@@ -86,7 +86,8 @@ async function scrapeAndStoreDay(
   caps.mmc.length = 0;
   caps.straddle.length = 0;
   caps.tide.length = 0;
-  caps.candles.length = 0;
+  caps.ticks.length = 0;
+  // caps.candles is NOT cleared — it fires once on page load and covers all dates
 
   await walkDateToTarget(page, date);
   await page.waitForTimeout(1_500);
@@ -225,7 +226,12 @@ async function scrapeAndStoreDay(
     const candleEntry = caps.candles
       .flatMap(r => r.body)
       .find(e => e.date === date);
-    const spxOpen = candleEntry ? Number.parseFloat(candleEntry.o) : null;
+    const tickEntry = caps.ticks
+      .find(r => r.url.includes(`date=${date}`))
+      ?.body[0];
+    const spxOpen = candleEntry
+      ? Number.parseFloat(candleEntry.o)
+      : tickEntry ? Number.parseFloat(tickEntry.open) : null;
     if (straddle != null && spxOpen != null) {
       const cone: ConeSnapshotRow = {
         capturedAt: new Date().toISOString(),
