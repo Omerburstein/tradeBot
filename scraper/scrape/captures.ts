@@ -13,7 +13,7 @@ import type {
   ApiStraddleResponse,
   ApiNetFlowResponse,
   ApiCandleEntry,
-  ApiSpxTickEntry,
+  ApiSpxTickResponse,
 } from './api-types.js';
 
 /**
@@ -41,7 +41,7 @@ export function attachApiCaptures(page: Page): ApiCaptures {
         } else if (url.includes('index_candles')) {
           caps.candles.push({ url, body: body as ApiCandleEntry[] });
         } else if (url.includes('one_minute_ticks')) {
-          caps.ticks.push({ url, body: body as ApiSpxTickEntry[] });
+          caps.ticks.push({ url, body: body as ApiSpxTickResponse });
         }
       })
       .catch(() => undefined);

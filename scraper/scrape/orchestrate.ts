@@ -223,15 +223,22 @@ async function scrapeAndStoreDay(
       [...caps.straddle].reverse().find(r => r.url.includes(`date=${date}`))
       ?? caps.straddle[caps.straddle.length - 1];
     const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
+    // Cone apex = the SPX *settled* open, which UW anchors the cone to.
+    // The first RTH one-minute bar's CLOSE is that value: SPX's opening
+    // print spikes (e.g. 7366.51) then settles within the first minute
+    // (e.g. 7351.73), and the dashboard's cone midpoint = that close.
+    // Verified against the chart's axis labels: midpoint of the two cone
+    // bound labels == data[0].close, and half-width == straddle.
+    // Do NOT use the daily candle `o` (the raw spike) or `prev_close`
+    // (the prior session's close) — both place the apex in the wrong spot.
+    const tickResp = caps.ticks.find(r => r.url.includes(`date=${date}`));
+    const firstBar = tickResp?.body.data?.[0];
     const candleEntry = caps.candles
       .flatMap(r => r.body)
       .find(e => e.date === date);
-    const tickEntry = caps.ticks
-      .find(r => r.url.includes(`date=${date}`))
-      ?.body[0];
-    const spxOpen = candleEntry
-      ? Number.parseFloat(candleEntry.o)
-      : tickEntry ? Number.parseFloat(tickEntry.open) : null;
+    const spxOpen = firstBar
+      ? Number.parseFloat(firstBar.close)
+      : candleEntry ? Number.parseFloat(candleEntry.o) : null;
     if (straddle != null && spxOpen != null) {
       const cone: ConeSnapshotRow = {
         capturedAt: new Date().toISOString(),

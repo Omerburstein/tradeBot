@@ -84,8 +84,9 @@ export interface ApiStraddleResponse {
 
 /**
  * One entry from the `index_candles/SPX/1d?interval=...` response —
- * daily OHLC for SPX. The `o` field is the session open price, which is
- * the cone's apex (start point). Note: field names are single-char shorthands.
+ * daily OHLC for SPX. The `o` field is the raw opening print, which spikes
+ * before settling; it is only a *fallback* cone apex (the real apex is the
+ * first one-minute bar's close). Note: field names are single-char shorthands.
  */
 export interface ApiCandleEntry {
   date: string; // "YYYY-MM-DD"
@@ -96,17 +97,19 @@ export interface ApiCandleEntry {
 }
 
 /**
- * One entry from the `index_ticks/SPX/one_minute_ticks?date=...` response.
- * The first entry (start_time = 09:30 ET) open price is the session open —
- * used as fallback for the cone apex when today's candle isn't in index_candles
- * (in-progress trading day).
+ * Shape of the `index_ticks/SPX/one_minute_ticks?date=...` response body.
+ * `data[0].close` is the SPX *settled* open — the cone's apex. `prev_close`
+ * is the prior session's close (not the apex; kept for reference).
  */
-export interface ApiSpxTickEntry {
-  start_time: string; // ISO-8601 UTC, e.g. "2026-06-18T13:30:00Z"
-  open: string;
-  close: string;
-  high: string;
-  low: string;
+export interface ApiSpxTickResponse {
+  prev_close: string;
+  data: Array<{
+    start_time: string;
+    open: string;
+    close: string;
+    high: string;
+    low: string;
+  }>;
 }
 
 /**
@@ -139,8 +142,8 @@ export interface ApiCaptures {
   mmc: Array<{ url: string; body: ApiContractsResponse }>;
   straddle: Array<{ url: string; body: ApiStraddleResponse }>;
   tide: Array<{ url: string; body: ApiNetFlowResponse }>;
-  /** Daily OHLC for SPX — fires once on page load. Used for cone apex (spxOpen) on completed days. */
+  /** Daily OHLC for SPX — fires once on page load. Fallback cone apex (`o`) when ticks are missing. */
   candles: Array<{ url: string; body: ApiCandleEntry[] }>;
-  /** Per-minute SPX ticks for a date — used as fallback cone apex for the current in-progress day. */
-  ticks: Array<{ url: string; body: ApiSpxTickEntry[] }>;
+  /** Per-minute SPX ticks — `data[0].close` is the cone apex (SPX settled open). */
+  ticks: Array<{ url: string; body: ApiSpxTickResponse }>;
 }
