@@ -13,7 +13,7 @@ import {
   insertConeSnapshot,
   coneSnapshotExists,
 } from '../core/db.js';
-import { computeCapturedAt } from '../core/dates.js';
+import { computeCapturedAt, isInRth } from '../core/dates.js';
 import { logger } from '../core/logger.js';
 import type { SnapshotRow, PositionRow } from '../core/types.js';
 import { withBrowser } from './browser.js';
@@ -384,7 +384,12 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     }
 
     try {
-      if (await coneSnapshotExists(tradeDate)) {
+      if (!isInRth(new Date())) {
+        // Premarket/postmarket tick: don't store a cone built outside
+        // trading hours (it would carry an out-of-hours captured_at). The
+        // cone is stored on the first in-RTH tick of the day instead.
+        logger.debug({ tradeDate }, 'scrapeAllPanels: outside RTH — skipping cone');
+      } else if (await coneSnapshotExists(tradeDate)) {
         logger.debug({ tradeDate }, 'scrapeAllPanels: cone already stored — skipping');
       } else {
         const straddleResp =

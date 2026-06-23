@@ -8,20 +8,21 @@
 
 import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import { DATABASE_URL } from './config.js';
-import { isInRth } from './dates.js';
+import { isInRth, isPersistableSlot } from './dates.js';
 import type { SnapshotRow, MarketTideRow, ConeSnapshotRow, PositionRow } from './types.js';
 
 const MAX_ROWS_PER_INSERT = 500;
 
 /**
- * True when a row's slot belongs to regular trading hours (09:30-16:00 ET
- * inclusive on the slot END / captured_at). Premarket and postmarket slots
- * are rejected here so EVERY persistence path — live tick, single-date
- * backfill, range backfill, and walk-back — drops out-of-hours data without
- * each caller having to remember to filter. See `isInRth` in dates.ts.
+ * True when a row's slot END (captured_at) is inside the persisted window
+ * (Mon-Fri 09:40-16:00 ET inclusive). This drops premarket, postmarket,
+ * AND the opening 09:20-09:30 slot. Applied here so EVERY persistence path
+ * — live tick, single-date backfill, range backfill, and walk-back — drops
+ * out-of-window data without each caller having to remember to filter. See
+ * `isPersistableSlot` in dates.ts.
  */
 function isRthRow(capturedAt: string): boolean {
-  return isInRth(new Date(capturedAt));
+  return isPersistableSlot(new Date(capturedAt));
 }
 
 /**

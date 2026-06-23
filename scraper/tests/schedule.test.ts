@@ -23,6 +23,7 @@ import pino from 'pino';
 import {
   isInActivePollingWindow,
   isInRth,
+  isPersistableSlot,
   expectedWindowEnd,
   parseSlotEnd,
   computeCapturedAt,
@@ -114,6 +115,20 @@ check('rth: midday weekday included', isInRth(monWinter('12:30:00')));
 check('rth: Saturday excluded', !isInRth(saturday('12:30:00')));
 check('rth: Sunday excluded', !isInRth(sunday('12:30:00')));
 check('rth: DST summer 10:00 EDT included', isInRth(monSummer('10:00:00')));
+
+// ─────────────────────────────────────────────────────────────────────
+// 2b. Persisted-slot gate — Mon-Fri 09:40-16:00 ET (drops premarket,
+//     postmarket, AND the opening 09:20-09:30 slot that ends at 09:30)
+// ─────────────────────────────────────────────────────────────────────
+check('persist: 09:30 (opening slot end) excluded', !isPersistableSlot(monWinter('09:30:00')));
+check('persist: 09:40 (first kept slot end) included', isPersistableSlot(monWinter('09:40:00')));
+check('persist: 09:39 excluded', !isPersistableSlot(monWinter('09:39:00')));
+check('persist: upper bound 16:00 inclusive', isPersistableSlot(monWinter('16:00:00')));
+check('persist: just after 16:01 excluded', !isPersistableSlot(monWinter('16:01:00')));
+check('persist: midday weekday included', isPersistableSlot(monWinter('12:30:00')));
+check('persist: 08:00 premarket excluded', !isPersistableSlot(monWinter('08:00:00')));
+check('persist: Saturday excluded', !isPersistableSlot(saturday('12:30:00')));
+check('persist: DST summer 10:00 EDT included', isPersistableSlot(monSummer('10:00:00')));
 
 // ─────────────────────────────────────────────────────────────────────
 // 3. 10-min slot end — expectedWindowEnd (which closed slot to expect)
