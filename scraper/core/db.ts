@@ -169,11 +169,9 @@ export async function insertSpotPrices(
 }
 
 /**
- * Batch-insert Market Tide observations into `market_tide_ticks` (one per
- * 10-min slot). `tick_at` is the data point's own slot boundary;
- * `captured_at` is the scrape wall-clock time. Lazy table-create matches
- * the canonical schema and is idempotent on (tick_at, date) — re-scraping
- * a day re-confirms its slots without duplicating them.
+ * Batch-insert Market Tide observations into `market_tide` (one per 10-min
+ * slot). `captured_at` is the data point's own slot boundary and the PK —
+ * re-scraping a day re-confirms its slots without duplicating them.
  * Returns the count of rows submitted (conflicts silently skipped).
  */
 export async function insertMarketTide(
@@ -184,14 +182,12 @@ export async function insertMarketTide(
   const sql = getDb();
 
   await sql(
-    `CREATE TABLE IF NOT EXISTS market_tide_ticks (
-       tick_at            TIMESTAMPTZ NOT NULL,
-       date               DATE NOT NULL,
+    `CREATE TABLE IF NOT EXISTS market_tide (
+       captured_at        TIMESTAMPTZ NOT NULL,
        net_call_premium   NUMERIC(18, 4) NOT NULL,
        net_put_premium    NUMERIC(18, 4) NOT NULL,
        net_volume         BIGINT NOT NULL,
-       captured_at        TIMESTAMPTZ NOT NULL,
-       PRIMARY KEY (tick_at, date)
+       PRIMARY KEY (captured_at)
      )`,
     [],
   );
@@ -204,22 +200,15 @@ export async function insertMarketTide(
     const params: unknown[] = [];
     let p = 1;
     for (const r of chunk) {
-      placeholders.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
-      params.push(
-        r.tickAt,
-        r.date,
-        r.netCallPremium,
-        r.netPutPremium,
-        r.netVolume,
-        r.capturedAt,
-      );
+      placeholders.push(`($${p++}, $${p++}, $${p++}, $${p++})`);
+      params.push(r.capturedAt, r.netCallPremium, r.netPutPremium, r.netVolume);
     }
 
     const text =
-      `INSERT INTO market_tide_ticks ` +
-      `(tick_at, date, net_call_premium, net_put_premium, net_volume, captured_at) ` +
+      `INSERT INTO market_tide ` +
+      `(captured_at, net_call_premium, net_put_premium, net_volume) ` +
       `VALUES ${placeholders.join(', ')} ` +
-      `ON CONFLICT (tick_at, date) DO NOTHING`;
+      `ON CONFLICT (captured_at) DO NOTHING`;
 
     await sql(text, params);
     submitted += chunk.length;

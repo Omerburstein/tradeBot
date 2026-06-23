@@ -43,25 +43,14 @@ export interface PositionRow {
 
 /**
  * One Market Tide observation (a 10-min-aligned point from UW's
- * `net-flow-ticks` series). Persisted to the `market_tide_ticks` table.
+ * `net-flow-ticks` series). Persisted to the `market_tide` table.
  */
 export interface MarketTideRow {
-  /**
-   * ISO-8601 UTC timestamp of the data point itself — the 10-min slot
-   * boundary the premiums/volume belong to. Stored to `tick_at`.
-   */
-  tickAt: string;
-  /** Trading date (YYYY-MM-DD); DATE in Postgres. */
-  date: string;
+  /** ISO-8601 UTC timestamp of the data point's own 10-min slot boundary. PK. */
+  capturedAt: string;
   netCallPremium: number;
   netPutPremium: number;
   netVolume: number;
-  /**
-   * ISO-8601 UTC timestamp of when this row was scraped (wall-clock at
-   * capture). Distinct from `tickAt`, which is the data point's own time.
-   * Stored to `captured_at`.
-   */
-  capturedAt: string;
 }
 
 /**
