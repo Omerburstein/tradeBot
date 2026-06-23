@@ -276,7 +276,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
         [...tideResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
         ?? tideResponses[tideResponses.length - 1];
       if (tideResp) {
-        const tideInserted = await insertMarketTide(netFlowToTideRows(tideResp.body, tradeDate));
+        const tideInserted = await insertMarketTide(netFlowToTideRows(tideResp.body).slice(-1));
         logger.info({ tradeDate, tideInserted }, 'scrapeAllPanels: stored Market Tide');
       } else {
         logger.warn({ tradeDate }, 'scrapeAllPanels: no net-flow-ticks (Market Tide) response captured');

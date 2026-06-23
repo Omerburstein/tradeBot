@@ -156,7 +156,7 @@ async function scrapeAndStoreDay(
     ?? caps.tide[caps.tide.length - 1];
   let tidePointsInserted = 0;
   if (tideResp) {
-    tidePointsInserted = await insertMarketTide(netFlowToTideRows(tideResp.body, date));
+    tidePointsInserted = await insertMarketTide(netFlowToTideRows(tideResp.body));
   } else {
     logger.warn({ date }, 'scrapeAndStoreDay: no net-flow-ticks (Market Tide) response captured');
   }
