@@ -238,20 +238,35 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
         await page.keyboard.press('Escape');
         await page.waitForTimeout(300); // anti-bot
         await page.waitForLoadState('networkidle').catch(() => undefined);
-        await page.waitForTimeout(2_000); // anti-bot settle
+        await page.waitForTimeout(2_500); // anti-bot settle + refetch
 
+        // Only consider responses that arrived AFTER the expiry switch, and
+        // pick the one that is actually for nextExpiry. Match on the URL
+        // param OR the response body's own `date` field (the API echoes the
+        // expiry there). Fall back to any non-"all" newly-arrived response,
+        // then the last one — mirroring today's 3-tier selection.
         const newMME = mmeResponses.slice(mmeBefore);
-        const nextMMEResp =
-          (newMME.find(r => r.url.includes(`expiry=${nextExpiry}`))
-            ?? mmeResponses.find(r => r.url.includes(`expiry=${nextExpiry}`)))?.body
-          ?? null;
+        logger.info(
+          { nextExpiry, newMMECount: newMME.length, urls: newMME.map(r => r.url) },
+          'scrapeAllPanels: next-expiry MME responses after switch',
+        );
+        let nextMMEResp: ApiExposureResponse | null =
+          newMME.find(
+            r => r.url.includes(`expiry=${nextExpiry}`) || r.body?.date === nextExpiry,
+          )?.body ?? null;
+        if (nextMMEResp === null) {
+          nextMMEResp = newMME.find(r => !r.url.includes('expiry=all'))?.body ?? null;
+        }
+        if (nextMMEResp === null && newMME.length > 0) {
+          nextMMEResp = newMME[newMME.length - 1]!.body;
+        }
 
         if (nextMMEResp) {
           const parsed = apiResponseToRows(nextMMEResp, capturedAt);
           nextExpiryRows = parsed.rows;
           nextExpiryQualifyingStrikes = parsed.qualifyingStrikes;
           logger.info(
-            { nextExpiry, rowCount: nextExpiryRows.length },
+            { nextExpiry, apiDate: nextMMEResp.date, rowCount: nextExpiryRows.length },
             'scrapeAllPanels: next-expiry rows parsed',
           );
         } else {
@@ -259,16 +274,26 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
         }
 
         const newMMC = mmcResponses.slice(mmcBefore);
-        const nextMMCResp =
-          (newMMC.find(r => r.url.includes(`expiry=${nextExpiry}`))
-            ?? mmcResponses.find(r => r.url.includes(`expiry=${nextExpiry}`)))?.body
-          ?? null;
+        let nextMMCResp: ApiContractsResponse | null =
+          newMMC.find(r => r.url.includes(`expiry=${nextExpiry}`))?.body ?? null;
+        if (nextMMCResp === null) {
+          nextMMCResp = newMMC.find(r => !r.url.includes('expiry=all'))?.body ?? null;
+        }
+        if (nextMMCResp === null && newMMC.length > 0) {
+          nextMMCResp = newMMC[newMMC.length - 1]!.body;
+        }
         if (nextMMCResp) {
           nextExpiryPositionRows = contractsResponseToRows(
             nextMMCResp,
             capturedAt,
             nextExpiryQualifyingStrikes,
           );
+          logger.info(
+            { nextExpiry, positionRows: nextExpiryPositionRows.length },
+            'scrapeAllPanels: next-expiry positions parsed',
+          );
+        } else {
+          logger.warn({ nextExpiry }, 'scrapeAllPanels: no contracts response for next expiry');
         }
       } else {
         logger.warn({ nextExpiry }, 'scrapeAllPanels: setExpirySingle failed for next expiry — skipping');
