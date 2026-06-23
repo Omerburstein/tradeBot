@@ -8,20 +8,18 @@
 
 import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import { DATABASE_URL } from './config.js';
-import type { SnapshotRow, MarketTideRow, ConeSnapshotRow } from './types.js';
+import type { SnapshotRow, MarketTideRow, ConeSnapshotRow, PositionRow } from './types.js';
 
 const MAX_ROWS_PER_INSERT = 500;
 
 /**
  * Panels for which a value of exactly 0 is treated as noise and excluded
- * from the database. A zero charm/vanna/positions reading carries no
- * signal worth persisting, whereas gamma's zero is meaningful (it's the
- * anchor) and is always kept.
+ * from the database. A zero charm/vanna reading carries no signal worth
+ * persisting, whereas gamma's zero is meaningful (it's the anchor).
  */
 const SKIP_ZERO_PANELS: ReadonlySet<SnapshotRow['panel']> = new Set([
   'charm',
   'vanna',
-  'positions',
 ]);
 
 let client: NeonQueryFunction<false, false> | null = null;
@@ -41,8 +39,8 @@ export function getDb(): NeonQueryFunction<false, false> {
  * (not necessarily inserted — conflicts are silently skipped).
  */
 export async function insertSnapshots(rows: SnapshotRow[]): Promise<number> {
-  // Drop charm/vanna/positions rows whose value is exactly 0 — they carry
-  // no signal. Gamma zeros (the anchor) are retained.
+  // Drop charm/vanna rows whose value is exactly 0 — they carry no signal.
+  // Gamma zeros (the anchor) are retained.
   const insertable = rows.filter(
     (row) => !(SKIP_ZERO_PANELS.has(row.panel) && row.value === 0),
   );
@@ -222,6 +220,57 @@ export async function insertMarketTide(
       `(tick_at, date, net_call_premium, net_put_premium, net_volume, captured_at) ` +
       `VALUES ${placeholders.join(', ')} ` +
       `ON CONFLICT (tick_at, date) DO NOTHING`;
+
+    await sql(text, params);
+    submitted += chunk.length;
+  }
+
+  return submitted;
+}
+
+/**
+ * Batch-insert position rows into the `positions` table (one row per
+ * strike with separate call_qty and put_qty). Lazy table-create matches
+ * the canonical schema. Idempotent on (captured_at, expiry, strike).
+ * Returns the count of rows submitted (conflicts silently skipped).
+ */
+export async function insertPositions(
+  rows: ReadonlyArray<PositionRow>,
+): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  const sql = getDb();
+
+  await sql(
+    `CREATE TABLE IF NOT EXISTS positions (
+       captured_at  TIMESTAMPTZ NOT NULL,
+       expiry       DATE NOT NULL,
+       strike       NUMERIC(10, 2) NOT NULL,
+       call_qty     BIGINT NOT NULL,
+       put_qty      BIGINT NOT NULL,
+       timeframe    TEXT NOT NULL,
+       PRIMARY KEY (captured_at, expiry, strike)
+     )`,
+    [],
+  );
+
+  let submitted = 0;
+  for (let i = 0; i < rows.length; i += MAX_ROWS_PER_INSERT) {
+    const chunk = rows.slice(i, i + MAX_ROWS_PER_INSERT);
+
+    const placeholders: string[] = [];
+    const params: unknown[] = [];
+    let p = 1;
+    for (const r of chunk) {
+      placeholders.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`);
+      params.push(r.capturedAt, r.expiry, r.strike, r.callQty, r.putQty, r.timeframe);
+    }
+
+    const text =
+      `INSERT INTO positions ` +
+      `(captured_at, expiry, strike, call_qty, put_qty, timeframe) ` +
+      `VALUES ${placeholders.join(', ')} ` +
+      `ON CONFLICT (captured_at, expiry, strike) DO NOTHING`;
 
     await sql(text, params);
     submitted += chunk.length;

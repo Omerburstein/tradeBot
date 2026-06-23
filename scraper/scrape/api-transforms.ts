@@ -4,7 +4,7 @@
  * helpers they need. No browser, no DB, no I/O — just data shaping, so
  * these are the easiest pieces of the engine to reason about and test.
  */
-import type { Panel, SnapshotRow, MarketTideRow } from '../core/types.js';
+import type { Panel, SnapshotRow, MarketTideRow, PositionRow } from '../core/types.js';
 import type {
   ApiExposureRow,
   ApiExposureResponse,
@@ -109,37 +109,36 @@ export function apiResponseToRows(
 }
 
 /**
- * Convert an API contracts response into SnapshotRow[] for positions.
- * Each strike has a call row and a put row — we net them (call_qty + put_qty)
- * to produce one SnapshotRow per strike with panel='positions'.
- * Only includes strikes that appear in `qualifyingStrikes` (gamma-gated).
+ * Convert an API contracts response into PositionRow[] — one row per strike
+ * with separate call_qty and put_qty columns. Only includes strikes that
+ * appear in `qualifyingStrikes` (gamma-gated).
  */
 export function contractsResponseToRows(
   apiData: ApiContractsResponse,
   capturedAt: string,
   qualifyingStrikes: ReadonlySet<number>,
-): SnapshotRow[] {
+): PositionRow[] {
   const timeframe = apiTimestampToTimeframe(apiData.timestamp);
   const expiry = apiData.date;
 
-  // Aggregate net qty per strike (call + put).
-  const netByStrike = new Map<number, number>();
+  const callByStrike = new Map<number, number>();
+  const putByStrike = new Map<number, number>();
   for (const row of apiData.data) {
     if (!qualifyingStrikes.has(row.strike)) continue;
-    const prev = netByStrike.get(row.strike) ?? 0;
-    netByStrike.set(row.strike, prev + row.qty);
+    if (row.type === 'call') {
+      callByStrike.set(row.strike, (callByStrike.get(row.strike) ?? 0) + row.qty);
+    } else {
+      putByStrike.set(row.strike, (putByStrike.get(row.strike) ?? 0) + row.qty);
+    }
   }
 
-  const rows: SnapshotRow[] = [];
-  for (const [strike, value] of netByStrike) {
-    rows.push({
-      capturedAt,
-      expiry,
-      panel: 'positions',
-      strike,
-      value,
-      timeframe,
-    });
+  const strikes = new Set([...callByStrike.keys(), ...putByStrike.keys()]);
+  const rows: PositionRow[] = [];
+  for (const strike of strikes) {
+    const callQty = callByStrike.get(strike) ?? 0;
+    const putQty = putByStrike.get(strike) ?? 0;
+    if (callQty === 0 && putQty === 0) continue;
+    rows.push({ capturedAt, expiry, strike, callQty, putQty, timeframe });
   }
   return rows;
 }

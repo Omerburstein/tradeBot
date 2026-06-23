@@ -5,7 +5,7 @@
  * (migration 140). Keep these strings in sync with the SQL constraint.
  */
 
-export type Panel = 'gamma' | 'charm' | 'vanna' | 'positions';
+export type Panel = 'gamma' | 'charm' | 'vanna';
 
 export interface SnapshotRow {
   /** ISO-8601 UTC timestamp; serialized to TIMESTAMPTZ in Postgres. */
@@ -23,6 +23,21 @@ export interface SnapshotRow {
    * scraper can realign subsequent Greek captures back to the
    * gamma anchor when UW publishes a new slot mid-cycle.
    */
+  timeframe: string;
+}
+
+/**
+ * One MM contracts position observation — call and put qty per strike,
+ * persisted to the `positions` table (separate from periscope_snapshots).
+ */
+export interface PositionRow {
+  /** ISO-8601 UTC timestamp; slot END time. */
+  capturedAt: string;
+  /** ISO-8601 date (YYYY-MM-DD). */
+  expiry: string;
+  strike: number;
+  callQty: number;
+  putQty: number;
   timeframe: string;
 }
 
