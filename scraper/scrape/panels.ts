@@ -15,11 +15,12 @@ import {
 } from '../core/db.js';
 import { computeCapturedAt } from '../core/dates.js';
 import { logger } from '../core/logger.js';
+import type { SnapshotRow, PositionRow } from '../core/types.js';
 import { withBrowser } from './browser.js';
 import { clickZoomOut, readSpotPrice, waitForChartReady } from './chart.js';
 import { readTimeframeLabel } from './timeframe.js';
 import { setDTEZero, setExpirySingle, walkDateToTarget } from './navigation.js';
-import { latestTradingDay } from './trading-calendar.js';
+import { latestTradingDay, nextTradingDay } from './trading-calendar.js';
 import {
   apiResponseToRows,
   apiTimestampToTimeframe,
@@ -217,24 +218,87 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
 
     const { rows, timeframe, expiry, qualifyingStrikes } = apiResponseToRows(bestResponse, capturedAt);
 
-    // Find the best market_maker_contracts response (positions).
+    // ── Next-expiry (next trading day / 1DTE+) ──────────────────────────────
+    // After capturing today's expiry, switch the Expiry filter to the next
+    // trading day. The response listener is still running — new API responses
+    // append to the same arrays, distinguished by `expiry=<date>` in the URL.
+    const nextExpiry = nextTradingDay(today);
+    const mmeBefore = mmeResponses.length;
+    const mmcBefore = mmcResponses.length;
+
+    let nextExpiryRows: SnapshotRow[] = [];
+    let nextExpiryPositionRows: PositionRow[] = [];
+    let nextExpiryQualifyingStrikes = new Set<number>();
+
+    try {
+      const nextUsed = await setExpirySingle(page, nextExpiry);
+      if (nextUsed) {
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(300); // anti-bot
+        await page.waitForLoadState('networkidle').catch(() => undefined);
+        await page.waitForTimeout(2_000); // anti-bot settle
+
+        const newMME = mmeResponses.slice(mmeBefore);
+        const nextMMEResp =
+          (newMME.find(r => r.url.includes(`expiry=${nextExpiry}`))
+            ?? mmeResponses.find(r => r.url.includes(`expiry=${nextExpiry}`)))?.body
+          ?? null;
+
+        if (nextMMEResp) {
+          const parsed = apiResponseToRows(nextMMEResp, capturedAt);
+          nextExpiryRows = parsed.rows;
+          nextExpiryQualifyingStrikes = parsed.qualifyingStrikes;
+          logger.info(
+            { nextExpiry, rowCount: nextExpiryRows.length },
+            'scrapeAllPanels: next-expiry rows parsed',
+          );
+        } else {
+          logger.warn({ nextExpiry }, 'scrapeAllPanels: no MME response for next expiry');
+        }
+
+        const newMMC = mmcResponses.slice(mmcBefore);
+        const nextMMCResp =
+          (newMMC.find(r => r.url.includes(`expiry=${nextExpiry}`))
+            ?? mmcResponses.find(r => r.url.includes(`expiry=${nextExpiry}`)))?.body
+          ?? null;
+        if (nextMMCResp) {
+          nextExpiryPositionRows = contractsResponseToRows(
+            nextMMCResp,
+            capturedAt,
+            nextExpiryQualifyingStrikes,
+          );
+        }
+      } else {
+        logger.warn({ nextExpiry }, 'scrapeAllPanels: setExpirySingle failed for next expiry — skipping');
+      }
+    } catch (err) {
+      logger.warn(
+        { nextExpiry, err: err instanceof Error ? err.message : String(err) },
+        'scrapeAllPanels: next-expiry capture failed — non-blocking',
+      );
+    }
+
+    // Find the best market_maker_contracts response (positions) for today.
+    // Only search responses captured before the next-expiry filter switch
+    // to avoid accidentally using next-expiry contracts for today's rows.
+    const todayMMCResponses = mmcResponses.slice(0, mmcBefore);
     let bestContracts: ApiContractsResponse | null = null;
-    for (const r of mmcResponses) {
+    for (const r of todayMMCResponses) {
       if (r.url.includes(`expiry=${today}`)) {
         bestContracts = r.body;
         break;
       }
     }
     if (bestContracts === null) {
-      for (const r of mmcResponses) {
+      for (const r of todayMMCResponses) {
         if (!r.url.includes('expiry=all')) {
           bestContracts = r.body;
           break;
         }
       }
     }
-    if (bestContracts === null && mmcResponses.length > 0) {
-      bestContracts = mmcResponses[mmcResponses.length - 1]!.body;
+    if (bestContracts === null && todayMMCResponses.length > 0) {
+      bestContracts = todayMMCResponses[todayMMCResponses.length - 1]!.body;
     }
 
     const positionRows = bestContracts
@@ -297,15 +361,20 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           [...straddleResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
           ?? straddleResponses[straddleResponses.length - 1];
         const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
-        if (straddle != null) {
+        const lastMme =
+          [...mmeResponses].reverse().find(r => r.url.includes(`expiry=${tradeDate}`))
+          ?? mmeResponses[mmeResponses.length - 1];
+        const spxOpen = lastMme?.body.index_values.open ?? null;
+        if (straddle != null && spxOpen != null) {
           const inserted = await insertConeSnapshot({
-            date: tradeDate,
-            straddle,
             capturedAt: new Date().toISOString(),
+            spxOpen,
+            coneUpper: spxOpen + straddle,
+            coneLower: spxOpen - straddle,
           });
-          logger.info({ tradeDate, straddle, inserted }, 'scrapeAllPanels: stored Cone');
+          logger.info({ tradeDate, spxOpen, straddle, inserted }, 'scrapeAllPanels: stored Cone');
         } else {
-          logger.warn({ tradeDate }, 'scrapeAllPanels: no straddle (Cone) value captured');
+          logger.warn({ tradeDate, straddle, spxOpen }, 'scrapeAllPanels: missing cone data');
         }
       }
     } catch (err) {
@@ -316,8 +385,8 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     }
 
     return {
-      rows,
-      positionRows,
+      rows: [...rows, ...nextExpiryRows],
+      positionRows: [...positionRows, ...nextExpiryPositionRows],
       spot: spot ?? bestResponse.index_values.close,
     };
   });

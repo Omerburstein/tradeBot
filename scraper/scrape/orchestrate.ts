@@ -175,15 +175,20 @@ async function scrapeAndStoreDay(
       [...caps.straddle].reverse().find(r => r.url.includes(`date=${date}`))
       ?? caps.straddle[caps.straddle.length - 1];
     const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
-    if (straddle != null) {
+    const lastMme =
+      [...caps.mme].reverse().find(r => r.url.includes(`expiry=${date}`))
+      ?? caps.mme[caps.mme.length - 1];
+    const spxOpen = lastMme?.body.index_values.open ?? null;
+    if (straddle != null && spxOpen != null) {
       const cone: ConeSnapshotRow = {
-        date,
-        straddle,
         capturedAt: new Date().toISOString(),
+        spxOpen,
+        coneUpper: spxOpen + straddle,
+        coneLower: spxOpen - straddle,
       };
       coneInserted = await insertConeSnapshot(cone);
     } else {
-      logger.warn({ date }, 'scrapeAndStoreDay: no straddle (Cone) value captured');
+      logger.warn({ date, straddle, spxOpen }, 'scrapeAndStoreDay: missing cone data');
     }
   }
 

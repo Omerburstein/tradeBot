@@ -43,6 +43,12 @@ export function prevDay(ymd: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+export function nextDay(ymd: string): string {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 /**
  * The latest date for which UW market data is available.
  * Returns today if the market has already opened (past 09:20 ET) and
@@ -90,6 +96,21 @@ export function prevTradingDay(ymd: string): string {
       return candidate;
     }
     candidate = prevDay(candidate);
+  }
+}
+
+/**
+ * The next trading day after `ymd` (Mon-Fri, US-market non-holiday).
+ * Used to determine the next-expiry date for dual-expiry live tick scrapes.
+ */
+export function nextTradingDay(ymd: string): string {
+  let candidate = nextDay(ymd);
+  while (true) {
+    const dow = new Date(`${candidate}T12:00:00Z`).getUTCDay();
+    if (dow >= 1 && dow <= 5 && !US_MARKET_HOLIDAYS.has(candidate)) {
+      return candidate;
+    }
+    candidate = nextDay(candidate);
   }
 }
 

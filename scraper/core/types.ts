@@ -65,14 +65,20 @@ export interface MarketTideRow {
 }
 
 /**
- * The Cone (expected-move) param for a trading day — UW's ATM straddle
- * price. Persisted once per day to the `cone_snapshots` table.
+ * The Cone (expected-move) for a trading day. Three price coordinates that
+ * define the two yellow cone lines on the Periscope chart: the starting SPX
+ * price and its upper/lower endpoints at end-of-day.
+ *
+ * Derived as: spxOpen from index_values.open, coneUpper = spxOpen + straddle,
+ * coneLower = spxOpen - straddle. Persisted once per day to `cone_snapshots`.
  */
 export interface ConeSnapshotRow {
-  /** Trading date (YYYY-MM-DD); DATE primary key in Postgres. */
-  date: string;
-  /** ATM straddle price (= expected move in SPX points). */
-  straddle: number;
-  /** ISO-8601 UTC timestamp of when this was scraped. */
+  /** ISO-8601 UTC timestamp of when this was scraped. PK in Postgres. */
   capturedAt: string;
+  /** SPX open price for the day — the cone's apex. */
+  spxOpen: number;
+  /** Upper cone endpoint (spxOpen + ATM straddle). */
+  coneUpper: number;
+  /** Lower cone endpoint (spxOpen − ATM straddle). */
+  coneLower: number;
 }

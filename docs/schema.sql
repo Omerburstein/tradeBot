@@ -42,13 +42,17 @@ CREATE TABLE IF NOT EXISTS spot_prices (
 
 
 -- ----------------------------------------------------------------------------
--- cone_snapshots — once-per-day ATM straddle (expected-move / Cone param)
+-- cone_snapshots — once-per-day cone coordinates (expected-move / Cone param)
+--   spx_open   = SPX open price (cone apex)
+--   cone_upper = spx_open + ATM straddle  (upper yellow line endpoint)
+--   cone_lower = spx_open − ATM straddle  (lower yellow line endpoint)
+-- Trade date is derived from captured_at AT TIME ZONE 'America/New_York'.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cone_snapshots (
-  captured_at TIMESTAMPTZ   NOT NULL,          -- scrape time
-  date        DATE          NOT NULL,          -- trade date
-  straddle    NUMERIC(10,2) NOT NULL,          -- ATM straddle = expected move (SPX pts)
-  PRIMARY KEY (captured_at, date)
+  captured_at  TIMESTAMPTZ   NOT NULL PRIMARY KEY,
+  spx_open     NUMERIC(10,2) NOT NULL,
+  cone_upper   NUMERIC(10,2) NOT NULL,
+  cone_lower   NUMERIC(10,2) NOT NULL
 );
 
 
