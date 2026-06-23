@@ -231,7 +231,9 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     let nextExpiryQualifyingStrikes = new Set<number>();
 
     try {
-      const nextUsed = await setExpirySingle(page, nextExpiry);
+      // skipModeSwitch: the dialog is already in Single mode from the
+      // first (today) call — re-clicking "Single" would toggle it to Multi.
+      const nextUsed = await setExpirySingle(page, nextExpiry, { skipModeSwitch: true });
       if (nextUsed) {
         await page.keyboard.press('Escape');
         await page.waitForTimeout(300); // anti-bot

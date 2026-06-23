@@ -41,6 +41,7 @@ export function escapeRegex(s: string): string {
 export async function setExpirySingle(
   page: Page,
   targetYmd: string,
+  opts: { skipModeSwitch?: boolean } = {},
 ): Promise<boolean> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(targetYmd)) {
     throw new Error(`setExpirySingle: invalid target "${targetYmd}"`);
@@ -113,20 +114,15 @@ export async function setExpirySingle(
     return false;
   }
 
-  // Switch to Single mode if not already there — in Multi mode clicking a
-  // date only toggles a checkbox and the dialog stays open. But clicking
-  // "Single" when already in Single mode toggles back to Multi (wrong).
-  const singleBtn = dialog.getByText('Single', { exact: true }).first();
-  if ((await singleBtn.count()) > 0) {
-    const alreadySingle = await singleBtn.evaluate((el) => {
-      const e = el as HTMLElement;
-      return e.getAttribute('aria-selected') === 'true'
-        || e.getAttribute('data-state') === 'active'
-        || e.getAttribute('data-state') === 'on'
-        || e.closest('[aria-selected="true"]') !== null
-        || e.closest('[data-state="active"]') !== null;
-    }).catch(() => false);
-    if (!alreadySingle) {
+  // Switch to Single mode — in Multi mode clicking a date only toggles a
+  // checkbox and the dialog stays open. The "Single" control is a toggle:
+  // clicking it when already in Single mode flips it back to Multi. So the
+  // caller passes skipModeSwitch=true on subsequent calls within the same
+  // session (the dialog retains Single mode from the first call) — we then
+  // only re-pick the date and never touch the toggle.
+  if (!opts.skipModeSwitch) {
+    const singleBtn = dialog.getByText('Single', { exact: true }).first();
+    if ((await singleBtn.count()) > 0) {
       await singleBtn.click({ timeout: 3_000 });
       await page.waitForTimeout(500);
     }
