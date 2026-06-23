@@ -406,14 +406,21 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           [...straddleResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
           ?? straddleResponses[straddleResponses.length - 1];
         const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
+        // Cone apex = SPX's *settled* open = the first RTH one-minute bar's
+        // CLOSE (the opening print spikes then settles). Do NOT use the daily
+        // candle `o` (raw spike) or `prev_close` (prior session). The candle
+        // `o` is only a fallback when ticks are unavailable. Verified against
+        // the chart's axis labels: midpoint of the cone bounds == data[0].close
+        // and half-width == straddle. See orchestrate.ts for the same logic.
+        const tickResp = tickResponses
+          .find(r => r.url.includes(`date=${tradeDate}`));
+        const firstBar = tickResp?.body.data?.[0];
         const candleEntry = candleResponses
           .flatMap(r => r.body)
           .find(e => e.date === tradeDate);
-        const tickResp = tickResponses
-          .find(r => r.url.includes(`date=${tradeDate}`));
-        const spxOpen = candleEntry
-          ? Number.parseFloat(candleEntry.o)
-          : tickResp ? Number.parseFloat(tickResp.body.prev_close) : null;
+        const spxOpen = firstBar
+          ? Number.parseFloat(firstBar.close)
+          : candleEntry ? Number.parseFloat(candleEntry.o) : null;
         if (straddle != null && spxOpen != null) {
           const inserted = await insertConeSnapshot({
             capturedAt: new Date().toISOString(),
