@@ -96,6 +96,20 @@ export interface ApiCandleEntry {
 }
 
 /**
+ * One entry from the `index_ticks/SPX/one_minute_ticks?date=...` response.
+ * The first entry (start_time = 09:30 ET) open price is the session open —
+ * used as fallback for the cone apex when today's candle isn't in index_candles
+ * (in-progress trading day).
+ */
+export interface ApiSpxTickEntry {
+  start_time: string; // ISO-8601 UTC, e.g. "2026-06-18T13:30:00Z"
+  open: string;
+  close: string;
+  high: string;
+  low: string;
+}
+
+/**
  * Shape of a single `net-flow-ticks` data point (one per minute).
  */
 export interface ApiNetFlowRow {
@@ -125,6 +139,8 @@ export interface ApiCaptures {
   mmc: Array<{ url: string; body: ApiContractsResponse }>;
   straddle: Array<{ url: string; body: ApiStraddleResponse }>;
   tide: Array<{ url: string; body: ApiNetFlowResponse }>;
-  /** Daily OHLC for SPX — fires once on page load. Used for cone apex (spxOpen). */
+  /** Daily OHLC for SPX — fires once on page load. Used for cone apex (spxOpen) on completed days. */
   candles: Array<{ url: string; body: ApiCandleEntry[] }>;
+  /** Per-minute SPX ticks for a date — used as fallback cone apex for the current in-progress day. */
+  ticks: Array<{ url: string; body: ApiSpxTickEntry[] }>;
 }

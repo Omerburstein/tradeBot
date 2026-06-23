@@ -34,6 +34,7 @@ import type {
   ApiContractsResponse,
   ApiExposureResponse,
   ApiNetFlowResponse,
+  ApiSpxTickEntry,
   ApiStraddleResponse,
   ScrapeResult,
 } from './api-types.js';
@@ -49,6 +50,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     const straddleResponses: Array<{ url: string; body: ApiStraddleResponse }> = [];
     const tideResponses: Array<{ url: string; body: ApiNetFlowResponse }> = [];
     const candleResponses: Array<{ url: string; body: ApiCandleEntry[] }> = [];
+    const tickResponses: Array<{ url: string; body: ApiSpxTickEntry[] }> = [];
 
     page.on('response', (response) => {
       const url = response.url();
@@ -72,6 +74,9 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           }
           if (url.includes('index_candles')) {
             candleResponses.push({ url, body: body as ApiCandleEntry[] });
+          }
+          if (url.includes('one_minute_ticks')) {
+            tickResponses.push({ url, body: body as ApiSpxTickEntry[] });
           }
         }).catch(() => undefined);
       }
@@ -404,7 +409,12 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
         const candleEntry = candleResponses
           .flatMap(r => r.body)
           .find(e => e.date === tradeDate);
-        const spxOpen = candleEntry ? Number.parseFloat(candleEntry.o) : null;
+        const tickEntry = tickResponses
+          .find(r => r.url.includes(`date=${tradeDate}`))
+          ?.body[0];
+        const spxOpen = candleEntry
+          ? Number.parseFloat(candleEntry.o)
+          : tickEntry ? Number.parseFloat(tickEntry.open) : null;
         if (straddle != null && spxOpen != null) {
           const inserted = await insertConeSnapshot({
             capturedAt: new Date().toISOString(),

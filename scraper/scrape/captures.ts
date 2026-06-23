@@ -13,8 +13,8 @@ import type {
   ApiStraddleResponse,
   ApiNetFlowResponse,
   ApiCandleEntry,
+  ApiSpxTickEntry,
 } from './api-types.js';
-
 
 /**
  * Attach a single `response` listener that routes every JSON response
@@ -22,7 +22,7 @@ import type {
  * clears them between days.
  */
 export function attachApiCaptures(page: Page): ApiCaptures {
-  const caps: ApiCaptures = { mme: [], mmc: [], straddle: [], tide: [], candles: [] };
+  const caps: ApiCaptures = { mme: [], mmc: [], straddle: [], tide: [], candles: [], ticks: [] };
   page.on('response', (response) => {
     const url = response.url();
     const ct = response.headers()['content-type'] ?? '';
@@ -40,6 +40,8 @@ export function attachApiCaptures(page: Page): ApiCaptures {
           caps.tide.push({ url, body: body as ApiNetFlowResponse });
         } else if (url.includes('index_candles')) {
           caps.candles.push({ url, body: body as ApiCandleEntry[] });
+        } else if (url.includes('one_minute_ticks')) {
+          caps.ticks.push({ url, body: body as ApiSpxTickEntry[] });
         }
       })
       .catch(() => undefined);
