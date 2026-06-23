@@ -113,12 +113,23 @@ export async function setExpirySingle(
     return false;
   }
 
-  // Always try to switch to Single mode first — in Multi mode clicking a
-  // date only toggles a checkbox and the dialog stays open.
+  // Switch to Single mode if not already there — in Multi mode clicking a
+  // date only toggles a checkbox and the dialog stays open. But clicking
+  // "Single" when already in Single mode toggles back to Multi (wrong).
   const singleBtn = dialog.getByText('Single', { exact: true }).first();
   if ((await singleBtn.count()) > 0) {
-    await singleBtn.click({ timeout: 3_000 });
-    await page.waitForTimeout(500);
+    const alreadySingle = await singleBtn.evaluate((el) => {
+      const e = el as HTMLElement;
+      return e.getAttribute('aria-selected') === 'true'
+        || e.getAttribute('data-state') === 'active'
+        || e.getAttribute('data-state') === 'on'
+        || e.closest('[aria-selected="true"]') !== null
+        || e.closest('[data-state="active"]') !== null;
+    }).catch(() => false);
+    if (!alreadySingle) {
+      await singleBtn.click({ timeout: 3_000 });
+      await page.waitForTimeout(500);
+    }
   }
 
   // Wait for a date row in YYYY-MM-DD (Nd) format to be visible.
