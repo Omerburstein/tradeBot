@@ -94,6 +94,27 @@ export function isInRth(d: Date): boolean {
 }
 
 /**
+ * Returns true when a captured slot's END time (its captured_at instant)
+ * belongs to the data we persist: Mon-Fri, 09:40-16:00 ET inclusive.
+ * DST-aware.
+ *
+ * This is STRICTER than `isInRth`: it also excludes the opening
+ * 09:20-09:30 slot (which ends at 09:30 and straddles the bell). The
+ * first persisted slot is therefore 09:30-09:40 (ends 09:40) and the
+ * last is 15:50-16:00 (ends 16:00). Premarket and postmarket slots are
+ * excluded as well.
+ *
+ * Used as the single retention gate across every persistence path —
+ * live tick, single-date backfill, range backfill, walk-back — so
+ * out-of-window slots are dropped no matter which path produced them.
+ */
+export function isPersistableSlot(d: Date): boolean {
+  const { weekday, minutesSinceMidnight } = etParts(d);
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  return minutesSinceMidnight >= 9 * 60 + 40 && minutesSinceMidnight <= 16 * 60;
+}
+
+/**
  * Returns true when the given UTC instant is inside the scraper's
  * active polling window: Mon-Fri, 09:21-16:14 ET. DST-aware.
  *

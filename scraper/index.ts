@@ -77,7 +77,7 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
 // Now safe to load config (and capture its throws via the Sentry above).
 const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow } =
   await import('./core/config.js');
-const { expectedWindowEnd, parseSlotEnd, isInRth } = await import('./core/dates.js');
+const { expectedWindowEnd, parseSlotEnd, isPersistableSlot } = await import('./core/dates.js');
 const { insertSnapshots, insertSpotPrice, insertPositions } = await import('./core/db.js');
 const { scrapeAllPanels, scrapeBackfill, scrapeBackfillRange } =
   await import('./scrape/index.js');
@@ -197,20 +197,21 @@ async function runTick(
     const anchor = rows[0]!;
     const capturedEnd = parseSlotEnd(anchor.timeframe);
 
-    // Ignore premarket/postmarket captures entirely: don't insert, don't
-    // advance dedup, don't fire the webhook. This leaves the DB and the
-    // auto-playbook anchored to the last RTH (09:30-16:00 ET) slot. The
-    // DB-layer RTH filter (core/db.ts) is the backstop for backfill paths;
-    // this guard additionally protects the tick's dedup + webhook side
-    // effects, which run off the captured slot before any insert.
-    if (!isInRth(new Date(anchor.capturedAt))) {
+    // Ignore non-persisted slots entirely: don't insert, don't advance
+    // dedup, don't fire the webhook. This covers premarket, postmarket,
+    // AND the opening 09:20-09:30 slot, leaving the DB and the auto-playbook
+    // anchored to the last persisted (09:40-16:00 ET) slot. The DB-layer
+    // filter (core/db.ts) is the backstop for backfill paths; this guard
+    // additionally protects the tick's dedup + webhook side effects, which
+    // run off the captured slot before any insert.
+    if (!isPersistableSlot(new Date(anchor.capturedAt))) {
       logger.info(
         {
           slot: anchor.timeframe,
           capturedAt: anchor.capturedAt,
           ms: Date.now() - startedAt,
         },
-        'tick: slot outside RTH (premarket/postmarket) — skipping insert + webhook',
+        'tick: slot outside persisted window (premarket/postmarket/open) — skipping insert + webhook',
       );
       return;
     }
