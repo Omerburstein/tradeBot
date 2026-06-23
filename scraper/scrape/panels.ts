@@ -201,7 +201,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
 
     if (bestResponse === null) {
       logger.warn('scrapeAllPanels: no market_maker_exposures API response captured');
-      return { rows: [], spot: null };
+      return { rows: [], positionRows: [], spot: null };
     }
 
     // Read spot price from the page header.
@@ -237,12 +237,13 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
       bestContracts = mmcResponses[mmcResponses.length - 1]!.body;
     }
 
+    const positionRows = bestContracts
+      ? contractsResponseToRows(bestContracts, capturedAt, qualifyingStrikes)
+      : [];
     if (bestContracts) {
-      const positionsRows = contractsResponseToRows(bestContracts, capturedAt, qualifyingStrikes);
-      rows.push(...positionsRows);
       logger.info(
-        { positionsRows: positionsRows.length, mmcResponseCount: mmcResponses.length },
-        'scrapeAllPanels: added positions rows from contracts API',
+        { positionRows: positionRows.length, mmcResponseCount: mmcResponses.length },
+        'scrapeAllPanels: parsed positions rows from contracts API',
       );
     } else {
       logger.warn('scrapeAllPanels: no market_maker_contracts API response captured');
@@ -316,6 +317,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
 
     return {
       rows,
+      positionRows,
       spot: spot ?? bestResponse.index_values.close,
     };
   });
