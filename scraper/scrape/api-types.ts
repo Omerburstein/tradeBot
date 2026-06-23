@@ -83,6 +83,19 @@ export interface ApiStraddleResponse {
 }
 
 /**
+ * One entry from the `index_candles/SPX/1d?interval=...` response —
+ * daily OHLC for SPX. The `o` field is the session open price, which is
+ * the cone's apex (start point). Note: field names are single-char shorthands.
+ */
+export interface ApiCandleEntry {
+  date: string; // "YYYY-MM-DD"
+  o: string;    // open
+  h: string;    // high
+  l: string;    // low
+  c: string;    // close
+}
+
+/**
  * Shape of a single `net-flow-ticks` data point (one per minute).
  */
 export interface ApiNetFlowRow {
@@ -112,4 +125,6 @@ export interface ApiCaptures {
   mmc: Array<{ url: string; body: ApiContractsResponse }>;
   straddle: Array<{ url: string; body: ApiStraddleResponse }>;
   tide: Array<{ url: string; body: ApiNetFlowResponse }>;
+  /** Daily OHLC for SPX — fires once on page load. Used for cone apex (spxOpen). */
+  candles: Array<{ url: string; body: ApiCandleEntry[] }>;
 }

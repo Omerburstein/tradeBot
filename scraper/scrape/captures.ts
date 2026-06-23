@@ -12,7 +12,9 @@ import type {
   ApiContractsResponse,
   ApiStraddleResponse,
   ApiNetFlowResponse,
+  ApiCandleEntry,
 } from './api-types.js';
+
 
 /**
  * Attach a single `response` listener that routes every JSON response
@@ -20,7 +22,7 @@ import type {
  * clears them between days.
  */
 export function attachApiCaptures(page: Page): ApiCaptures {
-  const caps: ApiCaptures = { mme: [], mmc: [], straddle: [], tide: [] };
+  const caps: ApiCaptures = { mme: [], mmc: [], straddle: [], tide: [], candles: [] };
   page.on('response', (response) => {
     const url = response.url();
     const ct = response.headers()['content-type'] ?? '';
@@ -36,6 +38,8 @@ export function attachApiCaptures(page: Page): ApiCaptures {
           caps.straddle.push({ url, body: body as ApiStraddleResponse });
         } else if (url.includes('net-flow-ticks')) {
           caps.tide.push({ url, body: body as ApiNetFlowResponse });
+        } else if (url.includes('index_candles')) {
+          caps.candles.push({ url, body: body as ApiCandleEntry[] });
         }
       })
       .catch(() => undefined);

@@ -86,6 +86,7 @@ async function scrapeAndStoreDay(
   caps.mmc.length = 0;
   caps.straddle.length = 0;
   caps.tide.length = 0;
+  caps.candles.length = 0;
 
   await walkDateToTarget(page, date);
   await page.waitForTimeout(1_500);
@@ -221,10 +222,10 @@ async function scrapeAndStoreDay(
       [...caps.straddle].reverse().find(r => r.url.includes(`date=${date}`))
       ?? caps.straddle[caps.straddle.length - 1];
     const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
-    const lastMme =
-      [...caps.mme].reverse().find(r => r.url.includes(`expiry=${date}`))
-      ?? caps.mme[caps.mme.length - 1];
-    const spxOpen = lastMme?.body.index_values.open ?? null;
+    const candleEntry = caps.candles
+      .flatMap(r => r.body)
+      .find(e => e.date === date);
+    const spxOpen = candleEntry ? Number.parseFloat(candleEntry.o) : null;
     if (straddle != null && spxOpen != null) {
       const cone: ConeSnapshotRow = {
         capturedAt: new Date().toISOString(),

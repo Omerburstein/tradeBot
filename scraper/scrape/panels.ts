@@ -30,6 +30,7 @@ import {
   utcToETHhmm,
 } from './api-transforms.js';
 import type {
+  ApiCandleEntry,
   ApiContractsResponse,
   ApiExposureResponse,
   ApiNetFlowResponse,
@@ -47,6 +48,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
     const mmcResponses: Array<{ url: string; body: ApiContractsResponse }> = [];
     const straddleResponses: Array<{ url: string; body: ApiStraddleResponse }> = [];
     const tideResponses: Array<{ url: string; body: ApiNetFlowResponse }> = [];
+    const candleResponses: Array<{ url: string; body: ApiCandleEntry[] }> = [];
 
     page.on('response', (response) => {
       const url = response.url();
@@ -67,6 +69,9 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           }
           if (url.includes('net-flow-ticks')) {
             tideResponses.push({ url, body: body as ApiNetFlowResponse });
+          }
+          if (url.includes('index_candles')) {
+            candleResponses.push({ url, body: body as ApiCandleEntry[] });
           }
         }).catch(() => undefined);
       }
@@ -396,10 +401,10 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           [...straddleResponses].reverse().find(r => r.url.includes(`date=${tradeDate}`))
           ?? straddleResponses[straddleResponses.length - 1];
         const straddle = straddleResp ? parseStraddle(straddleResp.body) : null;
-        const lastMme =
-          [...mmeResponses].reverse().find(r => r.url.includes(`expiry=${tradeDate}`))
-          ?? mmeResponses[mmeResponses.length - 1];
-        const spxOpen = lastMme?.body.index_values.open ?? null;
+        const candleEntry = candleResponses
+          .flatMap(r => r.body)
+          .find(e => e.date === tradeDate);
+        const spxOpen = candleEntry ? Number.parseFloat(candleEntry.o) : null;
         if (straddle != null && spxOpen != null) {
           const inserted = await insertConeSnapshot({
             capturedAt: new Date().toISOString(),
