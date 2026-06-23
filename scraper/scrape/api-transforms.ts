@@ -156,7 +156,7 @@ export function parseStraddle(body: ApiStraddleResponse): number | null {
  * offset, so UTC minutes equal ET minutes — `getUTCMinutes() % 10`
  * cleanly selects the slot boundaries (09:30, 09:40, …, 16:00).
  */
-export function netFlowToTideRows(body: ApiNetFlowResponse, date: string): MarketTideRow[] {
+export function netFlowToTideRows(body: ApiNetFlowResponse): MarketTideRow[] {
   // One scrape-time stamp for every row produced by this call — `tickAt`
   // is the data point's own slot boundary; `capturedAt` is now.
   const capturedAt = new Date().toISOString();
@@ -173,7 +173,7 @@ export function netFlowToTideRows(body: ApiNetFlowResponse, date: string): Marke
     }
     out.push({
       tickAt: d.toISOString(),
-      date: pt.date ?? date,
+      date: pt.date,
       netCallPremium: ncp,
       netPutPremium: npp,
       netVolume: nv,
