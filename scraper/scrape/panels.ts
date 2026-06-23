@@ -250,10 +250,10 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
           { nextExpiry, newMMECount: newMME.length, urls: newMME.map(r => r.url) },
           'scrapeAllPanels: next-expiry MME responses after switch',
         );
+        // Match on the URL expiry param — the response BODY's `date` is the
+        // trading-session date, not the expiry, so it can't be used here.
         let nextMMEResp: ApiExposureResponse | null =
-          newMME.find(
-            r => r.url.includes(`expiry=${nextExpiry}`) || r.body?.date === nextExpiry,
-          )?.body ?? null;
+          newMME.find(r => r.url.includes(`expiry=${nextExpiry}`))?.body ?? null;
         if (nextMMEResp === null) {
           nextMMEResp = newMME.find(r => !r.url.includes('expiry=all'))?.body ?? null;
         }
@@ -262,7 +262,9 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
         }
 
         if (nextMMEResp) {
-          const parsed = apiResponseToRows(nextMMEResp, capturedAt);
+          // Pass nextExpiry explicitly so rows are stamped with the real
+          // expiry, not the session date (apiData.date).
+          const parsed = apiResponseToRows(nextMMEResp, capturedAt, nextExpiry);
           nextExpiryRows = parsed.rows;
           nextExpiryQualifyingStrikes = parsed.qualifyingStrikes;
           logger.info(
@@ -287,6 +289,7 @@ export async function scrapeAllPanels(): Promise<ScrapeResult> {
             nextMMCResp,
             capturedAt,
             nextExpiryQualifyingStrikes,
+            nextExpiry,
           );
           logger.info(
             { nextExpiry, positionRows: nextExpiryPositionRows.length },

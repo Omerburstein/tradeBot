@@ -67,10 +67,14 @@ export function apiTimestampToTimeframe(utcIso: string): string {
 export function apiResponseToRows(
   apiData: ApiExposureResponse,
   capturedAt: string,
+  expiryOverride?: string,
 ): { rows: SnapshotRow[]; spot: number; timeframe: string; expiry: string; qualifyingStrikes: Set<number> } {
   const rows: SnapshotRow[] = [];
   const timeframe = apiTimestampToTimeframe(apiData.timestamp);
-  const expiry = apiData.date; // YYYY-MM-DD
+  // apiData.date is the trading-SESSION date, which equals the expiry only
+  // for 0DTE. For a non-0DTE expiry the caller passes expiryOverride (the
+  // expiry selected in the Expiry filter / URL param).
+  const expiry = expiryOverride ?? apiData.date; // YYYY-MM-DD
   const spot = apiData.index_values.close;
 
   const dataRows = Object.values(apiData.data);
@@ -117,9 +121,11 @@ export function contractsResponseToRows(
   apiData: ApiContractsResponse,
   capturedAt: string,
   qualifyingStrikes: ReadonlySet<number>,
+  expiryOverride?: string,
 ): PositionRow[] {
   const timeframe = apiTimestampToTimeframe(apiData.timestamp);
-  const expiry = apiData.date;
+  // apiData.date is the trading-SESSION date (== expiry only for 0DTE).
+  const expiry = expiryOverride ?? apiData.date;
 
   const callByStrike = new Map<number, number>();
   const putByStrike = new Map<number, number>();
