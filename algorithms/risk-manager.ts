@@ -71,6 +71,37 @@ export function checkStopLoss(
 }
 
 /**
+ * Check whether the fixed profit target has been reached.
+ *
+ * The target sits at stopLossPoints × riskRewardRatio from entry, enforcing
+ * the configured risk:reward (e.g. 1:3). Slippage is not applied here — it's
+ * accounted for at the actual exit fill in recordExit.
+ */
+export function checkTakeProfit(
+  state: TradeState,
+  currentSpot: number,
+  config: AlgoConfig,
+): { hit: boolean; reason: string } {
+  if (state.position === 'flat' || state.entryPrice === null) {
+    return { hit: false, reason: '' };
+  }
+
+  const { risk } = config;
+  const direction = state.position === 'long' ? 1 : -1;
+  const pnlPoints = (currentSpot - state.entryPrice) * direction;
+  const targetPoints = risk.stopLossPoints * risk.riskRewardRatio;
+
+  if (pnlPoints >= targetPoints) {
+    return {
+      hit: true,
+      reason: `+${pnlPoints.toFixed(1)} pts ≥ ${targetPoints.toFixed(1)} target (1:${risk.riskRewardRatio} R:R)`,
+    };
+  }
+
+  return { hit: false, reason: '' };
+}
+
+/**
  * Check daily risk limits: max daily loss and max trade count.
  */
 export function checkDailyLimits(

@@ -12,8 +12,8 @@
  *   6. SIGTERM handler clears the interval, flushes Sentry, exits 0.
  *
  * Schedule-aware dedup:
- *   - The scraper wakes every minute during 08:21-15:14 CT (Mon-Fri).
- *   - It tracks `lastCapturedWindowEnd` — the end-time (e.g. "08:30")
+ *   - The scraper wakes every minute during 09:21-16:14 ET (Mon-Fri).
+ *   - It tracks `lastCapturedWindowEnd` — the end-time (e.g. "09:30")
  *     of the last UW slot it successfully captured.
  *   - When the most recently CLOSED 10-min window's end matches
  *     `lastCapturedWindowEnd`, the tick is a cheap no-op (skip scrape
@@ -25,8 +25,8 @@
  *     subsequent ticks until the next 10-min boundary closes.
  *
  * This pattern absorbs UW's 1-3 min publication lag without polling
- * blindly, and ensures the first analyzable slot ("08:20 - 08:30")
- * and the debrief slot ("14:50 - 15:00") are captured as soon as UW
+ * blindly, and ensures the first analyzable slot ("09:20 - 09:30")
+ * and the debrief slot ("15:50 - 16:00") are captured as soon as UW
  * publishes them, rather than 10 min later on the next 10-min tick.
  *
  * One-shot test mode: set FORCE_TICK=true to bypass the window gate,
@@ -76,12 +76,12 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
 
 // Now safe to load config (and capture its throws via the Sentry above).
 const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow } =
-  await import('./config.js');
-const { expectedWindowEnd, parseSlotEnd } = await import('./dates.js');
-const { insertSnapshots, insertSpotPrice } = await import('./db.js');
+  await import('./core/config.js');
+const { expectedWindowEnd, parseSlotEnd, isPersistableSlot } = await import('./core/dates.js');
+const { insertSnapshots, insertSpotPrice, insertPositions } = await import('./core/db.js');
 const { scrapeAllPanels, scrapeBackfill, scrapeBackfillRange } =
-  await import('./scrape.js');
-const { loadWebhookConfig, postPlaybookWebhook } = await import('./webhook.js');
+  await import('./scrape/index.js');
+const { loadWebhookConfig, postPlaybookWebhook } = await import('./core/webhook.js');
 
 const logger = pino({ level: LOG_LEVEL });
 
@@ -108,7 +108,7 @@ let intervalHandle: NodeJS.Timeout | null = null;
 let tickInFlight = false;
 
 // Dedup state: the end-time (HH:MM) of the last UW slot we successfully
-// captured (e.g. "08:30" after capturing "08:20 - 08:30"). Reset to null
+// captured (e.g. "09:30" after capturing "09:20 - 09:30"). Reset to null
 // when we leave the active polling window so the next trading day
 // starts fresh. Used by runTick to short-circuit ticks where the
 // current expected 10-min window has already been captured.
@@ -197,6 +197,25 @@ async function runTick(
     const anchor = rows[0]!;
     const capturedEnd = parseSlotEnd(anchor.timeframe);
 
+    // Ignore non-persisted slots entirely: don't insert, don't advance
+    // dedup, don't fire the webhook. This covers premarket, postmarket,
+    // AND the opening 09:20-09:30 slot, leaving the DB and the auto-playbook
+    // anchored to the last persisted (09:40-16:00 ET) slot. The DB-layer
+    // filter (core/db.ts) is the backstop for backfill paths; this guard
+    // additionally protects the tick's dedup + webhook side effects, which
+    // run off the captured slot before any insert.
+    if (!isPersistableSlot(new Date(anchor.capturedAt))) {
+      logger.info(
+        {
+          slot: anchor.timeframe,
+          capturedAt: anchor.capturedAt,
+          ms: Date.now() - startedAt,
+        },
+        'tick: slot outside persisted window (premarket/postmarket/open) — skipping insert + webhook',
+      );
+      return;
+    }
+
     // Dedup: if UW's "Latest" panel still shows the same slot we
     // already captured, UW hasn't rolled to the next window yet. Skip
     // DB insert + webhook (would just generate 422s) and retry next
@@ -219,6 +238,7 @@ async function runTick(
     }
 
     const inserted = await insertSnapshots(rows);
+    const positionsInserted = await insertPositions(scrapeResult.positionRows);
 
     // Persist spot price for the algorithm pipeline.
     if (scrapeResult.spot !== null) {
@@ -236,6 +256,7 @@ async function runTick(
       {
         rows: rows.length,
         inserted,
+        positionsInserted,
         spot: scrapeResult.spot,
         ms: Date.now() - startedAt,
         slot: anchor.timeframe,
@@ -357,14 +378,34 @@ process.on('SIGINT', () => {
   void shutdown('SIGINT');
 });
 
+/**
+ * Exit a one-shot run (FORCE_TICK / backfill) without slamming the event
+ * loop. Calling process.exit() immediately after Playwright + libuv
+ * teardown can race on Windows — uv_async_send fires on an already-closing
+ * handle, crashing with "Assertion failed: !(handle->flags &
+ * UV_HANDLE_CLOSING), src\\win\\async.c". Flushing telemetry then letting
+ * the loop drain naturally (with an unref'd hard-exit fallback so we still
+ * always terminate) sidesteps the race.
+ */
+async function gracefulExit(code: number): Promise<void> {
+  try {
+    await Sentry.close(2000);
+  } catch {
+    // never block exit on telemetry teardown
+  }
+  process.exitCode = code;
+  // Safety net: if some handle keeps the loop alive, force-exit shortly.
+  setTimeout(() => process.exit(code), 2_000).unref();
+}
+
 logger.info('periscope-scraper starting');
 
 const forceTick =
   (process.env.FORCE_TICK ?? '').trim().toLowerCase() === 'true';
 
 const backfillDate = (process.env.BACKFILL_DATE ?? '').trim();
-const backfillStart = (process.env.BACKFILL_START ?? '').trim() || '08:20';
-const backfillEnd = (process.env.BACKFILL_END ?? '').trim() || '14:50';
+const backfillStart = (process.env.BACKFILL_START ?? '').trim() || '09:20';
+const backfillEnd = (process.env.BACKFILL_END ?? '').trim() || '15:50';
 const backfillDateStart = (process.env.BACKFILL_DATE_START ?? '').trim();
 const backfillDateEnd = (process.env.BACKFILL_DATE_END ?? '').trim();
 
@@ -397,43 +438,37 @@ if (backfillDateStart !== '' && backfillDateEnd !== '') {
       'backfill range failed at top level',
     );
   }
-  await Sentry.flush(2000);
-  process.exit(0);
-}
-
-if (backfillDate !== '') {
+  await gracefulExit(0);
+} else if (backfillDate !== '') {
   logger.info(
     { backfillDate, backfillStart, backfillEnd },
     'BACKFILL_DATE set — running historical backfill then exiting',
   );
   const startedAt = Date.now();
   try {
-    const rows = await scrapeBackfill(backfillDate, backfillStart, backfillEnd);
-    const inserted = await insertSnapshots(rows);
+    // scrapeBackfill now scrapes AND persists everything for the day
+    // (snapshots, spot, Market Tide, Cone) and returns a summary.
+    const summary = await scrapeBackfill(backfillDate, backfillStart, backfillEnd);
     logger.info(
-      { rows: rows.length, inserted, ms: Date.now() - startedAt },
+      { ...summary, ms: Date.now() - startedAt },
       'backfill complete',
     );
   } catch (err) {
     Sentry.captureException(err);
     logger.error({ err, ms: Date.now() - startedAt }, 'backfill failed');
   }
-  await Sentry.flush(2000);
-  process.exit(0);
-}
-
-if (forceTick) {
+  await gracefulExit(0);
+} else if (forceTick) {
   logger.info(
     'FORCE_TICK=true — running one tick (RTH gate bypassed) then exiting',
   );
   await runTick({ bypassMarketHours: true });
-  await Sentry.flush(2000);
-  process.exit(0);
+  await gracefulExit(0);
+} else {
+  // Fire one tick immediately so a Railway restart mid-session resumes promptly.
+  await runTick();
+
+  intervalHandle = setInterval(() => {
+    void runTick();
+  }, MS_PER_TICK);
 }
-
-// Fire one tick immediately so a Railway restart mid-session resumes promptly.
-await runTick();
-
-intervalHandle = setInterval(() => {
-  void runTick();
-}, MS_PER_TICK);

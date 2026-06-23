@@ -3,21 +3,25 @@
  * into actionable entry/exit signals.
  *
  * Entry logic (user requirements):
- *   - LONG: composite > +1.5 AND dGamma rising AND (cone crossed down OR strong inside signal)
- *   - SHORT: composite < -1.5 AND dGamma falling AND (cone crossed up OR strong inside signal)
+ *   The cone is treated as support/resistance, NOT a magnet. A breakout
+ *   through a band is a continuation signal — trade in the breakout direction.
+ *   - LONG:  composite > +1.5 AND dGamma rising  AND (broke UP through resistance OR strong inside signal)
+ *   - SHORT: composite < -1.5 AND dGamma falling AND (broke DOWN through support  OR strong inside signal)
  *
  * Exit logic:
  *   - Signal fade: composite drops below ±0.5
- *   - Cone returned: price re-enters cone after breach (mean-reversion played out)
+ *   - Cone returned: price falls back inside the cone after a breakout (failed breakout)
  *   - Reversal: composite flips past ±1.0 in opposing direction
  *   - Stop-loss: hard or trailing stop hit
  *   - Time gate: forced exit before 0DTE decay chaos (14:50 CT)
  */
 
+import type pino from 'pino';
 import { ConeTracker } from './cone.js';
 import {
   checkDailyLimits,
   checkStopLoss,
+  checkTakeProfit,
   checkTimeGates,
   computePositionSize,
   createFlatState,
@@ -48,11 +52,19 @@ export class SignalGenerator {
   private scoreHistory: ScoreComponents[] = [];
   private previousSnapshot: Snapshot | null = null;
   private trades: TradeRecord[] = [];
+  private logger?: pino.Logger;
 
-  constructor(config: AlgoConfig) {
+  /**
+   * @param config  Algorithm configuration.
+   * @param logger  Optional pino logger; when provided, every entry/exit
+   *                action is logged at info level. Omit to run silently
+   *                (e.g. inside the tuner's inner loop).
+   */
+  constructor(config: AlgoConfig, logger?: pino.Logger) {
     this.config = config;
     this.cone = new ConeTracker(config);
     this.state = createFlatState();
+    this.logger = logger;
   }
 
   /**
@@ -154,9 +166,15 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
     }
 
-    // Cone returned: mean-reversion played out
+    // Take-profit check: fixed target enforcing the configured risk:reward
+    const tpCheck = checkTakeProfit(this.state, snapshot.spot, config);
+    if (tpCheck.hit) {
+      return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
+    }
+
+    // Cone returned: price fell back inside the band — breakout failed
     if (cone.crossed === 'returned') {
-      return this.makeSignal('exit', score, cone, snapshot, 'medium', 'cone returned: mean-reversion target reached');
+      return this.makeSignal('exit', score, cone, snapshot, 'medium', 'cone returned: failed breakout, price back inside band');
     }
 
     // Signal fade: directional score dropped below exit threshold
@@ -180,9 +198,9 @@ export class SignalGenerator {
     const { config } = this;
 
     // ── LONG ENTRY ──
-    // Cone crossed down + bullish signal (mean-reversion long)
+    // Price broke UP through resistance (continuation long)
     // OR inside cone with very strong bullish signal
-    const longConeTrigger = cone.crossed === 'down';
+    const longConeTrigger = cone.crossed === 'up';
     const longStrongInside = cone.state === 'inside' && score.composite > config.strongEntryThreshold;
 
     if (
@@ -192,13 +210,14 @@ export class SignalGenerator {
     ) {
       const confidence = this.assessConfidence(score, longConeTrigger);
       const reason = longConeTrigger
-        ? `long entry: cone breach down + bullish gamma (z=${score.composite.toFixed(2)})`
+        ? `long entry: cone breakout up + bullish gamma (z=${score.composite.toFixed(2)})`
         : `long entry: strong inside-cone signal (z=${score.composite.toFixed(2)})`;
       return this.makeSignal('enter_long', score, cone, snapshot, confidence, reason);
     }
 
     // ── SHORT ENTRY ──
-    const shortConeTrigger = cone.crossed === 'up';
+    // Price broke DOWN through support (continuation short)
+    const shortConeTrigger = cone.crossed === 'down';
     const shortStrongInside = cone.state === 'inside' && score.composite < -config.strongEntryThreshold;
 
     if (
@@ -208,7 +227,7 @@ export class SignalGenerator {
     ) {
       const confidence = this.assessConfidence(score, shortConeTrigger);
       const reason = shortConeTrigger
-        ? `short entry: cone breach up + bearish gamma (z=${score.composite.toFixed(2)})`
+        ? `short entry: cone breakout down + bearish gamma (z=${score.composite.toFixed(2)})`
         : `short entry: strong inside-cone signal (z=${score.composite.toFixed(2)})`;
       return this.makeSignal('enter_short', score, cone, snapshot, confidence, reason);
     }
@@ -247,6 +266,21 @@ export class SignalGenerator {
         contracts,
         config.risk.slippagePerSide,
       );
+
+      this.logger?.info(
+        {
+          event: 'ENTRY',
+          order: direction === 'long' ? 'BUY' : 'SELL', // open
+          side: direction,
+          time: snapshot.capturedAt,
+          fillPrice: round2(this.state.entryPrice!),
+          contracts,
+          confidence: signal.confidence,
+          composite: round2(signal.score.composite),
+          reason: signal.reason,
+        },
+        `ENTRY ${direction.toUpperCase()} ${contracts}x @ ${this.state.entryPrice!.toFixed(2)} — ${signal.reason}`,
+      );
     } else if (signal.action === 'exit' && this.state.position !== 'flat') {
       const { newState, realizedPnl } = recordExit(
         this.state,
@@ -266,6 +300,21 @@ export class SignalGenerator {
         pnl: realizedPnl,
         reason: signal.reason,
       });
+
+      this.logger?.info(
+        {
+          event: 'EXIT',
+          order: this.state.position === 'long' ? 'SELL' : 'BUY', // close
+          side: this.state.position,
+          time: snapshot.capturedAt,
+          entryPrice: round2(this.state.entryPrice!),
+          exitPrice: round2(snapshot.spot),
+          contracts: this.state.contracts,
+          pnl: round2(realizedPnl),
+          reason: signal.reason,
+        },
+        `EXIT  ${(this.state.position as string).toUpperCase()} ${this.state.contracts}x @ ${snapshot.spot.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
+      );
 
       this.state = newState;
     }
@@ -292,4 +341,9 @@ export class SignalGenerator {
       timestamp: snapshot.capturedAt,
     };
   }
+}
+
+/** Round to 2 decimals for tidy log fields. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }

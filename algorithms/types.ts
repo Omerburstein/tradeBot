@@ -5,7 +5,7 @@
  * trade state, and configuration for the algorithm pipeline.
  */
 
-import type { Panel } from '../scraper/types.js';
+import type { Panel } from '../scraper/core/types.js';
 
 // ── Data Model ──
 
@@ -15,6 +15,8 @@ export interface StrikeData {
   gamma: number;
   charm: number;
   vanna: number;
+  /** Net market-maker contracts at this strike (call qty + put qty). */
+  positions: number;
 }
 
 /**
@@ -41,10 +43,12 @@ export interface ScoreComponents {
   gexZ: number;
   dGammaRaw: number;
   dGammaZ: number;
-  charmRaw: number;
-  charmZ: number;
-  vannaRaw: number;
-  vannaZ: number;
+  /** Net MM positions exposure (directional, distance-weighted). */
+  positionsRaw: number;
+  positionsZ: number;
+  /** Rate of change of net MM positions across successive snapshots. */
+  dPositionsRaw: number;
+  dPositionsZ: number;
   composite: number;
 }
 
@@ -102,6 +106,12 @@ export interface RiskParams {
   maxRiskPerTrade: number;
   /** Hard stop-loss in SPX points from entry. */
   stopLossPoints: number;
+  /**
+   * Reward-to-risk ratio for the fixed profit target. The take-profit sits at
+   * stopLossPoints × riskRewardRatio from entry, so riskRewardRatio = 3 gives
+   * a 1:3 risk:reward (risk 1 point to make 3).
+   */
+  riskRewardRatio: number;
   /** Profit threshold (SPX pts) to activate trailing stop. */
   trailingStopActivation: number;
   /** Distance (SPX pts) the trailing stop trails behind HWM. */
@@ -127,10 +137,43 @@ export interface AlgoConfig {
   wGex: number;
   /** Weight for gamma rate-of-change. */
   wDGamma: number;
-  /** Weight for charm bias. */
-  wCharm: number;
-  /** Weight for vanna bias. */
-  wVanna: number;
+  /** Weight for net MM positions exposure. */
+  wPositions: number;
+  /** Weight for net MM positions rate-of-change. */
+  wDPositions: number;
+
+  // ── Non-linearity (powers) ──
+  // Each factor input is passed through a sign-preserving power
+  // (signedPow(x, p) = sign(x)·|x|^p) before aggregation. p > 1 emphasizes
+  // large readings, p < 1 saturates them. Nothing is left exactly linear.
+
+  /** Exponent on per-strike gamma. */
+  pGamma: number;
+  /** Exponent on per-strike gamma change (dGamma/dt). */
+  pDGamma: number;
+  /** Exponent on per-strike net positions (saturating, < 1). */
+  pPositions: number;
+  /** Exponent on per-strike positions change (dPositions/dt). */
+  pDPositions: number;
+  /** Exponent on normalized strike distance in the distance-weight ramp. */
+  pDistance: number;
+
+  /** Span of the distance-weight ramp: weight = 1 + span·(dist/window)^pDistance. */
+  distanceWeightSpan: number;
+
+  /**
+   * Minimum gamma strength (a strike's |gamma| as a fraction of the window's
+   * max |gamma|, 0–1) required for that strike's positions to count at all.
+   * Positions where gamma is weak carry no signal regardless of size.
+   */
+  positionsGammaGate: number;
+
+  /**
+   * Hard cap on the absolute value of every factor z-score (and therefore the
+   * composite). A one-off anomaly can't produce z=10 and dominate — it's
+   * clamped to ±zClamp.
+   */
+  zClamp: number;
 
   /** Z-score threshold for standard entries (cone-breach). */
   entryThreshold: number;
@@ -154,10 +197,20 @@ export interface AlgoConfig {
 
 /** Sensible defaults — tune via backtest. */
 export const DEFAULT_CONFIG: AlgoConfig = {
-  wGex: 0.40,
+  wGex: 0.45,
   wDGamma: 0.25,
-  wCharm: 0.20,
-  wVanna: 0.15,
+  wPositions: 0.18,
+  wDPositions: 0.12,
+
+  pGamma: 1.2,
+  pDGamma: 1.1,
+  pPositions: 0.5,
+  pDPositions: 0.5,
+  pDistance: 1.5,
+  distanceWeightSpan: 2.0,
+
+  positionsGammaGate: 0.30,
+  zClamp: 3.5,
 
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,
@@ -174,6 +227,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     accountEquity: 50_000,
     maxRiskPerTrade: 0.01,
     stopLossPoints: 10,
+    riskRewardRatio: 3, // 1:3 risk:reward → take-profit at 30 pts
     trailingStopActivation: 5,
     trailingStopDistance: 7,
     maxDailyLoss: 0.02,

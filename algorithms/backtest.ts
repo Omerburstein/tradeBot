@@ -47,65 +47,7 @@ export async function runBacktest(opts: BacktestOptions): Promise<BacktestResult
 
   log.info({ snapshots: allSnapshots.length }, 'snapshots loaded');
 
-  // Group snapshots by trading day (expiry)
-  const byDay = new Map<string, Snapshot[]>();
-  for (const snap of allSnapshots) {
-    const day = snap.expiry;
-    let list = byDay.get(day);
-    if (!list) {
-      list = [];
-      byDay.set(day, list);
-    }
-    list.push(snap);
-  }
-
-  const allTrades: TradeRecord[] = [];
-  const dailyPnls: number[] = [];
-  const tradingDays = [...byDay.keys()].sort();
-
-  for (const day of tradingDays) {
-    const daySnapshots = byDay.get(day)!;
-    const generator = new SignalGenerator(config);
-
-    log.debug({ day, snapshots: daySnapshots.length }, 'processing day');
-
-    for (const snapshot of daySnapshots) {
-      const signal = generator.processSnapshot(snapshot);
-
-      if (signal.action !== 'hold') {
-        log.debug(
-          {
-            time: signal.timestamp,
-            action: signal.action,
-            composite: signal.score.composite.toFixed(2),
-            cone: signal.cone.state,
-            reason: signal.reason,
-          },
-          'signal',
-        );
-      }
-    }
-
-    // Force-close any open position at end of day
-    const finalState = generator.getState();
-    const dayTrades = generator.getTrades();
-    allTrades.push(...dayTrades);
-
-    const dayPnl = dayTrades.reduce((sum, t) => sum + t.pnl, 0);
-    dailyPnls.push(dayPnl);
-
-    log.info(
-      {
-        day,
-        trades: dayTrades.length,
-        pnl: dayPnl.toFixed(2),
-        position: finalState.position,
-      },
-      'day complete',
-    );
-  }
-
-  const result = computeMetrics(allTrades, dailyPnls, tradingDays.length);
+  const result = simulate(allSnapshots, config, log);
 
   log.info(
     {
@@ -121,6 +63,62 @@ export async function runBacktest(opts: BacktestOptions): Promise<BacktestResult
   );
 
   return result;
+}
+
+/**
+ * Run the signal generator over already-loaded snapshots and compute metrics.
+ *
+ * Pure in-memory replay (no DB) so a tuner can evaluate many configs against
+ * one set of snapshots. Snapshots are grouped by trading day; a fresh
+ * SignalGenerator is created per day (cone + trade state reset daily).
+ *
+ * @param allSnapshots  Snapshots across one or more days (any order).
+ * @param config        Algorithm configuration to evaluate.
+ * @param logger        Optional pino logger for per-day detail; omit for silence.
+ */
+export function simulate(
+  allSnapshots: Snapshot[],
+  config: AlgoConfig,
+  logger?: pino.Logger,
+): BacktestResult {
+  // Group snapshots by trading day (expiry)
+  const byDay = new Map<string, Snapshot[]>();
+  for (const snap of allSnapshots) {
+    let list = byDay.get(snap.expiry);
+    if (!list) {
+      list = [];
+      byDay.set(snap.expiry, list);
+    }
+    list.push(snap);
+  }
+
+  const allTrades: TradeRecord[] = [];
+  const dailyPnls: number[] = [];
+  const tradingDays = [...byDay.keys()].sort();
+
+  for (const day of tradingDays) {
+    const daySnapshots = byDay.get(day)!;
+    // Passing the logger makes the generator emit an ENTRY/EXIT line per action.
+    const generator = new SignalGenerator(config, logger);
+
+    for (const snapshot of daySnapshots) {
+      generator.processSnapshot(snapshot);
+    }
+
+    const finalState = generator.getState();
+    const dayTrades = generator.getTrades();
+    allTrades.push(...dayTrades);
+
+    const dayPnl = dayTrades.reduce((sum, t) => sum + t.pnl, 0);
+    dailyPnls.push(dayPnl);
+
+    logger?.info(
+      { day, trades: dayTrades.length, pnl: dayPnl.toFixed(2), position: finalState.position },
+      'day complete',
+    );
+  }
+
+  return computeMetrics(allTrades, dailyPnls, tradingDays.length);
 }
 
 /**

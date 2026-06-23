@@ -2,10 +2,10 @@
  * Expected move cone: computes the intraday expected move boundary
  * and tracks state transitions (inside/above/below) for trade triggers.
  *
- * Factor 5 from user requirements: the cone acts as a trigger gate.
- * - Price crossing BELOW the cone + bullish gamma signal → long entry
- * - Price crossing ABOVE the cone + bearish gamma signal → short entry
- * - Price returning INSIDE the cone → exit (mean-reversion played out)
+ * The cone acts as a support/resistance trigger gate (NOT a magnet):
+ * - Price breaking ABOVE the cone + bullish gamma signal → long entry (continuation)
+ * - Price breaking BELOW the cone + bearish gamma signal → short entry (continuation)
+ * - Price returning INSIDE the cone → exit (breakout failed)
  */
 
 import type { AlgoConfig, ConeInfo, ConeState } from './types.js';
