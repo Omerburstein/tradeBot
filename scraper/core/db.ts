@@ -8,9 +8,21 @@
 
 import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import { DATABASE_URL } from './config.js';
+import { isInRth } from './dates.js';
 import type { SnapshotRow, MarketTideRow, ConeSnapshotRow, PositionRow } from './types.js';
 
 const MAX_ROWS_PER_INSERT = 500;
+
+/**
+ * True when a row's slot belongs to regular trading hours (09:30-16:00 ET
+ * inclusive on the slot END / captured_at). Premarket and postmarket slots
+ * are rejected here so EVERY persistence path — live tick, single-date
+ * backfill, range backfill, and walk-back — drops out-of-hours data without
+ * each caller having to remember to filter. See `isInRth` in dates.ts.
+ */
+function isRthRow(capturedAt: string): boolean {
+  return isInRth(new Date(capturedAt));
+}
 
 /**
  * Panels for which a value of exactly 0 is treated as noise and excluded
@@ -39,10 +51,12 @@ export function getDb(): NeonQueryFunction<false, false> {
  * (not necessarily inserted — conflicts are silently skipped).
  */
 export async function insertSnapshots(rows: SnapshotRow[]): Promise<number> {
-  // Drop charm/vanna rows whose value is exactly 0 — they carry no signal.
-  // Gamma zeros (the anchor) are retained.
+  // Drop premarket/postmarket slots, then charm/vanna rows whose value is
+  // exactly 0 — they carry no signal. Gamma zeros (the anchor) are retained.
   const insertable = rows.filter(
-    (row) => !(SKIP_ZERO_PANELS.has(row.panel) && row.value === 0),
+    (row) =>
+      isRthRow(row.capturedAt) &&
+      !(SKIP_ZERO_PANELS.has(row.panel) && row.value === 0),
   );
   if (insertable.length === 0) return 0;
 
@@ -99,6 +113,9 @@ export async function insertSpotPrice(
   expiry: string,
   spot: number,
 ): Promise<void> {
+  // Ignore premarket/postmarket observations — only RTH slots are stored.
+  if (!isRthRow(capturedAt)) return;
+
   const sql = getDb();
 
   await sql(
@@ -128,8 +145,10 @@ export async function insertSpotPrice(
  * Returns the count of rows submitted (conflicts silently skipped).
  */
 export async function insertSpotPrices(
-  spots: ReadonlyArray<{ capturedAt: string; expiry: string; spot: number }>,
+  spotsAll: ReadonlyArray<{ capturedAt: string; expiry: string; spot: number }>,
 ): Promise<number> {
+  // Drop premarket/postmarket observations — only RTH slots are stored.
+  const spots = spotsAll.filter((s) => isRthRow(s.capturedAt));
   if (spots.length === 0) return 0;
 
   const sql = getDb();
@@ -175,8 +194,10 @@ export async function insertSpotPrices(
  * Returns the count of rows submitted (conflicts silently skipped).
  */
 export async function insertMarketTide(
-  rows: ReadonlyArray<MarketTideRow>,
+  rowsAll: ReadonlyArray<MarketTideRow>,
 ): Promise<number> {
+  // Drop premarket/postmarket slots — only RTH boundaries are stored.
+  const rows = rowsAll.filter((r) => isRthRow(r.capturedAt));
   if (rows.length === 0) return 0;
 
   const sql = getDb();
@@ -224,8 +245,10 @@ export async function insertMarketTide(
  * Returns the count of rows submitted (conflicts silently skipped).
  */
 export async function insertPositions(
-  rows: ReadonlyArray<PositionRow>,
+  rowsAll: ReadonlyArray<PositionRow>,
 ): Promise<number> {
+  // Drop premarket/postmarket slots — only RTH slots are stored.
+  const rows = rowsAll.filter((r) => isRthRow(r.capturedAt));
   if (rows.length === 0) return 0;
 
   const sql = getDb();

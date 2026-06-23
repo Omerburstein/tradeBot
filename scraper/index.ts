@@ -77,7 +77,7 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
 // Now safe to load config (and capture its throws via the Sentry above).
 const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow } =
   await import('./core/config.js');
-const { expectedWindowEnd, parseSlotEnd } = await import('./core/dates.js');
+const { expectedWindowEnd, parseSlotEnd, isInRth } = await import('./core/dates.js');
 const { insertSnapshots, insertSpotPrice, insertPositions } = await import('./core/db.js');
 const { scrapeAllPanels, scrapeBackfill, scrapeBackfillRange } =
   await import('./scrape/index.js');
@@ -196,6 +196,24 @@ async function runTick(
 
     const anchor = rows[0]!;
     const capturedEnd = parseSlotEnd(anchor.timeframe);
+
+    // Ignore premarket/postmarket captures entirely: don't insert, don't
+    // advance dedup, don't fire the webhook. This leaves the DB and the
+    // auto-playbook anchored to the last RTH (09:30-16:00 ET) slot. The
+    // DB-layer RTH filter (core/db.ts) is the backstop for backfill paths;
+    // this guard additionally protects the tick's dedup + webhook side
+    // effects, which run off the captured slot before any insert.
+    if (!isInRth(new Date(anchor.capturedAt))) {
+      logger.info(
+        {
+          slot: anchor.timeframe,
+          capturedAt: anchor.capturedAt,
+          ms: Date.now() - startedAt,
+        },
+        'tick: slot outside RTH (premarket/postmarket) — skipping insert + webhook',
+      );
+      return;
+    }
 
     // Dedup: if UW's "Latest" panel still shows the same slot we
     // already captured, UW hasn't rolled to the next window yet. Skip
