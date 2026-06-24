@@ -31,7 +31,8 @@ import {
 import {
   apiResponseToRows,
   contractsResponseToRows,
-  spotRowsFromTicks,
+  dailyCloseSpotRow,
+  type SpotRow,
 } from './api-transforms.js';
 import {
   pickBestMme,
@@ -39,8 +40,7 @@ import {
   storeMarketTide,
   storeCone,
   captureTideForDate,
-  captureTicksForDate,
-  resolveTicksTemplate,
+  fetchSpotCandles5m,
   captureStraddleForDate,
   resolveStraddleTemplate,
 } from './api-helpers.js';
@@ -87,8 +87,8 @@ async function scrapeAndStoreDay(
   endNorm: string,
   caps: ApiCaptures,
   tideUrlTemplate: string | undefined,
-  ticksUrlTemplate: string | undefined,
   straddleUrlTemplate: string | undefined,
+  intradaySpotByDate: Map<string, SpotRow[]>,
 ): Promise<DayStoreSummary> {
   // Drop any responses left over from the previous day so the `?? last`
   // fallbacks below can't read stale data for this date.
@@ -98,12 +98,6 @@ async function scrapeAndStoreDay(
   caps.tide.length = 0;
   caps.ticks.length = 0;
   // caps.candles is NOT cleared — it fires once on page load and covers all dates
-
-  // Fetch the intraday SPX one-minute ticks for this date up front: the
-  // endpoint only auto-fires for today on page load, so without this the
-  // per-slot spot would collapse to the constant index_values.close (and the
-  // cone apex would fall back to the daily candle). Non-blocking.
-  await captureTicksForDate(page, caps, date, ticksUrlTemplate);
 
   // Fetch THIS day's ATM straddle (Cone param) too — same reason: the
   // straddle endpoint only auto-fires for today on load, so without this the
@@ -215,12 +209,20 @@ async function scrapeAndStoreDay(
   const snapshotsInserted = await insertSnapshots(dayRows);
   const positionsInserted = await insertPositions(dayPositions);
 
-  // ── Spot: 5-min series sampled from the intraday ticks (matches the
-  // Market Tide cadence), derived once for the day — independent of the
-  // 10-min Greek walk and of how many expiries were scanned. caps.ticks was
-  // populated up front by captureTicksForDate.
-  const tickResp = caps.ticks.find(r => r.url.includes(`date=${date}`))?.body;
-  const daySpots = spotRowsFromTicks(tickResp, date);
+  // ── Spot: real intraday 5-min series for recent days, else the daily close.
+  // Historical intraday SPX price is only available from index_candles/SPX/5m
+  // (~30 trading days back), pre-fetched once into intradaySpotByDate. For
+  // older days only the daily OHLC exists, so store one close stamped at the
+  // session close. (The date-keyed tick endpoints can't be used — they ignore
+  // their date param and return the latest session.)
+  const intradaySpots = intradaySpotByDate.get(date) ?? [];
+  const daySpots = intradaySpots.length > 0
+    ? intradaySpots
+    : dailyCloseSpotRow(
+        caps.candles.flatMap(r => r.body),
+        date,
+        computeCapturedAt(date, '16:00'),
+      );
   const spotsInserted = await insertSpotPrices(daySpots);
 
   // ── Market Tide: one net-flow-ticks call covers the whole day ──
@@ -280,14 +282,17 @@ export async function scrapeBackfill(
     // chart-date changes).
     await page.waitForTimeout(1_500);
     const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
-    // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
-    // same: it fires only for today on load, so we re-fetch it per backfill
-    // day. The cone panel can lazy-load past the capture window, so synthesize
-    // the template from the tide origin when it hasn't fired yet.
-    const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
-    // The Cone straddle (bsoc/SPX/straddle) is the same story — re-fetched
-    // per backfill day, synthesized from the tide origin if it hasn't fired.
+    // The Cone straddle (bsoc/SPX/straddle) is re-fetched per backfill day,
+    // synthesized from the tide origin if it hasn't fired.
     const straddleUrlTemplate = resolveStraddleTemplate(caps, tideUrlTemplate);
+    // Historical intraday SPX price comes ONLY from index_candles/SPX/5m
+    // (~30 trading days back; the date-keyed tick endpoints ignore their date
+    // and return the latest session). Fetch it once for the whole run and look
+    // up each day's 5-min rows; older days fall back to the daily close.
+    const intradaySpotByDate = await fetchSpotCandles5m(
+      page,
+      caps.candles[caps.candles.length - 1]?.url ?? tideUrlTemplate,
+    );
 
     const summary = await scrapeAndStoreDay(
       page,
@@ -296,8 +301,8 @@ export async function scrapeBackfill(
       endNorm,
       caps,
       tideUrlTemplate,
-      ticksUrlTemplate,
       straddleUrlTemplate,
+      intradaySpotByDate,
     );
 
     logger.info({ targetDate, ...summary }, 'backfill: complete');
@@ -366,14 +371,17 @@ export async function scrapeBackfillRange(
     // chart-date changes).
     await page.waitForTimeout(1_500);
     const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
-    // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
-    // same: it fires only for today on load, so we re-fetch it per backfill
-    // day. The cone panel can lazy-load past the capture window, so synthesize
-    // the template from the tide origin when it hasn't fired yet.
-    const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
-    // The Cone straddle (bsoc/SPX/straddle) is the same story — re-fetched
-    // per backfill day, synthesized from the tide origin if it hasn't fired.
+    // The Cone straddle (bsoc/SPX/straddle) is re-fetched per backfill day,
+    // synthesized from the tide origin if it hasn't fired.
     const straddleUrlTemplate = resolveStraddleTemplate(caps, tideUrlTemplate);
+    // Historical intraday SPX price comes ONLY from index_candles/SPX/5m
+    // (~30 trading days back; the date-keyed tick endpoints ignore their date
+    // and return the latest session). Fetch it once for the whole run and look
+    // up each day's 5-min rows; older days fall back to the daily close.
+    const intradaySpotByDate = await fetchSpotCandles5m(
+      page,
+      caps.candles[caps.candles.length - 1]?.url ?? tideUrlTemplate,
+    );
 
     let totalRowsInserted = 0;
     let daysScanned = 0;
@@ -392,8 +400,8 @@ export async function scrapeBackfillRange(
           endNorm,
           caps,
           tideUrlTemplate,
-          ticksUrlTemplate,
           straddleUrlTemplate,
+          intradaySpotByDate,
         );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
@@ -496,14 +504,17 @@ export async function scrapeWalkBack(opts: {
     // changes).
     await page.waitForTimeout(1_500);
     const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
-    // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
-    // same: it fires only for today on load, so we re-fetch it per backfill
-    // day. The cone panel can lazy-load past the capture window, so synthesize
-    // the template from the tide origin when it hasn't fired yet.
-    const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
-    // The Cone straddle (bsoc/SPX/straddle) is the same story — re-fetched
-    // per backfill day, synthesized from the tide origin if it hasn't fired.
+    // The Cone straddle (bsoc/SPX/straddle) is re-fetched per backfill day,
+    // synthesized from the tide origin if it hasn't fired.
     const straddleUrlTemplate = resolveStraddleTemplate(caps, tideUrlTemplate);
+    // Historical intraday SPX price comes ONLY from index_candles/SPX/5m
+    // (~30 trading days back; the date-keyed tick endpoints ignore their date
+    // and return the latest session). Fetch it once for the whole run and look
+    // up each day's 5-min rows; older days fall back to the daily close.
+    const intradaySpotByDate = await fetchSpotCandles5m(
+      page,
+      caps.candles[caps.candles.length - 1]?.url ?? tideUrlTemplate,
+    );
 
     let date: string = firstDate;
     let consecutiveEmpty = 0;
@@ -532,8 +543,8 @@ export async function scrapeWalkBack(opts: {
           endNorm,
           caps,
           tideUrlTemplate,
-          ticksUrlTemplate,
           straddleUrlTemplate,
+          intradaySpotByDate,
         );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
