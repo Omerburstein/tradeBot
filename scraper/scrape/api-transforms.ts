@@ -11,8 +11,18 @@ import type {
   ApiContractsResponse,
   ApiStraddleResponse,
   ApiNetFlowResponse,
-  ApiSpxTickResponse,
+  ApiIntradayCandle,
+  ApiCandleEntry,
 } from './api-types.js';
+
+/** A single SPX spot observation ready for insertSpotPrices. */
+export interface SpotRow {
+  capturedAt: string;
+  expiry: string;
+  spot: number;
+}
+
+const FIVE_MIN_MS = 5 * 60 * 1000;
 
 /**
  * Minimum gamma magnitude (|gamma|) for a strike to be persisted. Strikes
@@ -150,34 +160,75 @@ export function contractsResponseToRows(
   return rows;
 }
 
+/** ET calendar date (YYYY-MM-DD) of a UTC instant. */
+export function etDateOf(d: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+}
+
 /**
- * Build the SPX spot series for `date` from the one-minute ticks, sampled at
- * 5-min boundaries (09:30, 09:35, …, 16:00) to match the Market Tide cadence.
+ * Bucket intraday 5-min SPX index candles into clean 5-min spot rows, keyed by
+ * ET trading date. This is the ONLY source of *historical* intraday SPX price:
+ * the date-keyed tick endpoints (net-flow-ticks, one_minute_ticks) ignore their
+ * `date` param and always return the latest session, while the MME
+ * `index_values.close` is the session's settled close (constant all day).
  *
- * UW exposes intraday SPX price only at one-minute granularity
- * (index_ticks/SPX/one_minute_ticks), so this is the *source*; we down-sample
- * it to 5-min and store one spot per 5-min slot — NOT one per minute. (The
- * MME response's `index_values.close` can't be used at all: for a historical
- * session it's the day's settled close, identical across every slot.)
- *
- * UW tick timestamps carry a whole-hour ET offset, so UTC minutes equal ET
- * minutes and `% 5 === 0` cleanly selects the 5-min boundaries — the same
- * rule netFlowToTideRows uses, so spot and Market Tide rows share captured_at.
+ * The candle `start` is offset from the wall-clock grid (e.g. 13:34Z), so we
+ * snap it to the nearest 5-min boundary (→ 13:35Z) to align with the Market
+ * Tide cadence; `c` (close) is the spot. After-hours points survive here but
+ * are dropped by the RTH filter at insert time. The 5m endpoint only reaches
+ * ~30 trading days back (a server row cap), so older days aren't returned and
+ * the caller falls back to the daily close.
  */
-export function spotRowsFromTicks(
-  ticks: ApiSpxTickResponse | undefined,
-  date: string,
-): Array<{ capturedAt: string; expiry: string; spot: number }> {
-  const out: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
-  for (const bar of ticks?.data ?? []) {
-    const d = new Date(bar.start_time);
-    if (Number.isNaN(d.getTime())) continue;
-    if (d.getUTCMinutes() % 5 !== 0) continue;
-    const spot = Number.parseFloat(bar.close);
+export function candles5mToSpotRowsByDate(
+  candles: ReadonlyArray<ApiIntradayCandle>,
+): Map<string, SpotRow[]> {
+  const byDate = new Map<string, Map<string, SpotRow>>();
+  for (const c of candles) {
+    const t = new Date(c.start).getTime();
+    if (Number.isNaN(t)) continue;
+    const spot = Number.parseFloat(c.c);
     if (!Number.isFinite(spot) || spot <= 0) continue;
-    out.push({ capturedAt: d.toISOString(), expiry: date, spot });
+    const snapped = new Date(Math.round(t / FIVE_MIN_MS) * FIVE_MIN_MS);
+    const capturedAt = snapped.toISOString();
+    const date = etDateOf(snapped);
+    let slots = byDate.get(date);
+    if (slots === undefined) {
+      slots = new Map<string, SpotRow>();
+      byDate.set(date, slots);
+    }
+    slots.set(capturedAt, { capturedAt, expiry: date, spot });
+  }
+  const out = new Map<string, SpotRow[]>();
+  for (const [date, slots] of byDate) {
+    out.set(
+      date,
+      [...slots.values()].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt)),
+    );
   }
   return out;
+}
+
+/**
+ * Single daily-close spot row for `date` from the daily SPX candles, stamped at
+ * `capturedAt` (the session close, 16:00 ET). Backfill fallback for days older
+ * than the intraday 5-min window, where only daily OHLC is available
+ * historically. Returns [] when the date isn't in the candle set.
+ */
+export function dailyCloseSpotRow(
+  candles: ReadonlyArray<ApiCandleEntry>,
+  date: string,
+  capturedAt: string,
+): SpotRow[] {
+  const entry = candles.find((e) => e.date === date);
+  if (entry === undefined) return [];
+  const spot = Number.parseFloat(entry.c);
+  if (!Number.isFinite(spot) || spot <= 0) return [];
+  return [{ capturedAt, expiry: date, spot }];
 }
 
 /** Parse the ATM straddle (cone param) from a straddle response. */

@@ -10,14 +10,19 @@ import { insertMarketTide, insertConeSnapshot, coneSnapshotExists } from '../../
 import { computeCapturedAt } from '../core/dates.js';
 import { logger } from '../core/logger.js';
 import type { ConeSnapshotRow, MarketTideRow } from '../core/types.js';
-import { parseStraddle, netFlowToTideRows } from './api-transforms.js';
+import {
+  parseStraddle,
+  netFlowToTideRows,
+  candles5mToSpotRowsByDate,
+  type SpotRow,
+} from './api-transforms.js';
 import type {
   ApiCaptures,
   ApiExposureResponse,
   ApiContractsResponse,
   ApiNetFlowResponse,
-  ApiSpxTickResponse,
   ApiStraddleResponse,
+  ApiIntradayCandle,
 } from './api-types.js';
 
 /**
@@ -130,87 +135,64 @@ export async function captureTideForDate(
 }
 
 /**
- * Resolve the one_minute_ticks URL template used to re-fetch the intraday
- * SPX series per backfill day. Prefers a template actually observed on page
- * load, but the cone/ticks panel can lazy-load AFTER the load-time capture
- * window — in which case `caps.ticks` is still empty and relying on the
- * observed URL alone would leave the per-slot spot pinned to the constant
- * index_values.close. So fall back to synthesizing the URL from the
- * net-flow-ticks origin (same phx API host, stable endpoint path), which is
- * captured reliably. Returns undefined only when neither source is available.
- */
-export function resolveTicksTemplate(
-  caps: ApiCaptures,
-  tideUrlTemplate: string | undefined,
-): string | undefined {
-  const observed = caps.ticks[caps.ticks.length - 1]?.url;
-  if (observed) return observed;
-  if (!tideUrlTemplate) return undefined;
-  try {
-    return `${new URL(tideUrlTemplate).origin}/api/index_ticks/SPX/one_minute_ticks`;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Directly fetch the one-minute SPX ticks series for `date` through the
- * authenticated page context and push it into `caps.ticks`.
+ * Fetch intraday 5-min SPX candles (index_candles/SPX/5m) ONCE and bucket them
+ * into clean 5-min spot rows per ET date. This is the only source of
+ * *historical* intraday SPX price — the date-keyed tick endpoints
+ * (net-flow-ticks, one_minute_ticks) ignore their `date` param and always
+ * return the latest session, and the MME index_values is only a daily close.
  *
- * Why this is needed: like net-flow-ticks, the one_minute_ticks endpoint
- * fires ONLY for today on page load and does NOT refetch when the Greeks
- * chart date changes. Without this, a backfill day has no intraday SPX
- * price series, so the per-slot spot would collapse to the constant
- * index_values.close and the cone apex would fall back to the daily candle.
- * `templateUrl` is a one_minute_ticks URL observed at page load whose `date`
- * param is swapped for `date`; page.request shares the context cookies, so
- * the call is authenticated. Non-blocking — logs a warning on any failure.
+ * The endpoint counts back `lookbackDays` from today and caps at ~2500 rows
+ * (~30 trading days of 5-min candles), so older backfill days aren't covered
+ * and the caller falls back to the daily close. Fetch this once per run (it
+ * spans many days) and look up each day's rows. `originUrl` is any phx API URL
+ * observed on load (the daily-candles URL, else the tide URL); we reuse its
+ * origin. Non-blocking — returns an empty map on any failure.
  */
-export async function captureTicksForDate(
+export async function fetchSpotCandles5m(
   page: Page,
-  caps: ApiCaptures,
-  date: string,
-  templateUrl: string | undefined,
-): Promise<void> {
-  if (!templateUrl) {
-    logger.warn(
-      { date },
-      'no one_minute_ticks URL template captured — cannot fetch SPX ticks for backfill date',
-    );
-    return;
+  originUrl: string | undefined,
+  lookbackDays = 40,
+): Promise<Map<string, SpotRow[]>> {
+  const empty = new Map<string, SpotRow[]>();
+  if (!originUrl) {
+    logger.warn('no candles origin URL — cannot fetch intraday spot candles');
+    return empty;
   }
-  const url = /[?&]date=/.test(templateUrl)
-    ? templateUrl.replace(/([?&]date=)[^&]*/, `$1${date}`)
-    : `${templateUrl}${templateUrl.includes('?') ? '&' : '?'}date=${date}`;
+  let origin: string;
+  try {
+    origin = new URL(originUrl).origin;
+  } catch {
+    return empty;
+  }
+  const url = `${origin}/api/index_candles/SPX/5m?interval=${lookbackDays}d`;
   try {
     const resp = await page.request.get(url);
     if (!resp.ok()) {
-      logger.warn(
-        { date, status: resp.status() },
-        'one_minute_ticks fetch non-OK — skipping SPX ticks for this date',
-      );
-      return;
+      logger.warn({ status: resp.status() }, 'index_candles 5m non-OK — no intraday spot');
+      return empty;
     }
-    const body = (await resp.json()) as ApiSpxTickResponse;
-    caps.ticks.push({ url, body });
+    const body = (await resp.json()) as { data?: ApiIntradayCandle[] };
+    const map = candles5mToSpotRowsByDate(body.data ?? []);
+    const dates = [...map.keys()].sort();
     logger.info(
-      { date, bars: body.data?.length ?? 0 },
-      'one_minute_ticks fetched for backfill date',
+      { days: map.size, from: dates[0] ?? null, to: dates[dates.length - 1] ?? null },
+      'intraday 5-min spot candles fetched (recent window)',
     );
+    return map;
   } catch (err) {
     logger.warn(
-      { date, err: err instanceof Error ? err.message : String(err) },
-      'one_minute_ticks fetch failed — non-blocking',
+      { err: err instanceof Error ? err.message : String(err) },
+      'index_candles 5m fetch failed — non-blocking',
     );
+    return empty;
   }
 }
 
 /**
  * Resolve the bsoc/SPX/straddle URL template used to re-fetch the Cone's ATM
- * straddle per backfill day. Like resolveTicksTemplate: prefer a template
- * observed on page load, else synthesize it from the net-flow-ticks origin
- * (same phx API host, stable endpoint path). Returns undefined only when
- * neither source is available.
+ * straddle per backfill day: prefer a template observed on page load, else
+ * synthesize it from the net-flow-ticks origin (same phx API host, stable
+ * endpoint path). Returns undefined only when neither source is available.
  */
 export function resolveStraddleTemplate(
   caps: ApiCaptures,

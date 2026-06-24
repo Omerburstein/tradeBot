@@ -116,6 +116,23 @@ export interface ApiCandleEntry {
 }
 
 /**
+ * One entry from the `index_candles/SPX/5m?interval=Nd` response — an intraday
+ * 5-minute SPX candle. This is the only source of *historical* intraday SPX
+ * price (the date-keyed tick endpoints ignore their date param). `start`/`end`
+ * are UTC ISO instants; `start` is offset from the wall-clock 5-min grid, so
+ * callers snap it to the nearest boundary. `c` (close) is used as the spot.
+ * The endpoint caps at ~2500 rows (~30 trading days back from today).
+ */
+export interface ApiIntradayCandle {
+  start: string; // UTC ISO, e.g. "2026-06-23T13:34:00Z"
+  end: string;   // UTC ISO
+  o: string;     // open
+  h: string;     // high
+  l: string;     // low
+  c: string;     // close
+}
+
+/**
  * Shape of the `index_ticks/SPX/one_minute_ticks?date=...` response body.
  * `data[0].close` is the SPX *settled* open — the cone's apex. `prev_close`
  * is the prior session's close (not the apex; kept for reference).
