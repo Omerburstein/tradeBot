@@ -7,6 +7,7 @@
  */
 import { type Page } from 'playwright';
 import { insertMarketTide, insertConeSnapshot, coneSnapshotExists } from '../../db/index.js';
+import { computeCapturedAt } from '../core/dates.js';
 import { logger } from '../core/logger.js';
 import type { ConeSnapshotRow, MarketTideRow } from '../core/types.js';
 import { parseStraddle, netFlowToTideRows } from './api-transforms.js';
@@ -16,6 +17,7 @@ import type {
   ApiContractsResponse,
   ApiNetFlowResponse,
   ApiSpxTickResponse,
+  ApiStraddleResponse,
 } from './api-types.js';
 
 /**
@@ -204,6 +206,75 @@ export async function captureTicksForDate(
 }
 
 /**
+ * Resolve the bsoc/SPX/straddle URL template used to re-fetch the Cone's ATM
+ * straddle per backfill day. Like resolveTicksTemplate: prefer a template
+ * observed on page load, else synthesize it from the net-flow-ticks origin
+ * (same phx API host, stable endpoint path). Returns undefined only when
+ * neither source is available.
+ */
+export function resolveStraddleTemplate(
+  caps: ApiCaptures,
+  tideUrlTemplate: string | undefined,
+): string | undefined {
+  const observed = caps.straddle[caps.straddle.length - 1]?.url;
+  if (observed) return observed;
+  if (!tideUrlTemplate) return undefined;
+  try {
+    return `${new URL(tideUrlTemplate).origin}/api/bsoc/SPX/straddle`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Directly fetch the ATM straddle (Cone param) for `date` through the
+ * authenticated page context and push it into `caps.straddle`, so the shared
+ * `storeCone` reads THIS day's straddle.
+ *
+ * Why this is needed: like net-flow-ticks and one_minute_ticks, the straddle
+ * endpoint fires ONLY for today on page load and does NOT refetch when the
+ * Greeks chart date changes. Without this, a backfill day has no straddle for
+ * its date — so the cone is either skipped (caps.straddle empty after the
+ * per-day clear) or, via the `?? last` fallback, built from TODAY's straddle
+ * and filed under the scraped day. `templateUrl` is a straddle URL whose
+ * `date` param is swapped for `date`. Non-blocking — warns on any failure.
+ */
+export async function captureStraddleForDate(
+  page: Page,
+  caps: ApiCaptures,
+  date: string,
+  templateUrl: string | undefined,
+): Promise<void> {
+  if (!templateUrl) {
+    logger.warn(
+      { date },
+      'no bsoc/SPX/straddle URL template captured — cannot fetch Cone straddle for backfill date',
+    );
+    return;
+  }
+  const url = /[?&]date=/.test(templateUrl)
+    ? templateUrl.replace(/([?&]date=)[^&]*/, `$1${date}`)
+    : `${templateUrl}${templateUrl.includes('?') ? '&' : '?'}date=${date}`;
+  try {
+    const resp = await page.request.get(url);
+    if (!resp.ok()) {
+      logger.warn(
+        { date, status: resp.status() },
+        'bsoc/SPX/straddle fetch non-OK — skipping Cone straddle for this date',
+      );
+      return;
+    }
+    const body = (await resp.json()) as ApiStraddleResponse;
+    caps.straddle.push({ url, body });
+  } catch (err) {
+    logger.warn(
+      { date, err: err instanceof Error ? err.message : String(err) },
+      'bsoc/SPX/straddle fetch failed — non-blocking',
+    );
+  }
+}
+
+/**
  * Persist Market Tide for `date` from captured net-flow-ticks responses.
  * `slotOnly: true` (live tick) inserts only the latest 5-min slot row; the
  * default (backfill) inserts all 5-min slots for the day.
@@ -267,7 +338,12 @@ export async function storeCone(
       return { inserted: false, skipped: false };
     }
     const cone: ConeSnapshotRow = {
-      capturedAt: new Date().toISOString(),
+      // Stamp the cone at the trading day's session open (09:30 ET = the
+      // apex instant), NOT wall-clock now(). Using now() filed a backfilled
+      // cone under the day the backfill RAN, not the day it describes, which
+      // also defeated the coneSnapshotExists(date) dedup (keyed on the ET
+      // date of captured_at).
+      capturedAt: computeCapturedAt(date, '09:30'),
       spxOpen,
       coneUpper: spxOpen + straddle,
       coneLower: spxOpen - straddle,

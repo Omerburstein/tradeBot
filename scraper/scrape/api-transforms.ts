@@ -151,33 +151,33 @@ export function contractsResponseToRows(
 }
 
 /**
- * Derive the intraday SPX spot at `capturedAtIso` from the one-minute SPX
- * ticks series (index_ticks/SPX/one_minute_ticks).
+ * Build the SPX spot series for `date` from the one-minute ticks, sampled at
+ * 5-min boundaries (09:30, 09:35, …, 16:00) to match the Market Tide cadence.
  *
- * The MME response's `index_values.close` CANNOT be used as a per-slot spot
- * during backfill: for a historical session UW returns the day's settled
- * OHLC there, so `close` is identical across every 10-min slot of the day.
- * The ticks series instead carries a genuine per-minute price, so we match
- * the latest bar at or before the slot end and return its close. Returns
- * null when no usable bar exists (the caller falls back to index_values.close).
+ * UW exposes intraday SPX price only at one-minute granularity
+ * (index_ticks/SPX/one_minute_ticks), so this is the *source*; we down-sample
+ * it to 5-min and store one spot per 5-min slot — NOT one per minute. (The
+ * MME response's `index_values.close` can't be used at all: for a historical
+ * session it's the day's settled close, identical across every slot.)
+ *
+ * UW tick timestamps carry a whole-hour ET offset, so UTC minutes equal ET
+ * minutes and `% 5 === 0` cleanly selects the 5-min boundaries — the same
+ * rule netFlowToTideRows uses, so spot and Market Tide rows share captured_at.
  */
-export function spotFromTicks(
+export function spotRowsFromTicks(
   ticks: ApiSpxTickResponse | undefined,
-  capturedAtIso: string,
-): number | null {
-  const bars = ticks?.data;
-  if (!bars || bars.length === 0) return null;
-  const target = new Date(capturedAtIso).getTime();
-  if (Number.isNaN(target)) return null;
-  let best: { t: number; close: number } | null = null;
-  for (const bar of bars) {
-    const t = new Date(bar.start_time).getTime();
-    if (Number.isNaN(t) || t > target) continue;
-    const close = Number.parseFloat(bar.close);
-    if (!Number.isFinite(close)) continue;
-    if (best === null || t > best.t) best = { t, close };
+  date: string,
+): Array<{ capturedAt: string; expiry: string; spot: number }> {
+  const out: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
+  for (const bar of ticks?.data ?? []) {
+    const d = new Date(bar.start_time);
+    if (Number.isNaN(d.getTime())) continue;
+    if (d.getUTCMinutes() % 5 !== 0) continue;
+    const spot = Number.parseFloat(bar.close);
+    if (!Number.isFinite(spot) || spot <= 0) continue;
+    out.push({ capturedAt: d.toISOString(), expiry: date, spot });
   }
-  return best === null ? null : best.close;
+  return out;
 }
 
 /** Parse the ATM straddle (cone param) from a straddle response. */

@@ -31,7 +31,7 @@ import {
 import {
   apiResponseToRows,
   contractsResponseToRows,
-  spotFromTicks,
+  spotRowsFromTicks,
 } from './api-transforms.js';
 import {
   pickBestMme,
@@ -41,6 +41,8 @@ import {
   captureTideForDate,
   captureTicksForDate,
   resolveTicksTemplate,
+  captureStraddleForDate,
+  resolveStraddleTemplate,
 } from './api-helpers.js';
 import {
   latestTradingDay,
@@ -68,9 +70,9 @@ interface DayStoreSummary {
 /**
  * Scrape one trading day AND persist everything for it: navigate the
  * chart to `date`, set Expiry=Single, iterate 10-min slots from
- * `startNorm`..`endNorm` capturing Greeks/positions + per-slot spot,
- * then store Market Tide (per 10-min slot) and the Cone param
- * (straddle, once/day — skipped if already in the DB).
+ * `startNorm`..`endNorm` capturing Greeks/positions, derive the 5-min spot
+ * series from the intraday ticks, then store Market Tide (5-min) and the
+ * Cone param (straddle, once/day — skipped if already in the DB).
  *
  * This is THE shared per-day scraper: scrapeBackfill (single date),
  * scrapeBackfillRange (fixed list), and scrapeWalkBack (descending walk)
@@ -86,6 +88,7 @@ async function scrapeAndStoreDay(
   caps: ApiCaptures,
   tideUrlTemplate: string | undefined,
   ticksUrlTemplate: string | undefined,
+  straddleUrlTemplate: string | undefined,
 ): Promise<DayStoreSummary> {
   // Drop any responses left over from the previous day so the `?? last`
   // fallbacks below can't read stale data for this date.
@@ -102,6 +105,12 @@ async function scrapeAndStoreDay(
   // cone apex would fall back to the daily candle). Non-blocking.
   await captureTicksForDate(page, caps, date, ticksUrlTemplate);
 
+  // Fetch THIS day's ATM straddle (Cone param) too — same reason: the
+  // straddle endpoint only auto-fires for today on load, so without this the
+  // cone would be skipped (no straddle for the date) or built from today's
+  // straddle. Non-blocking.
+  await captureStraddleForDate(page, caps, date, straddleUrlTemplate);
+
   await walkDateToTarget(page, date);
   await page.waitForTimeout(1_500);
   const ok = await setExpirySingle(page, date);
@@ -113,7 +122,6 @@ async function scrapeAndStoreDay(
 
   const dayRows: SnapshotRow[] = [];
   const dayPositions: PositionRow[] = [];
-  const daySpots: Array<{ capturedAt: string; expiry: string; spot: number }> = [];
   let slotsScanned = 0;
 
   /**
@@ -124,12 +132,11 @@ async function scrapeAndStoreDay(
    * (the response BODY's `date` is the session date, not the expiry, so it
    * can't label non-0DTE rows). Returns the slot count walked.
    *
-   * `recordSpot` is true only on the session-day pass: the spot is the
-   * underlying SPX price at each slot, independent of which expiry's Greeks
-   * are showing, so the next-expiry pass must NOT re-record it (that would
-   * insert the same instant twice under a different `date` label).
+   * Spot is NOT recorded here: it's the underlying SPX price (independent of
+   * expiry and of the 10-min Greek cadence), so it's derived once per day
+   * from the intraday ticks at 5-min boundaries after both passes.
    */
-  async function walkSlotsForExpiry(expiry: string, recordSpot: boolean): Promise<number> {
+  async function walkSlotsForExpiry(expiry: string): Promise<number> {
     await waitForChartReady(page);
     await walkTimeframeToTarget(page, startNorm);
     await page.waitForTimeout(1_500);
@@ -147,24 +154,12 @@ async function scrapeAndStoreDay(
       const latestMme = pickBestMme(caps.mme, expiry);
 
       if (latestMme) {
-        const { rows, qualifyingStrikes, spot: dailyClose } = apiResponseToRows(
+        const { rows, qualifyingStrikes } = apiResponseToRows(
           latestMme,
           capturedAt,
           expiry,
         );
         dayRows.push(...rows);
-
-        // Record this slot's SPX spot — session-day pass only (see above).
-        // Prefer the intraday one-minute ticks (a genuine per-slot price);
-        // index_values.close is the session's settled close and is identical
-        // across every slot, so it's only a last-resort fallback.
-        if (recordSpot) {
-          const tickResp = caps.ticks.find(r => r.url.includes(`date=${date}`))?.body;
-          const spot = spotFromTicks(tickResp, capturedAt) ?? dailyClose;
-          if (Number.isFinite(spot) && spot > 0) {
-            daySpots.push({ capturedAt, expiry, spot });
-          }
-        }
 
         const latestMmc = pickBestMmc(caps.mmc, expiry);
         if (latestMmc) {
@@ -190,8 +185,8 @@ async function scrapeAndStoreDay(
     return walked;
   }
 
-  // Pass 1: the session-day expiry (0DTE). Records the per-slot spot.
-  slotsScanned += await walkSlotsForExpiry(date, true);
+  // Pass 1: the session-day expiry (0DTE).
+  slotsScanned += await walkSlotsForExpiry(date);
 
   // Pass 2: the next trading day's expiry (1DTE+). The dialog is already in
   // Single mode, so skipModeSwitch avoids toggling it back to Multi. A
@@ -202,7 +197,7 @@ async function scrapeAndStoreDay(
   try {
     const nextOk = await setExpirySingle(page, nextExpiry, { skipModeSwitch: true });
     if (nextOk) {
-      slotsScanned += await walkSlotsForExpiry(nextExpiry, false);
+      slotsScanned += await walkSlotsForExpiry(nextExpiry);
     } else {
       logger.warn(
         { date, nextExpiry },
@@ -216,9 +211,16 @@ async function scrapeAndStoreDay(
     );
   }
 
-  // ── Persist Greeks + positions + per-slot spot ──
+  // ── Persist Greeks + positions ──
   const snapshotsInserted = await insertSnapshots(dayRows);
   const positionsInserted = await insertPositions(dayPositions);
+
+  // ── Spot: 5-min series sampled from the intraday ticks (matches the
+  // Market Tide cadence), derived once for the day — independent of the
+  // 10-min Greek walk and of how many expiries were scanned. caps.ticks was
+  // populated up front by captureTicksForDate.
+  const tickResp = caps.ticks.find(r => r.url.includes(`date=${date}`))?.body;
+  const daySpots = spotRowsFromTicks(tickResp, date);
   const spotsInserted = await insertSpotPrices(daySpots);
 
   // ── Market Tide: one net-flow-ticks call covers the whole day ──
@@ -283,6 +285,9 @@ export async function scrapeBackfill(
     // day. The cone panel can lazy-load past the capture window, so synthesize
     // the template from the tide origin when it hasn't fired yet.
     const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
+    // The Cone straddle (bsoc/SPX/straddle) is the same story — re-fetched
+    // per backfill day, synthesized from the tide origin if it hasn't fired.
+    const straddleUrlTemplate = resolveStraddleTemplate(caps, tideUrlTemplate);
 
     const summary = await scrapeAndStoreDay(
       page,
@@ -292,6 +297,7 @@ export async function scrapeBackfill(
       caps,
       tideUrlTemplate,
       ticksUrlTemplate,
+      straddleUrlTemplate,
     );
 
     logger.info({ targetDate, ...summary }, 'backfill: complete');
@@ -365,6 +371,9 @@ export async function scrapeBackfillRange(
     // day. The cone panel can lazy-load past the capture window, so synthesize
     // the template from the tide origin when it hasn't fired yet.
     const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
+    // The Cone straddle (bsoc/SPX/straddle) is the same story — re-fetched
+    // per backfill day, synthesized from the tide origin if it hasn't fired.
+    const straddleUrlTemplate = resolveStraddleTemplate(caps, tideUrlTemplate);
 
     let totalRowsInserted = 0;
     let daysScanned = 0;
@@ -384,6 +393,7 @@ export async function scrapeBackfillRange(
           caps,
           tideUrlTemplate,
           ticksUrlTemplate,
+          straddleUrlTemplate,
         );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
@@ -491,6 +501,9 @@ export async function scrapeWalkBack(opts: {
     // day. The cone panel can lazy-load past the capture window, so synthesize
     // the template from the tide origin when it hasn't fired yet.
     const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
+    // The Cone straddle (bsoc/SPX/straddle) is the same story — re-fetched
+    // per backfill day, synthesized from the tide origin if it hasn't fired.
+    const straddleUrlTemplate = resolveStraddleTemplate(caps, tideUrlTemplate);
 
     let date: string = firstDate;
     let consecutiveEmpty = 0;
@@ -520,6 +533,7 @@ export async function scrapeWalkBack(opts: {
           caps,
           tideUrlTemplate,
           ticksUrlTemplate,
+          straddleUrlTemplate,
         );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
