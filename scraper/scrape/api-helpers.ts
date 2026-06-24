@@ -128,6 +128,30 @@ export async function captureTideForDate(
 }
 
 /**
+ * Resolve the one_minute_ticks URL template used to re-fetch the intraday
+ * SPX series per backfill day. Prefers a template actually observed on page
+ * load, but the cone/ticks panel can lazy-load AFTER the load-time capture
+ * window — in which case `caps.ticks` is still empty and relying on the
+ * observed URL alone would leave the per-slot spot pinned to the constant
+ * index_values.close. So fall back to synthesizing the URL from the
+ * net-flow-ticks origin (same phx API host, stable endpoint path), which is
+ * captured reliably. Returns undefined only when neither source is available.
+ */
+export function resolveTicksTemplate(
+  caps: ApiCaptures,
+  tideUrlTemplate: string | undefined,
+): string | undefined {
+  const observed = caps.ticks[caps.ticks.length - 1]?.url;
+  if (observed) return observed;
+  if (!tideUrlTemplate) return undefined;
+  try {
+    return `${new URL(tideUrlTemplate).origin}/api/index_ticks/SPX/one_minute_ticks`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Directly fetch the one-minute SPX ticks series for `date` through the
  * authenticated page context and push it into `caps.ticks`.
  *
@@ -167,6 +191,10 @@ export async function captureTicksForDate(
     }
     const body = (await resp.json()) as ApiSpxTickResponse;
     caps.ticks.push({ url, body });
+    logger.info(
+      { date, bars: body.data?.length ?? 0 },
+      'one_minute_ticks fetched for backfill date',
+    );
   } catch (err) {
     logger.warn(
       { date, err: err instanceof Error ? err.message : String(err) },
