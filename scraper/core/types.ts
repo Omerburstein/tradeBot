@@ -42,11 +42,11 @@ export interface PositionRow {
 }
 
 /**
- * One Market Tide observation (a 10-min-aligned point from UW's
+ * One Market Tide observation (a 5-min-aligned point from UW's
  * `net-flow-ticks` series). Persisted to the `market_tide` table.
  */
 export interface MarketTideRow {
-  /** ISO-8601 UTC timestamp of the data point's own 10-min slot boundary. PK. */
+  /** ISO-8601 UTC timestamp of the data point's own 5-min slot boundary. PK. */
   capturedAt: string;
   netCallPremium: number;
   netPutPremium: number;

@@ -137,26 +137,33 @@ export function isInActivePollingWindow(d: Date): boolean {
 }
 
 /**
- * Return the end time (HH:MM) of the most recently CLOSED 10-min UW
- * slot at the given instant, in ET. DST-aware. Returns null when the
- * instant is before the first 10-min boundary of the day (00:10 ET).
+ * Return the end time (HH:MM) of the most recently CLOSED `stepMin`-minute
+ * UW slot at the given instant, in ET. DST-aware. Returns null when the
+ * instant is before the first boundary of the day (i.e. before `stepMin`
+ * minutes past midnight ET). Defaults to 10-min slots (the Greeks/positions
+ * cadence); pass `stepMin = 5` for the price + Market Tide cadence.
  *
- * Examples (all ET):
+ * Examples (all ET, default stepMin=10):
  *   09:30:00 → "09:30"  (the 09:20-09:30 slot just closed)
  *   09:32:15 → "09:30"
  *   09:39:59 → "09:30"
  *   09:40:00 → "09:40"  (the 09:30-09:40 slot just closed)
  *
- * Used by the scraper to know which slot end-time to expect from UW's
- * "Latest" panel. When lastCapturedWindowEnd === expectedWindowEnd, we
- * already have the slot for this window and can skip the scrape until
- * the next 10-min boundary closes.
+ * With stepMin=5:
+ *   10:05:00 → "10:05"
+ *   10:09:59 → "10:05"
+ *   10:10:00 → "10:10"
+ *
+ * Used by the scraper to know which slot end-time to expect from UW. When
+ * the matching lastCaptured*WindowEnd === expectedWindowEnd, we already have
+ * the slot for this window and can skip the scrape until the next boundary
+ * closes.
  */
-export function expectedWindowEnd(d: Date): string | null {
+export function expectedWindowEnd(d: Date, stepMin = 10): string | null {
   const { hour, minute } = etParts(d);
   const totalMin = hour * 60 + minute;
-  if (totalMin < 10) return null;
-  const endMin = Math.floor(totalMin / 10) * 10;
+  if (totalMin < stepMin) return null;
+  const endMin = Math.floor(totalMin / stepMin) * stepMin;
   const eh = Math.floor(endMin / 60);
   const em = endMin % 60;
   return `${pad2(eh)}:${pad2(em)}`;

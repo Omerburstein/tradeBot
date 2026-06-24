@@ -7,7 +7,7 @@
  */
 import { insertMarketTide, insertConeSnapshot, coneSnapshotExists } from '../../db/index.js';
 import { logger } from '../core/logger.js';
-import type { ConeSnapshotRow } from '../core/types.js';
+import type { ConeSnapshotRow, MarketTideRow } from '../core/types.js';
 import { parseStraddle, netFlowToTideRows } from './api-transforms.js';
 import type { ApiCaptures, ApiExposureResponse, ApiContractsResponse } from './api-types.js';
 
@@ -46,9 +46,36 @@ export function pickBestMmc(
 }
 
 /**
+ * Pick the net-flow-ticks (Market Tide) response for `date` from the
+ * captures: the most-recent response whose URL matches `date=<date>`, else
+ * the last response captured. Returns null when nothing was captured.
+ * Single source of truth for tide-response selection (used by both the
+ * full-day insert and the latest-slot helper below).
+ */
+function pickTideResponse(caps: ApiCaptures, date: string) {
+  return (
+    [...caps.tide].reverse().find(r => r.url.includes(`date=${date}`))
+    ?? caps.tide[caps.tide.length - 1]
+    ?? null
+  );
+}
+
+/**
+ * Return the latest 5-min-aligned Market Tide row for `date`, or null when
+ * no usable response was captured. Used by the light (price + Market Tide)
+ * tick to drive its 5-min dedup and align the spot price to the same instant.
+ */
+export function latestTideRow(caps: ApiCaptures, date: string): MarketTideRow | null {
+  const tideResp = pickTideResponse(caps, date);
+  if (!tideResp) return null;
+  const rows = netFlowToTideRows(tideResp.body);
+  return rows.length > 0 ? rows[rows.length - 1]! : null;
+}
+
+/**
  * Persist Market Tide for `date` from captured net-flow-ticks responses.
- * `slotOnly: true` (live tick) inserts only the latest slot row; the default
- * (backfill) inserts all slots for the day.
+ * `slotOnly: true` (live tick) inserts only the latest 5-min slot row; the
+ * default (backfill) inserts all 5-min slots for the day.
  * Non-blocking — returns 0 and logs a warning rather than throwing.
  */
 export async function storeMarketTide(
@@ -57,9 +84,7 @@ export async function storeMarketTide(
   { slotOnly = false }: { slotOnly?: boolean } = {},
 ): Promise<number> {
   try {
-    const tideResp =
-      [...caps.tide].reverse().find(r => r.url.includes(`date=${date}`))
-      ?? caps.tide[caps.tide.length - 1];
+    const tideResp = pickTideResponse(caps, date);
     if (!tideResp) {
       logger.warn({ date }, 'no net-flow-ticks (Market Tide) response captured');
       return 0;

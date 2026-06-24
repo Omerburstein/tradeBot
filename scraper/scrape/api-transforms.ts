@@ -157,16 +157,18 @@ export function parseStraddle(body: ApiStraddleResponse): number | null {
 
 /**
  * Convert a net-flow-ticks response (1-min Market Tide series) into
- * 10-min-aligned MarketTideRow[]. UW timestamps carry a whole-hour ET
- * offset, so UTC minutes equal ET minutes — `getUTCMinutes() % 10`
- * cleanly selects the slot boundaries (09:30, 09:40, …, 16:00).
+ * 5-min-aligned MarketTideRow[]. UW timestamps carry a whole-hour ET
+ * offset, so UTC minutes equal ET minutes — `getUTCMinutes() % 5`
+ * cleanly selects the slot boundaries (09:30, 09:35, 09:40, …, 16:00).
+ * Market Tide (and spot) refresh every 5 min, twice as often as the
+ * 10-min Greeks/positions cadence, so we keep every 5-min point.
  */
 export function netFlowToTideRows(body: ApiNetFlowResponse): MarketTideRow[] {
   const out: MarketTideRow[] = [];
   for (const pt of body.data ?? []) {
     const d = new Date(pt.timestamp);
     if (Number.isNaN(d.getTime())) continue;
-    if (d.getUTCMinutes() % 10 !== 0) continue;
+    if (d.getUTCMinutes() % 5 !== 0) continue;
     const ncp = Number.parseFloat(pt.net_call_premium);
     const npp = Number.parseFloat(pt.net_put_premium);
     const nv = Number(pt.net_volume);

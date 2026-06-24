@@ -23,8 +23,60 @@ import {
   contractsResponseToRows,
   utcToETHhmm,
 } from './api-transforms.js';
-import { pickBestMme, pickBestMmc, storeMarketTide, storeCone } from './api-helpers.js';
-import type { ScrapeResult } from './api-types.js';
+import { pickBestMme, pickBestMmc, storeMarketTide, storeCone, latestTideRow } from './api-helpers.js';
+import type { ScrapeResult, LightScrapeResult } from './api-types.js';
+
+/**
+ * Light tick — capture ONLY the SPX spot price + Market Tide, which UW
+ * refreshes every 5 min (twice as often as the 10-min Greeks/positions
+ * cadence). Both load from XHRs fired on the initial dashboard/4 render, so
+ * this path skips all the expensive (and anti-bot-sensitive) navigation the
+ * full scrape does — date picker, Expiry/DTE filter, next-expiry switch,
+ * zoom-out. The per-minute cron drives this on 5-min boundaries that are not
+ * also 10-min boundaries; on 10-min boundaries `scrapeAllPanels` runs instead
+ * (and captures price + Market Tide too).
+ */
+export async function scrapeMarketTideAndPrice(): Promise<LightScrapeResult> {
+  return await withBrowser(async (_browser, page) => {
+    const caps = attachApiCaptures(page);
+
+    logger.info({ url: UW_PERISCOPE_URL }, 'light tick: navigating to periscope');
+    await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
+
+    // Wait for the chart to render, then settle for the trailing net-flow-ticks
+    // XHR (Market Tide) which fires on load. // anti-bot
+    await waitForChartReady(page);
+    await page.waitForLoadState('networkidle').catch(() => undefined);
+    await page.waitForTimeout(1_500);
+
+    // Default to the latest trading day (ET); TARGET_DATE overrides for dev.
+    const rawTargetDate = (process.env.TARGET_DATE ?? '').trim();
+    const today =
+      /^\d{4}-\d{2}-\d{2}$/.test(rawTargetDate) ? rawTargetDate : latestTradingDay();
+
+    const spot = await readSpotPrice(page);
+    const tideRow = latestTideRow(caps, today);
+    const tideInserted = await storeMarketTide(caps, today, { slotOnly: true });
+
+    logger.info(
+      {
+        today,
+        spot,
+        tideSlotEnd: tideRow ? utcToETHhmm(tideRow.capturedAt) : null,
+        tideInserted,
+      },
+      'light tick: price + Market Tide captured',
+    );
+
+    return {
+      spot,
+      date: today,
+      tideSlotEnd: tideRow ? utcToETHhmm(tideRow.capturedAt) : null,
+      tideCapturedAt: tideRow ? tideRow.capturedAt : null,
+      tideInserted,
+    };
+  });
+}
 
 export async function scrapeAllPanels(): Promise<ScrapeResult> {
   return await withBrowser(async (_browser, page) => {
