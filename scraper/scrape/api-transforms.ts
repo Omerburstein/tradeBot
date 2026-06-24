@@ -11,6 +11,7 @@ import type {
   ApiContractsResponse,
   ApiStraddleResponse,
   ApiNetFlowResponse,
+  ApiSpxTickResponse,
 } from './api-types.js';
 
 /**
@@ -147,6 +148,36 @@ export function contractsResponseToRows(
     rows.push({ capturedAt, expiry, strike, callQty, putQty, timeframe });
   }
   return rows;
+}
+
+/**
+ * Derive the intraday SPX spot at `capturedAtIso` from the one-minute SPX
+ * ticks series (index_ticks/SPX/one_minute_ticks).
+ *
+ * The MME response's `index_values.close` CANNOT be used as a per-slot spot
+ * during backfill: for a historical session UW returns the day's settled
+ * OHLC there, so `close` is identical across every 10-min slot of the day.
+ * The ticks series instead carries a genuine per-minute price, so we match
+ * the latest bar at or before the slot end and return its close. Returns
+ * null when no usable bar exists (the caller falls back to index_values.close).
+ */
+export function spotFromTicks(
+  ticks: ApiSpxTickResponse | undefined,
+  capturedAtIso: string,
+): number | null {
+  const bars = ticks?.data;
+  if (!bars || bars.length === 0) return null;
+  const target = new Date(capturedAtIso).getTime();
+  if (Number.isNaN(target)) return null;
+  let best: { t: number; close: number } | null = null;
+  for (const bar of bars) {
+    const t = new Date(bar.start_time).getTime();
+    if (Number.isNaN(t) || t > target) continue;
+    const close = Number.parseFloat(bar.close);
+    if (!Number.isFinite(close)) continue;
+    if (best === null || t > best.t) best = { t, close };
+  }
+  return best === null ? null : best.close;
 }
 
 /** Parse the ATM straddle (cone param) from a straddle response. */

@@ -5,11 +5,18 @@
  * response-selection logic or storage behavior applies once and propagates
  * to every scraping path automatically.
  */
+import { type Page } from 'playwright';
 import { insertMarketTide, insertConeSnapshot, coneSnapshotExists } from '../../db/index.js';
 import { logger } from '../core/logger.js';
 import type { ConeSnapshotRow, MarketTideRow } from '../core/types.js';
 import { parseStraddle, netFlowToTideRows } from './api-transforms.js';
-import type { ApiCaptures, ApiExposureResponse, ApiContractsResponse } from './api-types.js';
+import type {
+  ApiCaptures,
+  ApiExposureResponse,
+  ApiContractsResponse,
+  ApiNetFlowResponse,
+  ApiSpxTickResponse,
+} from './api-types.js';
 
 /**
  * Three-tier best-response selection for market_maker_exposures.
@@ -70,6 +77,102 @@ export function latestTideRow(caps: ApiCaptures, date: string): MarketTideRow | 
   if (!tideResp) return null;
   const rows = netFlowToTideRows(tideResp.body);
   return rows.length > 0 ? rows[rows.length - 1]! : null;
+}
+
+/**
+ * Directly fetch the net-flow-ticks (Market Tide) series for `date` through
+ * the authenticated page context and push it into `caps.tide`, so the
+ * shared `storeMarketTide` can persist it as usual.
+ *
+ * Why this is needed: the Market Tide widget fires net-flow-ticks ONLY for
+ * today on page load, and does NOT refetch when the Greeks chart date
+ * changes. So every backfill day (whose target date differs from the page's
+ * default) would otherwise capture no tide at all and store 0 rows.
+ * `templateUrl` is a net-flow-ticks URL observed at page load whose `date`
+ * param is swapped for `date`; page.request shares the context cookies, so
+ * the call is authenticated. Non-blocking — logs a warning on any failure.
+ */
+export async function captureTideForDate(
+  page: Page,
+  caps: ApiCaptures,
+  date: string,
+  templateUrl: string | undefined,
+): Promise<void> {
+  if (!templateUrl) {
+    logger.warn(
+      { date },
+      'no net-flow-ticks URL template captured — cannot fetch Market Tide for backfill date',
+    );
+    return;
+  }
+  const url = /[?&]date=/.test(templateUrl)
+    ? templateUrl.replace(/([?&]date=)[^&]*/, `$1${date}`)
+    : `${templateUrl}${templateUrl.includes('?') ? '&' : '?'}date=${date}`;
+  try {
+    const resp = await page.request.get(url);
+    if (!resp.ok()) {
+      logger.warn(
+        { date, status: resp.status() },
+        'net-flow-ticks fetch non-OK — skipping Market Tide for this date',
+      );
+      return;
+    }
+    const body = (await resp.json()) as ApiNetFlowResponse;
+    caps.tide.push({ url, body });
+  } catch (err) {
+    logger.warn(
+      { date, err: err instanceof Error ? err.message : String(err) },
+      'net-flow-ticks fetch failed — non-blocking',
+    );
+  }
+}
+
+/**
+ * Directly fetch the one-minute SPX ticks series for `date` through the
+ * authenticated page context and push it into `caps.ticks`.
+ *
+ * Why this is needed: like net-flow-ticks, the one_minute_ticks endpoint
+ * fires ONLY for today on page load and does NOT refetch when the Greeks
+ * chart date changes. Without this, a backfill day has no intraday SPX
+ * price series, so the per-slot spot would collapse to the constant
+ * index_values.close and the cone apex would fall back to the daily candle.
+ * `templateUrl` is a one_minute_ticks URL observed at page load whose `date`
+ * param is swapped for `date`; page.request shares the context cookies, so
+ * the call is authenticated. Non-blocking — logs a warning on any failure.
+ */
+export async function captureTicksForDate(
+  page: Page,
+  caps: ApiCaptures,
+  date: string,
+  templateUrl: string | undefined,
+): Promise<void> {
+  if (!templateUrl) {
+    logger.warn(
+      { date },
+      'no one_minute_ticks URL template captured — cannot fetch SPX ticks for backfill date',
+    );
+    return;
+  }
+  const url = /[?&]date=/.test(templateUrl)
+    ? templateUrl.replace(/([?&]date=)[^&]*/, `$1${date}`)
+    : `${templateUrl}${templateUrl.includes('?') ? '&' : '?'}date=${date}`;
+  try {
+    const resp = await page.request.get(url);
+    if (!resp.ok()) {
+      logger.warn(
+        { date, status: resp.status() },
+        'one_minute_ticks fetch non-OK — skipping SPX ticks for this date',
+      );
+      return;
+    }
+    const body = (await resp.json()) as ApiSpxTickResponse;
+    caps.ticks.push({ url, body });
+  } catch (err) {
+    logger.warn(
+      { date, err: err instanceof Error ? err.message : String(err) },
+      'one_minute_ticks fetch failed — non-blocking',
+    );
+  }
 }
 
 /**
