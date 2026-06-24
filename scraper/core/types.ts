@@ -62,7 +62,12 @@ export interface MarketTideRow {
  * coneLower = spxOpen - straddle. Persisted once per day to `cone_snapshots`.
  */
 export interface ConeSnapshotRow {
-  /** ISO-8601 UTC timestamp of when this was scraped. PK in Postgres. */
+  /**
+   * ISO-8601 UTC timestamp of the trading day's session open (09:30 ET = the
+   * cone's apex instant), NOT scrape wall-clock time. This ties the cone to
+   * the day it describes (so a backfill files it under the scraped day, not
+   * the day the backfill ran) and keys the coneSnapshotExists(date) dedup. PK.
+   */
   capturedAt: string;
   /** SPX open price for the day — the cone's apex. */
   spxOpen: number;
