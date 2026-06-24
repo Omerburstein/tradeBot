@@ -1,28 +1,35 @@
 -- ============================================================================
 -- tradeBot — Neon Postgres canonical schema (run in pgAdmin)
 --
--- The scraper (scraper/core/db.ts) lazily creates spot_prices, market_tide_ticks,
--- and cone_snapshots with CREATE TABLE IF NOT EXISTS. This file is the
--- authoritative reference for ALL tables and is safe to run repeatedly.
+-- Authoritative reference for ALL tables, kept in sync with the db/ layer
+-- (repo-root, sibling of scraper/ and algorithms/). Every statement is
+-- idempotent (CREATE TABLE IF NOT EXISTS) and safe to run repeatedly.
 --
--- The only one you MUST run by hand is the market_tide_ticks migration below:
--- the old code wrote the tick time into captured_at and had no tick_at
--- column, so on a DB whose market_tide_ticks already requires tick_at the inserts
--- failed and nothing was stored. The block migrates an existing table in
--- place (preserving rows) or creates the canonical one fresh.
+-- The scraper lazily creates spot_prices, market_tide, positions, and
+-- cone_snapshots at runtime (each db/*.ts module CREATEs its own table on
+-- first insert). periscope_snapshots is assumed pre-existing (migrations
+-- 140/141) and shown here for completeness. Running this file by hand is
+-- only needed to provision a fresh database up front.
+--
+-- Conventions:
+--   * captured_at is the slot END time stored as UTC TIMESTAMPTZ. For
+--     market_tide it is the data point's OWN 10-min boundary, not scrape time.
+--   * Inserts are idempotent via ON CONFLICT DO NOTHING on each PK/UNIQUE key.
+--   * Only the persisted RTH window (Mon-Fri 09:40-16:00 ET) is ever written.
 -- ============================================================================
 
 
 -- ----------------------------------------------------------------------------
--- periscope_snapshots — per-strike Greeks/positions (one row per slot×strike×panel)
+-- periscope_snapshots — per-strike Greeks (one row per slot × strike × panel)
+-- Insert: db/snapshots.ts → insertSnapshots (batched 500/call).
 -- (normally created by migrations 140/141; shown here for completeness)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS periscope_snapshots (
   captured_at TIMESTAMPTZ NOT NULL,            -- slot END time (UTC)
   expiry      DATE        NOT NULL,            -- option expiry / trade date
-  panel       TEXT        NOT NULL,            -- gamma | charm | vanna | positions
+  panel       TEXT        NOT NULL,            -- gamma | charm | vanna
   strike      INTEGER     NOT NULL,            -- SPX strike
-  value       NUMERIC     NOT NULL,            -- Greek / positions value
+  value       NUMERIC     NOT NULL,            -- Greek exposure value
   timeframe   TEXT        NOT NULL,            -- UW slot label, e.g. '09:20 - 09:30'
   CONSTRAINT periscope_snapshots_pk UNIQUE (captured_at, expiry, panel, strike),
   CONSTRAINT periscope_snapshots_panel_chk
@@ -32,21 +39,55 @@ CREATE TABLE IF NOT EXISTS periscope_snapshots (
 
 -- ----------------------------------------------------------------------------
 -- spot_prices — one SPX spot observation per 10-min slot
+-- Insert: db/spot-prices.ts → insertSpotPrice / insertSpotPrices.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS spot_prices (
   captured_at TIMESTAMPTZ   NOT NULL,          -- slot END time (UTC)
-  date        DATE          NOT NULL,          -- trade date
+  date        DATE          NOT NULL,          -- trade date (app passes `expiry`)
   spot        NUMERIC(10,2) NOT NULL,          -- SPX index level
   PRIMARY KEY (captured_at, date)
 );
 
 
 -- ----------------------------------------------------------------------------
+-- positions — MM call/put contracts per strike (one row per slot × strike)
+-- Insert: db/positions.ts → insertPositions (batched 500/call).
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS positions (
+  captured_at TIMESTAMPTZ   NOT NULL,          -- slot END time (UTC)
+  expiry      DATE          NOT NULL,          -- SPX expiry date
+  strike      NUMERIC(10,2) NOT NULL,          -- SPX strike
+  call_qty    BIGINT        NOT NULL,          -- MM call contracts at this strike
+  put_qty     BIGINT        NOT NULL,          -- MM put contracts at this strike
+  timeframe   TEXT          NOT NULL,          -- UW slot label, e.g. '09:20 - 09:30'
+  PRIMARY KEY (captured_at, expiry, strike)
+);
+
+
+-- ----------------------------------------------------------------------------
+-- market_tide — net-flow (Market Tide) per 10-min slot
+--   captured_at = the data point's own 10-min slot boundary (UTC)
+-- Insert: db/market-tide.ts → insertMarketTide (batched 500/call).
+-- Supersedes the legacy `market_tide_ticks` table (renamed 2026; the old
+-- tick_at/date/scrape-time columns were dropped). If a `market_tide_ticks`
+-- table still exists in your database it is unused and can be dropped.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS market_tide (
+  captured_at      TIMESTAMPTZ   NOT NULL,     -- data point's 10-min boundary (UTC)
+  net_call_premium NUMERIC(18,4) NOT NULL,
+  net_put_premium  NUMERIC(18,4) NOT NULL,
+  net_volume       BIGINT        NOT NULL,
+  PRIMARY KEY (captured_at)
+);
+
+
+-- ----------------------------------------------------------------------------
 -- cone_snapshots — once-per-day cone coordinates (expected-move / Cone param)
---   spx_open   = SPX open price (cone apex)
+--   spx_open   = SPX settled open (cone apex; first 1-min tick close)
 --   cone_upper = spx_open + ATM straddle  (upper yellow line endpoint)
 --   cone_lower = spx_open − ATM straddle  (lower yellow line endpoint)
--- Trade date is derived from captured_at AT TIME ZONE 'America/New_York'.
+-- Insert: db/cone.ts → insertConeSnapshot (one row per ET trade date; the
+-- code checks captured_at AT TIME ZONE 'America/New_York' before inserting).
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS cone_snapshots (
   captured_at  TIMESTAMPTZ   NOT NULL PRIMARY KEY,
@@ -54,71 +95,3 @@ CREATE TABLE IF NOT EXISTS cone_snapshots (
   cone_upper   NUMERIC(10,2) NOT NULL,
   cone_lower   NUMERIC(10,2) NOT NULL
 );
-
-
--- ----------------------------------------------------------------------------
--- market_tide_ticks — net-flow (Market Tide) per 10-min slot
---   tick_at     = the data point's own slot boundary (UTC)   <-- was missing
---   captured_at = scrape wall-clock time (when the row was stored)
--- Idempotent migration: create fresh, or upgrade an old-schema table in place.
--- ----------------------------------------------------------------------------
-DO $$
-BEGIN
-  IF to_regclass('public.market_tide_ticks') IS NULL THEN
-    -- Fresh install: create canonical table.
-    CREATE TABLE market_tide_ticks (
-      tick_at          TIMESTAMPTZ   NOT NULL,
-      date             DATE          NOT NULL,
-      net_call_premium NUMERIC(18,4) NOT NULL,
-      net_put_premium  NUMERIC(18,4) NOT NULL,
-      net_volume       BIGINT        NOT NULL,
-      captured_at      TIMESTAMPTZ   NOT NULL,
-      PRIMARY KEY (tick_at, date)
-    );
-  ELSE
-    -- Existing table: add the new columns if absent.
-    -- Old schema stored the tick time in captured_at, so backfill tick_at
-    -- from it, then reset captured_at to "now" as the scrape-time stamp.
-    IF NOT EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_name = 'market_tide_ticks' AND column_name = 'tick_at'
-    ) THEN
-      ALTER TABLE market_tide_ticks ADD COLUMN tick_at TIMESTAMPTZ;
-      UPDATE market_tide_ticks SET tick_at = captured_at WHERE tick_at IS NULL;
-      UPDATE market_tide_ticks SET captured_at = now()
-        WHERE captured_at = tick_at;          -- legacy rows: stamp scrape time
-      ALTER TABLE market_tide_ticks ALTER COLUMN tick_at SET NOT NULL;
-    END IF;
-
-    -- Ensure a `date` column exists (older tables may lack it).
-    IF NOT EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_name = 'market_tide_ticks' AND column_name = 'date'
-    ) THEN
-      ALTER TABLE market_tide_ticks ADD COLUMN date DATE;
-      UPDATE market_tide_ticks SET date = (tick_at AT TIME ZONE 'UTC')::date
-        WHERE date IS NULL;
-      ALTER TABLE market_tide_ticks ALTER COLUMN date SET NOT NULL;
-    END IF;
-
-    -- Repoint the primary key to (tick_at, date) if it isn't already.
-    IF NOT EXISTS (
-      SELECT 1
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage k
-        ON k.constraint_name = tc.constraint_name
-      WHERE tc.table_name = 'market_tide_ticks'
-        AND tc.constraint_type = 'PRIMARY KEY'
-        AND k.column_name IN ('tick_at', 'date')
-      GROUP BY tc.constraint_name
-      HAVING COUNT(*) = 2
-    ) THEN
-      ALTER TABLE market_tide_ticks DROP CONSTRAINT IF EXISTS market_tide_ticks_pkey;
-      ALTER TABLE market_tide_ticks ADD PRIMARY KEY (tick_at, date);
-    END IF;
-  END IF;
-END $$;
-
--- Sanity check after migration:
---   SELECT tick_at, date, net_call_premium, net_put_premium, net_volume, captured_at
---   FROM market_tide_ticks ORDER BY tick_at DESC LIMIT 20;

@@ -124,7 +124,7 @@ Insert: `db/market-tide.ts` → `insertMarketTide` (batched 500/call, lazy-creat
 
 **Constraints:** PRIMARY KEY `(captured_at)`. Idempotent via `ON CONFLICT (captured_at) DO NOTHING`.
 
-> ⚠️ **Schema Drift — `market_tide` vs `market_tide_ticks`:** the live code (`db/market-tide.ts`) creates and writes a table named **`market_tide`** with PK `(captured_at)` and four columns above. But `docs/schema.sql` documents a richer table named **`market_tide_ticks`** with `tick_at`, `date`, `net_*`, and a separate `captured_at` (scrape wall-clock), PK `(tick_at, date)`. These are two different tables. The code does NOT touch `market_tide_ticks`. Flag this whenever asked about Market Tide storage; reconciling it is an open item, not a documented decision.
+> ℹ️ **Legacy `market_tide_ticks`:** an earlier schema used a richer table named `market_tide_ticks` (`tick_at`, `date`, `net_*`, separate scrape-time `captured_at`, PK `(tick_at, date)`). It was renamed/simplified to `market_tide` (above) in 2026 — `tick_at`/`date`/scrape-time columns dropped, `captured_at` now holds the data point's own boundary. The live code and `docs/schema.sql` both reflect `market_tide`; `market_tide_ticks` is unused and may still exist in older databases (safe to drop).
 
 ### `cone_snapshots` — once-per-day expected-move cone coordinates
 Insert: `db/cone.ts` → `insertConeSnapshot` (single row, guarded by `coneSnapshotExists`). Lazy-create.
