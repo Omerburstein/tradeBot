@@ -5,7 +5,7 @@
  * response-selection logic or storage behavior applies once and propagates
  * to every scraping path automatically.
  */
-import { insertMarketTide, insertConeSnapshot, coneSnapshotExists } from '../core/db.js';
+import { insertMarketTide, insertConeSnapshot, coneSnapshotExists } from '../../db/index.js';
 import { logger } from '../core/logger.js';
 import type { ConeSnapshotRow } from '../core/types.js';
 import { parseStraddle, netFlowToTideRows } from './api-transforms.js';

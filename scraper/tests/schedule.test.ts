@@ -223,6 +223,81 @@ eq(
 throws('days: malformed bound throws', () => tradingDaysBetween('garbage', '2026-03-06'));
 
 // ─────────────────────────────────────────────────────────────────────
+// 7. filterInsertable — gamma threshold + cross-panel gate
+//    All three panels arrive in one batch. Charm/vanna rows are kept only
+//    when the same (capturedAt, expiry, strike) has |gamma| > 150 in the
+//    batch. RTH window: Mon 2026-06-15 10:00 ET (EDT, 14:00 UTC).
+// ─────────────────────────────────────────────────────────────────────
+const { filterInsertable } = await import('../../db/index.js');
+
+// capturedAt for a valid RTH slot (Mon 2026-06-15 10:00 ET = 14:00 UTC)
+const RTH_AT = '2026-06-15T14:00:00.000Z';
+const EXPIRY = '2026-06-15';
+const TF = '09:50 - 10:00';
+
+function makeRow(
+  panel: 'gamma' | 'charm' | 'vanna',
+  strike: number,
+  value: number,
+): import('../core/types.js').SnapshotRow {
+  return { capturedAt: RTH_AT, expiry: EXPIRY, panel, strike, value, timeframe: TF };
+}
+
+// ── 7a. gamma panel: value threshold ──────────────────────────────────
+const gammaAbove = makeRow('gamma', 5900, 200);   // |200| > 150 → keep
+const gammaAt    = makeRow('gamma', 5800, 150);   // |150| === 150 → drop (exclusive)
+const gammaBelow = makeRow('gamma', 5700, 100);   // |100| < 150 → drop
+const gammaNeg   = makeRow('gamma', 5600, -200);  // |-200| > 150 → keep
+const gammaNegAt = makeRow('gamma', 5500, -150);  // |-150| === 150 → drop
+
+const filteredGamma = filterInsertable([
+  gammaAbove, gammaAt, gammaBelow, gammaNeg, gammaNegAt,
+]);
+check('gamma filter: value > 150 passes (200)',            filteredGamma.some((r) => r.strike === 5900));
+check('gamma filter: value === 150 dropped (exclusive)',   !filteredGamma.some((r) => r.strike === 5800));
+check('gamma filter: value < 150 dropped (100)',           !filteredGamma.some((r) => r.strike === 5700));
+check('gamma filter: negative value -200 passes',          filteredGamma.some((r) => r.strike === 5600));
+check('gamma filter: negative value -150 dropped',         !filteredGamma.some((r) => r.strike === 5500));
+
+// ── 7b. charm/vanna: require qualifying gamma at same strike ──────────
+// strike 5900: gamma 200 (qualifies) → charm/vanna kept
+// strike 5800: gamma 100 (too low)   → charm/vanna dropped
+// strike 5700: no gamma at all        → charm/vanna dropped
+const mixedBatch = [
+  makeRow('gamma', 5900, 200),   // qualifies
+  makeRow('gamma', 5800, 100),   // below threshold
+  makeRow('charm', 5900, 30),    // strike 5900 has qualifying gamma → keep
+  makeRow('charm', 5800, 30),    // strike 5800 gamma too low → drop
+  makeRow('charm', 5700, 30),    // no gamma for strike 5700 → drop
+  makeRow('vanna', 5900, 15),    // strike 5900 qualifies → keep
+  makeRow('vanna', 5800, 15),    // strike 5800 gamma too low → drop
+];
+
+const filteredMix = filterInsertable(mixedBatch);
+check('cross-panel: charm at qualifying-gamma strike kept',      filteredMix.some((r) => r.panel === 'charm' && r.strike === 5900));
+check('cross-panel: charm at below-threshold-gamma strike dropped', !filteredMix.some((r) => r.panel === 'charm' && r.strike === 5800));
+check('cross-panel: charm at no-gamma strike dropped',           !filteredMix.some((r) => r.panel === 'charm' && r.strike === 5700));
+check('cross-panel: vanna at qualifying-gamma strike kept',      filteredMix.some((r) => r.panel === 'vanna' && r.strike === 5900));
+check('cross-panel: vanna at below-threshold-gamma strike dropped', !filteredMix.some((r) => r.panel === 'vanna' && r.strike === 5800));
+
+// ── 7c. charm/vanna zero-value rows are still dropped even if gamma qualifies ──
+const zeroWithGamma = [
+  makeRow('gamma', 5900, 200),
+  makeRow('charm', 5900, 0),    // zero charm at qualifying strike → drop
+  makeRow('vanna', 5900, 0),    // zero vanna at qualifying strike → drop
+];
+const filteredZero = filterInsertable(zeroWithGamma);
+check('cross-panel: charm zero dropped even with qualifying gamma', !filteredZero.some((r) => r.panel === 'charm'));
+check('cross-panel: vanna zero dropped even with qualifying gamma', !filteredZero.some((r) => r.panel === 'vanna'));
+
+// ── 7d. RTH gate still applies ────────────────────────────────────────
+const premarket = { ...gammaAbove, capturedAt: '2026-06-15T13:00:00.000Z' }; // 09:00 ET
+check(
+  'RTH filter: out-of-window gamma row dropped',
+  !filterInsertable([premarket]).some((r) => r.strike === 5900),
+);
+
+// ─────────────────────────────────────────────────────────────────────
 logger.info('────────────────────────────────────────────');
 if (failures.length === 0) {
   logger.info('schedule.test: ✅ ALL CHECKS PASSED');
