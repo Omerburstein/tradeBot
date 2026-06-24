@@ -31,8 +31,16 @@ import {
 import {
   apiResponseToRows,
   contractsResponseToRows,
+  spotFromTicks,
 } from './api-transforms.js';
-import { pickBestMme, pickBestMmc, storeMarketTide, storeCone } from './api-helpers.js';
+import {
+  pickBestMme,
+  pickBestMmc,
+  storeMarketTide,
+  storeCone,
+  captureTideForDate,
+  captureTicksForDate,
+} from './api-helpers.js';
 import {
   latestTradingDay,
   nextTradingDay,
@@ -75,6 +83,8 @@ async function scrapeAndStoreDay(
   startNorm: string,
   endNorm: string,
   caps: ApiCaptures,
+  tideUrlTemplate: string | undefined,
+  ticksUrlTemplate: string | undefined,
 ): Promise<DayStoreSummary> {
   // Drop any responses left over from the previous day so the `?? last`
   // fallbacks below can't read stale data for this date.
@@ -84,6 +94,12 @@ async function scrapeAndStoreDay(
   caps.tide.length = 0;
   caps.ticks.length = 0;
   // caps.candles is NOT cleared — it fires once on page load and covers all dates
+
+  // Fetch the intraday SPX one-minute ticks for this date up front: the
+  // endpoint only auto-fires for today on page load, so without this the
+  // per-slot spot would collapse to the constant index_values.close (and the
+  // cone apex would fall back to the daily candle). Non-blocking.
+  await captureTicksForDate(page, caps, date, ticksUrlTemplate);
 
   await walkDateToTarget(page, date);
   await page.waitForTimeout(1_500);
@@ -101,13 +117,18 @@ async function scrapeAndStoreDay(
 
   /**
    * Walk every 10-min slot from startNorm..endNorm for the currently
-   * selected expiry, pushing Greeks/positions/spot into the day arrays.
+   * selected expiry, pushing Greeks/positions into the day arrays.
    * `expiry` is the expiry currently selected in the Expiry filter — used
    * both to pick the right URL-matched API response AND to stamp the rows
    * (the response BODY's `date` is the session date, not the expiry, so it
    * can't label non-0DTE rows). Returns the slot count walked.
+   *
+   * `recordSpot` is true only on the session-day pass: the spot is the
+   * underlying SPX price at each slot, independent of which expiry's Greeks
+   * are showing, so the next-expiry pass must NOT re-record it (that would
+   * insert the same instant twice under a different `date` label).
    */
-  async function walkSlotsForExpiry(expiry: string): Promise<number> {
+  async function walkSlotsForExpiry(expiry: string, recordSpot: boolean): Promise<number> {
     await waitForChartReady(page);
     await walkTimeframeToTarget(page, startNorm);
     await page.waitForTimeout(1_500);
@@ -125,16 +146,23 @@ async function scrapeAndStoreDay(
       const latestMme = pickBestMme(caps.mme, expiry);
 
       if (latestMme) {
-        const { rows, qualifyingStrikes, spot } = apiResponseToRows(
+        const { rows, qualifyingStrikes, spot: dailyClose } = apiResponseToRows(
           latestMme,
           capturedAt,
           expiry,
         );
         dayRows.push(...rows);
 
-        // Record this slot's SPX spot (one observation per 10-min window).
-        if (Number.isFinite(spot) && spot > 0) {
-          daySpots.push({ capturedAt, expiry, spot });
+        // Record this slot's SPX spot — session-day pass only (see above).
+        // Prefer the intraday one-minute ticks (a genuine per-slot price);
+        // index_values.close is the session's settled close and is identical
+        // across every slot, so it's only a last-resort fallback.
+        if (recordSpot) {
+          const tickResp = caps.ticks.find(r => r.url.includes(`date=${date}`))?.body;
+          const spot = spotFromTicks(tickResp, capturedAt) ?? dailyClose;
+          if (Number.isFinite(spot) && spot > 0) {
+            daySpots.push({ capturedAt, expiry, spot });
+          }
         }
 
         const latestMmc = pickBestMmc(caps.mmc, expiry);
@@ -161,8 +189,8 @@ async function scrapeAndStoreDay(
     return walked;
   }
 
-  // Pass 1: the session-day expiry (0DTE).
-  slotsScanned += await walkSlotsForExpiry(date);
+  // Pass 1: the session-day expiry (0DTE). Records the per-slot spot.
+  slotsScanned += await walkSlotsForExpiry(date, true);
 
   // Pass 2: the next trading day's expiry (1DTE+). The dialog is already in
   // Single mode, so skipModeSwitch avoids toggling it back to Multi. A
@@ -173,7 +201,7 @@ async function scrapeAndStoreDay(
   try {
     const nextOk = await setExpirySingle(page, nextExpiry, { skipModeSwitch: true });
     if (nextOk) {
-      slotsScanned += await walkSlotsForExpiry(nextExpiry);
+      slotsScanned += await walkSlotsForExpiry(nextExpiry, false);
     } else {
       logger.warn(
         { date, nextExpiry },
@@ -193,6 +221,9 @@ async function scrapeAndStoreDay(
   const spotsInserted = await insertSpotPrices(daySpots);
 
   // ── Market Tide: one net-flow-ticks call covers the whole day ──
+  // The widget only auto-fires net-flow-ticks for today on page load, so for
+  // a backfill date we fetch it directly into caps before storing.
+  await captureTideForDate(page, caps, date, tideUrlTemplate);
   const tidePointsInserted = await storeMarketTide(caps, date);
 
   // ── Cone (once/day): skip entirely if already stored for this date ──
@@ -241,7 +272,25 @@ export async function scrapeBackfill(
     // Collapse the left nav sidebar to maximize chart area.
     await clickZoomOut(page);
 
-    const summary = await scrapeAndStoreDay(page, targetDate, startNorm, endNorm, caps);
+    // Capture the net-flow-ticks (Market Tide) URL fired on load — its date
+    // param is later swapped per backfill day (the widget won't refetch on
+    // chart-date changes).
+    await page.waitForTimeout(1_500);
+    const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
+    // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
+    // same: it fires only for today on load, so capture its URL to re-fetch
+    // per backfill day.
+    const ticksUrlTemplate = caps.ticks[caps.ticks.length - 1]?.url;
+
+    const summary = await scrapeAndStoreDay(
+      page,
+      targetDate,
+      startNorm,
+      endNorm,
+      caps,
+      tideUrlTemplate,
+      ticksUrlTemplate,
+    );
 
     logger.info({ targetDate, ...summary }, 'backfill: complete');
     return summary;
@@ -304,6 +353,16 @@ export async function scrapeBackfillRange(
     // Collapse the left nav sidebar to maximize chart area.
     await clickZoomOut(page);
 
+    // Capture the net-flow-ticks (Market Tide) URL fired on load — its date
+    // param is swapped per backfill day (the widget won't refetch on
+    // chart-date changes).
+    await page.waitForTimeout(1_500);
+    const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
+    // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
+    // same: it fires only for today on load, so capture its URL to re-fetch
+    // per backfill day.
+    const ticksUrlTemplate = caps.ticks[caps.ticks.length - 1]?.url;
+
     let totalRowsInserted = 0;
     let daysScanned = 0;
     const daysFailed: string[] = [];
@@ -314,7 +373,15 @@ export async function scrapeBackfillRange(
       logger.info({ date, progress }, 'backfill range: starting day');
 
       try {
-        const summary = await scrapeAndStoreDay(page, date, startNorm, endNorm, caps);
+        const summary = await scrapeAndStoreDay(
+          page,
+          date,
+          startNorm,
+          endNorm,
+          caps,
+          tideUrlTemplate,
+          ticksUrlTemplate,
+        );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
 
@@ -411,6 +478,16 @@ export async function scrapeWalkBack(opts: {
     // Collapse the left nav sidebar to maximize chart area.
     await clickZoomOut(page);
 
+    // Capture the net-flow-ticks (Market Tide) URL fired on load — its date
+    // param is swapped per day (the widget won't refetch on chart-date
+    // changes).
+    await page.waitForTimeout(1_500);
+    const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
+    // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
+    // same: it fires only for today on load, so capture its URL to re-fetch
+    // per backfill day.
+    const ticksUrlTemplate = caps.ticks[caps.ticks.length - 1]?.url;
+
     let date: string = firstDate;
     let consecutiveEmpty = 0;
     let totalRowsInserted = 0;
@@ -431,7 +508,15 @@ export async function scrapeWalkBack(opts: {
       logger.info({ date, consecutiveEmpty }, 'walk-back: starting day');
 
       try {
-        const summary = await scrapeAndStoreDay(page, date, startNorm, endNorm, caps);
+        const summary = await scrapeAndStoreDay(
+          page,
+          date,
+          startNorm,
+          endNorm,
+          caps,
+          tideUrlTemplate,
+          ticksUrlTemplate,
+        );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
 
