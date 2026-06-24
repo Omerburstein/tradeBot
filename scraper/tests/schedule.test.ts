@@ -141,6 +141,14 @@ eq('slot: 16:00:00 → "16:00"', expectedWindowEnd(monWinter('16:00:00')), '16:0
 eq('slot: 00:05 before first boundary → null', expectedWindowEnd(monWinter('00:05:00')), null);
 eq('slot: 00:10 first boundary → "00:10"', expectedWindowEnd(monWinter('00:10:00')), '00:10');
 
+// 5-min cadence (price + Market Tide) — expectedWindowEnd(d, 5)
+eq('slot5: 10:05:00 → "10:05"', expectedWindowEnd(monWinter('10:05:00'), 5), '10:05');
+eq('slot5: 10:09:59 → "10:05"', expectedWindowEnd(monWinter('10:09:59'), 5), '10:05');
+eq('slot5: 10:10:00 → "10:10"', expectedWindowEnd(monWinter('10:10:00'), 5), '10:10');
+eq('slot5: 10:00:00 → "10:00"', expectedWindowEnd(monWinter('10:00:00'), 5), '10:00');
+eq('slot5: 00:03 before first 5-min boundary → null', expectedWindowEnd(monWinter('00:03:00'), 5), null);
+eq('slot5: DST summer 13:35 EDT → "13:35"', expectedWindowEnd(monSummer('13:35:00'), 5), '13:35');
+
 // ─────────────────────────────────────────────────────────────────────
 // 4. Slot-label parsing — parseSlotEnd
 // ─────────────────────────────────────────────────────────────────────

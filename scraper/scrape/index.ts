@@ -6,7 +6,7 @@
  * trading-calendar, panels, orchestrate) stays encapsulated behind this
  * barrel.
  */
-export { scrapeAllPanels } from './panels.js';
+export { scrapeAllPanels, scrapeMarketTideAndPrice } from './panels.js';
 export {
   scrapeBackfill,
   scrapeBackfillRange,
@@ -14,7 +14,7 @@ export {
   discoverEndpoints,
 } from './orchestrate.js';
 export { tradingDaysBetween } from './trading-calendar.js';
-export type { ScrapeResult } from './api-types.js';
+export type { ScrapeResult, LightScrapeResult } from './api-types.js';
 
 // computeCapturedAt lives in core/dates.ts; re-exported here so existing
 // callers that imported it from the scraper engine keep working unchanged.

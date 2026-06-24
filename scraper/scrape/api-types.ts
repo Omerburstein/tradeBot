@@ -16,6 +16,25 @@ export interface ScrapeResult {
 }
 
 /**
+ * Result of a light tick — the cheap 5-min capture that reads only the
+ * price + Market Tide (which refresh every 5 min) and skips the expensive
+ * Greeks/positions navigation (which only refresh every 10 min). Market Tide
+ * is persisted inside the scrape; the caller persists the spot price.
+ */
+export interface LightScrapeResult {
+  /** SPX spot price read from the page header, or null when unavailable. */
+  spot: number | null;
+  /** Trading date scraped (YYYY-MM-DD). */
+  date: string;
+  /** ET HH:MM end of the latest captured Market Tide slot, or null. Drives 5-min dedup. */
+  tideSlotEnd: string | null;
+  /** ISO instant of that tide slot (used as the spot price captured_at), or null. */
+  tideCapturedAt: string | null;
+  /** Number of Market Tide rows inserted by this tick. */
+  tideInserted: number;
+}
+
+/**
  * Shape of a single row in the UW `market_maker_exposures` API response.
  * The `data` field is an object keyed by index (0, 1, 2, ...) containing
  * these rows.
