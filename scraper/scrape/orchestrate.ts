@@ -14,7 +14,7 @@ import {
   insertSnapshots,
   insertSpotPrices,
   insertPositions,
-} from '../core/db.js';
+} from '../../db/index.js';
 import { computeCapturedAt } from '../core/dates.js';
 import { logger } from '../core/logger.js';
 import type { SnapshotRow, PositionRow } from '../core/types.js';

@@ -78,7 +78,7 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
 const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow } =
   await import('./core/config.js');
 const { expectedWindowEnd, parseSlotEnd, isPersistableSlot } = await import('./core/dates.js');
-const { insertSnapshots, insertSpotPrice, insertPositions } = await import('./core/db.js');
+const { insertSnapshots, insertSpotPrice, insertPositions } = await import('../db/index.js');
 const { scrapeAllPanels, scrapeBackfill, scrapeBackfillRange } =
   await import('./scrape/index.js');
 const { loadWebhookConfig, postPlaybookWebhook } = await import('./core/webhook.js');
@@ -201,7 +201,7 @@ async function runTick(
     // dedup, don't fire the webhook. This covers premarket, postmarket,
     // AND the opening 09:20-09:30 slot, leaving the DB and the auto-playbook
     // anchored to the last persisted (09:40-16:00 ET) slot. The DB-layer
-    // filter (core/db.ts) is the backstop for backfill paths; this guard
+    // filter (db/snapshots.ts) is the backstop for backfill paths; this guard
     // additionally protects the tick's dedup + webhook side effects, which
     // run off the captured slot before any insert.
     if (!isPersistableSlot(new Date(anchor.capturedAt))) {

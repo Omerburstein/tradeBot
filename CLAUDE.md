@@ -17,7 +17,6 @@ scraper/
 │   ├── config.ts         # Env var validation + MS_PER_TICK constant
 │   ├── types.ts          # Panel type + SnapshotRow interface
 │   ├── dates.ts          # Timezone utilities (ET↔UTC, RTH/active-window gates)
-│   ├── db.ts             # Neon Postgres batch inserts (500 rows/call)
 │   ├── parser.ts         # Pure HTML → SnapshotRow[] (node-html-parser, no DOM)
 │   ├── webhook.ts        # Auto-playbook webhook poster (non-blocking, 3-attempt retry)
 │   └── logger.ts         # Shared Pino logger for the scrape/ engine
@@ -42,6 +41,17 @@ scraper/
 └── tests/
     ├── schedule.test.ts  # Dependency-free unit tests (pre-push gate)
     └── integration.test.ts # Live auth + DB integration test
+
+db/                       # Neon Postgres persistence layer (repo-root sibling of
+│                         # scraper/ and algorithms/ — shared by both: the scraper
+│                         # writes, the algo reads)
+├── index.ts              # Barrel: public API (getDb, insertSnapshots, filterInsertable, …)
+├── client.ts             # Singleton Neon client + isRthRow + MAX_ROWS_PER_INSERT
+├── snapshots.ts          # filterInsertable (RTH + gamma threshold + cross-panel gate) + insertSnapshots
+├── spot-prices.ts        # insertSpotPrice / insertSpotPrices
+├── market-tide.ts        # insertMarketTide
+├── positions.ts          # insertPositions
+└── cone.ts               # coneSnapshotExists + insertConeSnapshot
 ```
 
 ---
@@ -88,7 +98,7 @@ All scraping paths — the live tick (`panels.ts`) and every backfill path (`orc
 ---
 
 ### DB Schema Sync
-- `SnapshotRow` in `core/types.ts` must stay in sync with `insertSnapshots` in `core/db.ts`
+- `SnapshotRow` in `scraper/core/types.ts` must stay in sync with `insertSnapshots` in `db/snapshots.ts`
 - Unique constraint: `(captured_at, expiry, panel, strike)` → inserts are idempotent (`ON CONFLICT DO NOTHING`)
 
 ### Schedule-Aware Dedup
