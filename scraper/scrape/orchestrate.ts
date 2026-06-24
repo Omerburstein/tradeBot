@@ -40,6 +40,7 @@ import {
   storeCone,
   captureTideForDate,
   captureTicksForDate,
+  resolveTicksTemplate,
 } from './api-helpers.js';
 import {
   latestTradingDay,
@@ -278,9 +279,10 @@ export async function scrapeBackfill(
     await page.waitForTimeout(1_500);
     const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
     // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
-    // same: it fires only for today on load, so capture its URL to re-fetch
-    // per backfill day.
-    const ticksUrlTemplate = caps.ticks[caps.ticks.length - 1]?.url;
+    // same: it fires only for today on load, so we re-fetch it per backfill
+    // day. The cone panel can lazy-load past the capture window, so synthesize
+    // the template from the tide origin when it hasn't fired yet.
+    const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
 
     const summary = await scrapeAndStoreDay(
       page,
@@ -359,9 +361,10 @@ export async function scrapeBackfillRange(
     await page.waitForTimeout(1_500);
     const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
     // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
-    // same: it fires only for today on load, so capture its URL to re-fetch
-    // per backfill day.
-    const ticksUrlTemplate = caps.ticks[caps.ticks.length - 1]?.url;
+    // same: it fires only for today on load, so we re-fetch it per backfill
+    // day. The cone panel can lazy-load past the capture window, so synthesize
+    // the template from the tide origin when it hasn't fired yet.
+    const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
 
     let totalRowsInserted = 0;
     let daysScanned = 0;
@@ -484,9 +487,10 @@ export async function scrapeWalkBack(opts: {
     await page.waitForTimeout(1_500);
     const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
     // The one_minute_ticks endpoint (intraday SPX price + cone apex) is the
-    // same: it fires only for today on load, so capture its URL to re-fetch
-    // per backfill day.
-    const ticksUrlTemplate = caps.ticks[caps.ticks.length - 1]?.url;
+    // same: it fires only for today on load, so we re-fetch it per backfill
+    // day. The cone panel can lazy-load past the capture window, so synthesize
+    // the template from the tide origin when it hasn't fired yet.
+    const ticksUrlTemplate = resolveTicksTemplate(caps, tideUrlTemplate);
 
     let date: string = firstDate;
     let consecutiveEmpty = 0;
