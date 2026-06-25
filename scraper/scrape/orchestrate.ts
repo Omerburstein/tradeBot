@@ -76,8 +76,12 @@ interface DayStoreSummary {
  * This is THE shared per-day scraper: scrapeBackfill (single date),
  * scrapeBackfillRange (fixed list), and scrapeWalkBack (descending walk)
  * all route through it, so scrape + insert behavior lives in one place.
- * Throws if the date can't be selected (callers decide if that's fatal
- * or just "no more history").
+ *
+ * A Greeks navigation/selection failure (e.g. the date is outside the
+ * Single-mode Expiry dropdown) is NON-FATAL: it's logged and the day still
+ * persists its per-date Market Tide / spot / Cone, returning rowsParsed=0.
+ * Callers treat rowsParsed=0 as "empty" (the walk-back stop condition still
+ * works) while the API-sourced datasets are saved regardless.
  */
 async function scrapeAndStoreDay(
   page: Page,
@@ -103,15 +107,11 @@ async function scrapeAndStoreDay(
   // cone would be skipped (no straddle for the date) or built from today's
   // straddle. Non-blocking.
   await captureStraddleForDate(page, caps, date, straddleUrlTemplate);
-
-  await walkDateToTarget(page, date);
-  await page.waitForTimeout(1_500);
-  const ok = await setExpirySingle(page, date);
-  if (!ok) {
-    throw new Error(
-      `setExpirySingle(${date}) failed — date may be outside Single-mode dropdown for this chart frame`,
-    );
-  }
+  // Market Tide is a direct per-date net-flow-ticks fetch too — capture it
+  // here, BEFORE any chart navigation, so it (and the spot series derived from
+  // its price array) still persists even if the Greeks navigation below fails
+  // for this date.
+  await captureTideForDate(page, caps, date, tideUrlTemplate);
 
   const dayRows: SnapshotRow[] = [];
   const dayPositions: PositionRow[] = [];
@@ -178,47 +178,67 @@ async function scrapeAndStoreDay(
     return walked;
   }
 
-  // Pass 1: the session-day expiry (0DTE).
-  slotsScanned += await walkSlotsForExpiry(date);
-
-  // Pass 2: the next trading day's expiry (1DTE+). The dialog is already in
-  // Single mode, so skipModeSwitch avoids toggling it back to Multi. A
-  // failure here is non-fatal — pass-1 rows are already collected.
-  const nextExpiry = nextTradingDay(date);
-  caps.mme.length = 0;
-  caps.mmc.length = 0;
+  // ── Greeks + positions (require chart navigation) ──
+  // Navigating to the date and selecting Single-mode expiry can fail for older
+  // days that fall out of the Single-mode Expiry dropdown. That failure is
+  // NON-FATAL: the per-date Market Tide / spot / Cone (captured above + stored
+  // below) don't depend on the chart, so we log, skip the Greeks for this day,
+  // and still persist those datasets.
   try {
-    const nextOk = await setExpirySingle(page, nextExpiry, { skipModeSwitch: true });
-    if (nextOk) {
-      slotsScanned += await walkSlotsForExpiry(nextExpiry);
-    } else {
+    await walkDateToTarget(page, date);
+    await page.waitForTimeout(1_500);
+    const ok = await setExpirySingle(page, date);
+    if (!ok) {
+      throw new Error(
+        `setExpirySingle(${date}) failed — date may be outside Single-mode dropdown for this chart frame`,
+      );
+    }
+
+    // Pass 1: the session-day expiry (0DTE).
+    slotsScanned += await walkSlotsForExpiry(date);
+
+    // Pass 2: the next trading day's expiry (1DTE+). The dialog is already in
+    // Single mode, so skipModeSwitch avoids toggling it back to Multi. A
+    // failure here is non-fatal — pass-1 rows are already collected.
+    const nextExpiry = nextTradingDay(date);
+    caps.mme.length = 0;
+    caps.mmc.length = 0;
+    try {
+      const nextOk = await setExpirySingle(page, nextExpiry, { skipModeSwitch: true });
+      if (nextOk) {
+        slotsScanned += await walkSlotsForExpiry(nextExpiry);
+      } else {
+        logger.warn(
+          { date, nextExpiry },
+          'scrapeAndStoreDay: next expiry not selectable — storing session-day expiry only',
+        );
+      }
+    } catch (err) {
       logger.warn(
-        { date, nextExpiry },
-        'scrapeAndStoreDay: next expiry not selectable — storing session-day expiry only',
+        { date, nextExpiry, err: err instanceof Error ? err.message : String(err) },
+        'scrapeAndStoreDay: next-expiry walk failed — non-blocking',
       );
     }
   } catch (err) {
     logger.warn(
-      { date, nextExpiry, err: err instanceof Error ? err.message : String(err) },
-      'scrapeAndStoreDay: next-expiry walk failed — non-blocking',
+      { date, err: err instanceof Error ? err.message : String(err) },
+      'scrapeAndStoreDay: Greeks scrape failed — storing Market Tide/spot/Cone only',
     );
+    // Escape any stuck modal/popover so the next day starts clean.
+    await page.keyboard.press('Escape').catch(() => undefined);
+    await page.keyboard.press('Escape').catch(() => undefined);
   }
 
-  // ── Persist Greeks + positions ──
+  // ── Persist Greeks + positions (empty when the Greeks scrape was skipped) ──
   const snapshotsInserted = await insertSnapshots(dayRows);
   const positionsInserted = await insertPositions(dayPositions);
 
-  // ── Market Tide: one net-flow-ticks call covers the whole day ──
-  // The widget only auto-fires net-flow-ticks for today on page load, so for
-  // a backfill date we fetch it directly into caps. Done BEFORE spot because
-  // its `prices` series is the per-date 5-min spot source for older days.
-  await captureTideForDate(page, caps, date, tideUrlTemplate);
-
   // ── Spot (5-min, matching Market Tide): real index_candles/5m for recent
-  // days, else the Market Tide price series rescaled to SPX for older days,
-  // else a single daily close. See storeSpot for the source precedence.
+  // days, else the Market Tide price series (captured above) rescaled to SPX
+  // for older days, else a single daily close. See storeSpot for precedence.
   const spotsInserted = await storeSpot(caps, date, intradaySpotByDate);
 
+  // ── Market Tide: the per-date net-flow-ticks captured above, 5-min slots ──
   const tidePointsInserted = await storeMarketTide(caps, date);
 
   // ── Cone (once/day): skip entirely if already stored for this date ──
