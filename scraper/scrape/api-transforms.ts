@@ -244,10 +244,21 @@ export function parseStraddle(body: ApiStraddleResponse): number | null {
  * cleanly selects the slot boundaries (09:30, 09:35, 09:40, …, 16:00).
  * Market Tide (and spot) refresh every 5 min, twice as often as the
  * 10-min Greeks/positions cadence, so we keep every 5-min point.
+ *
+ * `expectedDate` (YYYY-MM-DD, ET) gates the rows by each point's own `date`
+ * field. This is essential for backfill: the net-flow-ticks endpoint IGNORES
+ * its `date` query param and always returns the LATEST session, so a backfill
+ * day would otherwise persist today's tide stamped at today's instants — rows
+ * whose captured_at is unrelated to the day being scraped. When omitted, no
+ * date gate is applied (callers that genuinely want whatever was returned).
  */
-export function netFlowToTideRows(body: ApiNetFlowResponse): MarketTideRow[] {
+export function netFlowToTideRows(
+  body: ApiNetFlowResponse,
+  expectedDate?: string,
+): MarketTideRow[] {
   const out: MarketTideRow[] = [];
   for (const pt of body.data ?? []) {
+    if (expectedDate != null && pt.date !== expectedDate) continue;
     const d = new Date(pt.timestamp);
     if (Number.isNaN(d.getTime())) continue;
     if (d.getUTCMinutes() % 5 !== 0) continue;

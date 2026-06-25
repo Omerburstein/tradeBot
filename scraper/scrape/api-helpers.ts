@@ -82,7 +82,7 @@ function pickTideResponse(caps: ApiCaptures, date: string) {
 export function latestTideRow(caps: ApiCaptures, date: string): MarketTideRow | null {
   const tideResp = pickTideResponse(caps, date);
   if (!tideResp) return null;
-  const rows = netFlowToTideRows(tideResp.body);
+  const rows = netFlowToTideRows(tideResp.body, date);
   return rows.length > 0 ? rows[rows.length - 1]! : null;
 }
 
@@ -273,7 +273,19 @@ export async function storeMarketTide(
       logger.warn({ date }, 'no net-flow-ticks (Market Tide) response captured');
       return 0;
     }
-    const rows = netFlowToTideRows(tideResp.body);
+    const rows = netFlowToTideRows(tideResp.body, date);
+    if (rows.length === 0 && (tideResp.body.data?.length ?? 0) > 0) {
+      // The endpoint returned data, but none of it is for `date` — it ignores
+      // its `date` param and serves the latest session. Storing it would file
+      // the wrong session's tide under this day, so skip (no historical tide
+      // is available for this date from this endpoint).
+      const returnedDate = tideResp.body.data?.[0]?.date ?? null;
+      logger.warn(
+        { date, returnedDate },
+        'net-flow-ticks returned a different session — skipping Market Tide for this date',
+      );
+      return 0;
+    }
     const inserted = await insertMarketTide(slotOnly ? rows.slice(-1) : rows);
     logger.info({ date, inserted }, 'Market Tide stored');
     return inserted;
