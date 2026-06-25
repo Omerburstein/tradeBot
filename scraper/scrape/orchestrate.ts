@@ -108,9 +108,9 @@ async function scrapeAndStoreDay(
   // straddle. Non-blocking.
   await captureStraddleForDate(page, caps, date, straddleUrlTemplate);
   // Market Tide is a direct per-date net-flow-ticks fetch too — capture it
-  // here, BEFORE any chart navigation, so it (and the spot series derived from
-  // its price array) still persists even if the Greeks navigation below fails
-  // for this date.
+  // here, BEFORE any chart navigation, so it still persists even if the Greeks
+  // navigation below fails for this date. (storeMarketTide will skip it anyway
+  // when the endpoint serves the latest session instead of this past day.)
   await captureTideForDate(page, caps, date, tideUrlTemplate);
 
   const dayRows: SnapshotRow[] = [];
@@ -233,12 +233,13 @@ async function scrapeAndStoreDay(
   const snapshotsInserted = await insertSnapshots(dayRows);
   const positionsInserted = await insertPositions(dayPositions);
 
-  // ── Spot (5-min, matching Market Tide): real index_candles/5m for recent
-  // days, else the Market Tide price series (captured above) rescaled to SPX
-  // for older days, else a single daily close. See storeSpot for precedence.
+  // ── Spot: real 5-min index_candles for recent days (within the ~30-day 5m
+  // window), else a single daily close for older days. See storeSpot — UW has
+  // no historical intraday price source beyond that window.
   const spotsInserted = await storeSpot(caps, date, intradaySpotByDate);
 
-  // ── Market Tide: the per-date net-flow-ticks captured above, 5-min slots ──
+  // ── Market Tide: the per-date net-flow-ticks captured above (5-min slots).
+  // Skipped for past days the endpoint can't serve (latest-session only).
   const tidePointsInserted = await storeMarketTide(caps, date);
 
   // ── Cone (once/day): skip entirely if already stored for this date ──
