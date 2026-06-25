@@ -160,26 +160,14 @@ export interface ApiNetFlowRow {
 }
 
 /**
- * One entry from the net-flow-ticks `prices` array — a per-minute SPX-proxy
- * close (SPY-like scale: ~1/10 of SPX, close-to-close ratio ~0.0996, NOT a
- * clean /10). `close` is null for minutes with no print (e.g. the final
- * pre-settlement bar). This is the only PER-DATE intraday price source that
- * reaches beyond the ~30-day index_candles/5m window — callers rescale it to
- * SPX before storing as spot.
- */
-export interface ApiNetFlowPrice {
-  close: string | null;
-  start_time: string; // e.g. "2026-06-23T09:30:00-04:00"
-}
-
-/**
  * Shape of the `net-flow-ticks?date=...` response body (Market Tide).
- * `data` is the full trading day at 1-min granularity (~390 points); `prices`
- * is the parallel per-minute SPX-proxy close series (same length).
+ * `data` is the full trading day at 1-min granularity (~390 points).
+ * NOTE: the endpoint ignores its `date` param and always returns the LATEST
+ * session, so it cannot supply historical Market Tide or spot for a past day.
  */
 export interface ApiNetFlowResponse {
   data: ApiNetFlowRow[];
-  prices?: ApiNetFlowPrice[];
+  prices?: unknown;
 }
 
 /**

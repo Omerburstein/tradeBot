@@ -18,7 +18,6 @@ import type { ConeSnapshotRow, MarketTideRow } from '../core/types.js';
 import {
   parseStraddle,
   netFlowToTideRows,
-  netFlowToSpotRows,
   candles5mToSpotRowsByDate,
   dailyCloseSpotRow,
   type SpotRow,
@@ -306,21 +305,19 @@ export async function storeMarketTide(
 }
 
 /**
- * Persist the intraday SPX spot series for `date`, picking the best available
- * source so a backfill stores spot every 5 min (same cadence as Market Tide):
+ * Persist the intraday SPX spot series for `date`. UW exposes only two usable
+ * spot sources, so there are two tiers:
  *
- *  1. Real 5-min index candles (true SPX scale) when the date is within the
- *     ~30-trading-day index_candles/5m window — pre-fetched into
- *     `intradaySpotByDate`. Best source; used unchanged for recent days.
- *  2. Else the per-date Market Tide price series rescaled to SPX
- *     (`netFlowToSpotRows`) — the only intraday source that reaches older
- *     history, anchored on the day's daily-candle close. THIS is what gives
- *     5-min spot for the bulk of a months-long backfill.
- *  3. Else a single daily-close row (oldest days, where only daily OHLC exists).
+ *  1. Real 5-min index candles (true SPX scale) — but `index_candles/SPX/5m`
+ *     caps at ~30 trading days back, pre-fetched into `intradaySpotByDate`.
+ *     Gives genuine 5-min spot, used for recent days.
+ *  2. Else a single daily-close row from the 1d candles (full history). For
+ *     days older than the 5m window this is ALL UW has — there is no historical
+ *     intraday price endpoint (net-flow-ticks, the Market Tide source, ignores
+ *     its date param and returns the latest session, so it can't supply spot
+ *     for a past day either).
  *
- * Tier 2 requires caps.tide to already hold THIS date's net-flow-ticks
- * response (call `captureTideForDate` first) and caps.candles to hold the
- * day's daily candle (fires once on load, covers the whole range).
+ * caps.candles holds the daily candle (fires once on load, covers the range).
  * Non-blocking — returns the inserted count, 0 on failure.
  */
 export async function storeSpot(
@@ -331,31 +328,20 @@ export async function storeSpot(
   try {
     // Tier 1: real intraday 5-min SPX candles (recent ~30 trading days).
     const intraday = intradaySpotByDate.get(date) ?? [];
-    if (intraday.length > 0) return await insertSpotPrices(intraday);
-
-    const dailyCandles = caps.candles.flatMap(r => r.body);
-
-    // Tier 2: rescaled Market Tide price series — 5-min spot for older days.
-    const tideResp = pickTideResponse(caps, date);
-    const candleEntry = dailyCandles.find(e => e.date === date);
-    const spxClose = candleEntry ? Number.parseFloat(candleEntry.c) : NaN;
-    if (tideResp && Number.isFinite(spxClose)) {
-      const rows = netFlowToSpotRows(tideResp.body, date, spxClose);
-      if (rows.length > 0) {
-        const inserted = await insertSpotPrices(rows);
-        logger.info({ date, inserted }, 'spot stored (Market Tide price series, 5-min)');
-        return inserted;
-      }
+    if (intraday.length > 0) {
+      const inserted = await insertSpotPrices(intraday);
+      logger.info({ date, inserted }, 'spot stored (intraday 5-min candles)');
+      return inserted;
     }
 
-    // Tier 3: single daily close stamped at the session close.
+    // Tier 2: single daily close (older days — no intraday source exists).
     const closeRows = dailyCloseSpotRow(
-      dailyCandles,
+      caps.candles.flatMap(r => r.body),
       date,
       computeCapturedAt(date, '16:00'),
     );
     const inserted = await insertSpotPrices(closeRows);
-    logger.info({ date, inserted }, 'spot stored (daily close fallback)');
+    logger.info({ date, inserted }, 'spot stored (daily close — no intraday for this date)');
     return inserted;
   } catch (err) {
     logger.warn(
