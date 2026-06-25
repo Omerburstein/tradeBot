@@ -1,11 +1,28 @@
 import type { MarketTideRow } from '../scraper/core/types.js';
 import { getDb, isRthRow, MAX_ROWS_PER_INSERT } from './client.js';
+import { logger } from '../scraper/core/logger.js';
 
 export async function insertMarketTide(
   rowsAll: ReadonlyArray<MarketTideRow>,
 ): Promise<number> {
   const rows = rowsAll.filter((r) => isRthRow(r.capturedAt));
-  if (rows.length === 0) return 0;
+  const droppedByRth = rowsAll.filter((r) => !isRthRow(r.capturedAt));
+  logger.info(
+    {
+      received: rowsAll.length,
+      keptAfterRthFilter: rows.length,
+      droppedByRthFilter: droppedByRth.length,
+      rows,
+    },
+    'insertMarketTide: rows to write (post RTH filter)',
+  );
+  if (rows.length === 0) {
+    logger.warn(
+      { received: rowsAll.length },
+      'insertMarketTide: nothing to write (0 rows after RTH filter)',
+    );
+    return 0;
+  }
 
   const sql = getDb();
 
@@ -20,7 +37,7 @@ export async function insertMarketTide(
     [],
   );
 
-  let submitted = 0;
+  let inserted = 0;
   for (let i = 0; i < rows.length; i += MAX_ROWS_PER_INSERT) {
     const chunk = rows.slice(i, i + MAX_ROWS_PER_INSERT);
 
@@ -36,11 +53,30 @@ export async function insertMarketTide(
       `INSERT INTO market_tide ` +
       `(captured_at, net_call_premium, net_put_premium, net_volume) ` +
       `VALUES ${placeholders.join(', ')} ` +
-      `ON CONFLICT (captured_at) DO NOTHING`;
+      `ON CONFLICT (captured_at) DO NOTHING ` +
+      `RETURNING captured_at`;
 
-    await sql(text, params);
-    submitted += chunk.length;
+    try {
+      const out = await sql(text, params);
+      const newRows = Array.isArray(out) ? out.length : 0;
+      inserted += newRows;
+      logger.info(
+        { chunkSize: chunk.length, newlyInserted: newRows, conflictsSkipped: chunk.length - newRows },
+        'insertMarketTide: chunk written',
+      );
+    } catch (err) {
+      logger.error(
+        {
+          err: err instanceof Error ? err.message : String(err),
+          chunkSize: chunk.length,
+          sampleParams: params.slice(0, 4),
+        },
+        'insertMarketTide: DB write FAILED',
+      );
+      throw err;
+    }
   }
 
-  return submitted;
+  logger.info({ totalNewlyInserted: inserted }, 'insertMarketTide: done');
+  return inserted;
 }
