@@ -12,7 +12,6 @@ import { type Page } from 'playwright';
 import { UW_PERISCOPE_URL } from '../core/config.js';
 import {
   insertSnapshots,
-  insertSpotPrices,
   insertPositions,
 } from '../../db/index.js';
 import { computeCapturedAt } from '../core/dates.js';
@@ -31,13 +30,13 @@ import {
 import {
   apiResponseToRows,
   contractsResponseToRows,
-  dailyCloseSpotRow,
   type SpotRow,
 } from './api-transforms.js';
 import {
   pickBestMme,
   pickBestMmc,
   storeMarketTide,
+  storeSpot,
   storeCone,
   captureTideForDate,
   fetchSpotCandles5m,
@@ -70,9 +69,9 @@ interface DayStoreSummary {
 /**
  * Scrape one trading day AND persist everything for it: navigate the
  * chart to `date`, set Expiry=Single, iterate 10-min slots from
- * `startNorm`..`endNorm` capturing Greeks/positions, derive the 5-min spot
- * series from the intraday ticks, then store Market Tide (5-min) and the
- * Cone param (straddle, once/day — skipped if already in the DB).
+ * `startNorm`..`endNorm` capturing Greeks/positions, then store the 5-min
+ * spot series, Market Tide (5-min) and the Cone param (straddle, once/day —
+ * skipped if already in the DB).
  *
  * This is THE shared per-day scraper: scrapeBackfill (single date),
  * scrapeBackfillRange (fixed list), and scrapeWalkBack (descending walk)
@@ -127,8 +126,8 @@ async function scrapeAndStoreDay(
    * can't label non-0DTE rows). Returns the slot count walked.
    *
    * Spot is NOT recorded here: it's the underlying SPX price (independent of
-   * expiry and of the 10-min Greek cadence), so it's derived once per day
-   * from the intraday ticks at 5-min boundaries after both passes.
+   * expiry and of the 10-min Greek cadence), so it's stored once per day at
+   * 5-min boundaries (see storeSpot) after both passes.
    */
   async function walkSlotsForExpiry(expiry: string): Promise<number> {
     await waitForChartReady(page);
@@ -209,26 +208,17 @@ async function scrapeAndStoreDay(
   const snapshotsInserted = await insertSnapshots(dayRows);
   const positionsInserted = await insertPositions(dayPositions);
 
-  // ── Spot: real intraday 5-min series for recent days, else the daily close.
-  // Historical intraday SPX price is only available from index_candles/SPX/5m
-  // (~30 trading days back), pre-fetched once into intradaySpotByDate. For
-  // older days only the daily OHLC exists, so store one close stamped at the
-  // session close. (The date-keyed tick endpoints can't be used — they ignore
-  // their date param and return the latest session.)
-  const intradaySpots = intradaySpotByDate.get(date) ?? [];
-  const daySpots = intradaySpots.length > 0
-    ? intradaySpots
-    : dailyCloseSpotRow(
-        caps.candles.flatMap(r => r.body),
-        date,
-        computeCapturedAt(date, '16:00'),
-      );
-  const spotsInserted = await insertSpotPrices(daySpots);
-
   // ── Market Tide: one net-flow-ticks call covers the whole day ──
   // The widget only auto-fires net-flow-ticks for today on page load, so for
-  // a backfill date we fetch it directly into caps before storing.
+  // a backfill date we fetch it directly into caps. Done BEFORE spot because
+  // its `prices` series is the per-date 5-min spot source for older days.
   await captureTideForDate(page, caps, date, tideUrlTemplate);
+
+  // ── Spot (5-min, matching Market Tide): real index_candles/5m for recent
+  // days, else the Market Tide price series rescaled to SPX for older days,
+  // else a single daily close. See storeSpot for the source precedence.
+  const spotsInserted = await storeSpot(caps, date, intradaySpotByDate);
+
   const tidePointsInserted = await storeMarketTide(caps, date);
 
   // ── Cone (once/day): skip entirely if already stored for this date ──

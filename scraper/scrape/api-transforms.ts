@@ -231,6 +231,66 @@ export function dailyCloseSpotRow(
   return [{ capturedAt, expiry: date, spot }];
 }
 
+/**
+ * Derive a 5-min SPX spot series for `date` from a net-flow-ticks response's
+ * per-minute `prices` array. This is the only PER-DATE intraday spot source
+ * that reaches back beyond the ~30-trading-day index_candles/5m window — and
+ * it's the same net-flow-ticks call that already drives Market Tide, so a
+ * backfill can store spot every 5 min for ANY historical day (matching the
+ * Market Tide cadence).
+ *
+ * The `prices.close` series is a SPY-like proxy at ~1/10 the SPX scale (the
+ * close-to-close ratio is ~0.0996 — NOT a clean /10), so it is NOT comparable
+ * to the SPX-scale values the rest of spot_prices holds (≈7000s). We rescale
+ * it to SPX with a single per-day factor anchored on the day's SPX close
+ * (`spxClose`, from the daily candle): factor = spxClose / proxySessionClose.
+ * Intraday drift of that ratio over one RTH session is <0.1%, well within
+ * tolerance for windowing strikes and the algo.
+ *
+ * Same 5-min cadence as netFlowToTideRows: UW timestamps carry a whole-hour
+ * ET offset so UTC minutes == ET minutes, and `% 5 === 0` selects the slot
+ * boundaries (09:30, 09:35, …, 16:00). Null/zero closes are skipped. Returns
+ * [] when no usable price or anchor is available.
+ */
+export function netFlowToSpotRows(
+  body: ApiNetFlowResponse,
+  date: string,
+  spxClose: number,
+): SpotRow[] {
+  const prices = body.prices ?? [];
+  if (!Number.isFinite(spxClose) || spxClose <= 0) return [];
+
+  // Proxy session close = the last non-null close in the series (the anchor).
+  let proxyClose: number | null = null;
+  for (let i = prices.length - 1; i >= 0; i--) {
+    const v = prices[i]!.close;
+    if (v == null) continue;
+    const n = Number.parseFloat(v);
+    if (Number.isFinite(n) && n > 0) {
+      proxyClose = n;
+      break;
+    }
+  }
+  if (proxyClose == null) return [];
+  const factor = spxClose / proxyClose;
+
+  const bySlot = new Map<string, SpotRow>();
+  for (const pt of prices) {
+    if (pt.close == null) continue;
+    const proxy = Number.parseFloat(pt.close);
+    if (!Number.isFinite(proxy) || proxy <= 0) continue;
+    const d = new Date(pt.start_time);
+    if (Number.isNaN(d.getTime())) continue;
+    if (d.getUTCMinutes() % 5 !== 0) continue;
+    const capturedAt = d.toISOString();
+    const spot = Math.round(proxy * factor * 100) / 100;
+    bySlot.set(capturedAt, { capturedAt, expiry: date, spot });
+  }
+  return [...bySlot.values()].sort((a, b) =>
+    a.capturedAt.localeCompare(b.capturedAt),
+  );
+}
+
 /** Parse the ATM straddle (cone param) from a straddle response. */
 export function parseStraddle(body: ApiStraddleResponse): number | null {
   const v = Number.parseFloat(body.straddle);
