@@ -1,4 +1,5 @@
 import { getDb, isRthRow, MAX_ROWS_PER_INSERT } from './client.js';
+import { logger } from '../scraper/core/logger.js';
 
 const CREATE_SPOT_PRICES_TABLE =
   `CREATE TABLE IF NOT EXISTS spot_prices (` +
@@ -29,12 +30,29 @@ export async function insertSpotPrices(
   spotsAll: ReadonlyArray<{ capturedAt: string; expiry: string; spot: number }>,
 ): Promise<number> {
   const spots = spotsAll.filter((s) => isRthRow(s.capturedAt));
-  if (spots.length === 0) return 0;
+  const droppedByRth = spotsAll.filter((s) => !isRthRow(s.capturedAt));
+  logger.info(
+    {
+      received: spotsAll.length,
+      keptAfterRthFilter: spots.length,
+      droppedByRthFilter: droppedByRth.length,
+      droppedSample: droppedByRth.slice(0, 3),
+      rows: spots,
+    },
+    'insertSpotPrices: rows to write (post RTH filter)',
+  );
+  if (spots.length === 0) {
+    logger.warn(
+      { received: spotsAll.length },
+      'insertSpotPrices: nothing to write (0 rows after RTH filter)',
+    );
+    return 0;
+  }
 
   const sql = getDb();
   await sql(CREATE_SPOT_PRICES_TABLE, []);
 
-  let submitted = 0;
+  let inserted = 0;
   for (let i = 0; i < spots.length; i += MAX_ROWS_PER_INSERT) {
     const chunk = spots.slice(i, i + MAX_ROWS_PER_INSERT);
 
@@ -46,14 +64,35 @@ export async function insertSpotPrices(
       params.push(s.capturedAt, s.expiry, s.spot);
     }
 
+    // RETURNING lets us log how many rows were ACTUALLY inserted vs skipped by
+    // ON CONFLICT (already present) — invaluable when debugging "nothing saved".
     const text =
       `INSERT INTO spot_prices (captured_at, date, spot) ` +
       `VALUES ${placeholders.join(', ')} ` +
-      `ON CONFLICT (captured_at, date) DO NOTHING`;
+      `ON CONFLICT (captured_at, date) DO NOTHING ` +
+      `RETURNING captured_at`;
 
-    await sql(text, params);
-    submitted += chunk.length;
+    try {
+      const out = await sql(text, params);
+      const newRows = Array.isArray(out) ? out.length : 0;
+      inserted += newRows;
+      logger.info(
+        { chunkSize: chunk.length, newlyInserted: newRows, conflictsSkipped: chunk.length - newRows },
+        'insertSpotPrices: chunk written',
+      );
+    } catch (err) {
+      logger.error(
+        {
+          err: err instanceof Error ? err.message : String(err),
+          chunkSize: chunk.length,
+          sampleParams: params.slice(0, 3),
+        },
+        'insertSpotPrices: DB write FAILED',
+      );
+      throw err;
+    }
   }
 
-  return submitted;
+  logger.info({ totalNewlyInserted: inserted }, 'insertSpotPrices: done');
+  return inserted;
 }

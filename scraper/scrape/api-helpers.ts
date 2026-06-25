@@ -132,6 +132,16 @@ export async function captureTideForDate(
     }
     const body = (await resp.json()) as ApiNetFlowResponse;
     caps.tide.push({ url, body });
+    logger.info(
+      {
+        date,
+        url,
+        points: body.data?.length ?? 0,
+        returnedDate: body.data?.[0]?.date ?? null,
+        dateMatches: (body.data?.[0]?.date ?? null) === date,
+      },
+      'captureTideForDate: fetched net-flow-ticks',
+    );
   } catch (err) {
     logger.warn(
       { date, err: err instanceof Error ? err.message : String(err) },
@@ -276,10 +286,24 @@ export async function storeMarketTide(
   try {
     const tideResp = pickTideResponse(caps, date);
     if (!tideResp) {
-      logger.warn({ date }, 'no net-flow-ticks (Market Tide) response captured');
+      logger.warn(
+        { date, tideResponsesCaptured: caps.tide.length },
+        'no net-flow-ticks (Market Tide) response captured',
+      );
       return 0;
     }
     const rows = netFlowToTideRows(tideResp.body, date);
+    logger.info(
+      {
+        date,
+        url: tideResp.url,
+        rawPoints: tideResp.body.data?.length ?? 0,
+        returnedDate: tideResp.body.data?.[0]?.date ?? null,
+        rowsForDate: rows.length,
+        sample: rows.slice(0, 2),
+      },
+      'storeMarketTide: candidate tide rows',
+    );
     if (rows.length === 0 && (tideResp.body.data?.length ?? 0) > 0) {
       // The endpoint returned data, but none of it is for `date` — it ignores
       // its `date` param and serves the latest session. Storing it would file
@@ -329,16 +353,31 @@ export async function storeSpot(
     // Tier 1: real intraday 5-min SPX candles (recent ~30 trading days).
     const intraday = intradaySpotByDate.get(date) ?? [];
     if (intraday.length > 0) {
+      logger.info(
+        { date, source: '5m-candles', rows: intraday.length, sample: intraday.slice(0, 2) },
+        'storeSpot: candidate spot rows',
+      );
       const inserted = await insertSpotPrices(intraday);
       logger.info({ date, inserted }, 'spot stored (intraday 5-min candles)');
       return inserted;
     }
 
     // Tier 2: single daily close (older days — no intraday source exists).
+    const dailyCandles = caps.candles.flatMap(r => r.body);
     const closeRows = dailyCloseSpotRow(
-      caps.candles.flatMap(r => r.body),
+      dailyCandles,
       date,
       computeCapturedAt(date, '16:00'),
+    );
+    logger.info(
+      {
+        date,
+        source: 'daily-close',
+        candleDays: dailyCandles.length,
+        haveCandleForDate: dailyCandles.some(e => e.date === date),
+        rows: closeRows,
+      },
+      'storeSpot: candidate spot rows (no intraday for this date)',
     );
     const inserted = await insertSpotPrices(closeRows);
     logger.info({ date, inserted }, 'spot stored (daily close — no intraday for this date)');

@@ -6,6 +6,7 @@
  * interception identically instead of duplicating the handler.
  */
 import { type Page } from 'playwright';
+import { logger } from '../core/logger.js';
 import type {
   ApiCaptures,
   ApiExposureResponse,
@@ -37,9 +38,25 @@ export function attachApiCaptures(page: Page): ApiCaptures {
         } else if (url.includes('/straddle')) {
           caps.straddle.push({ url, body: body as ApiStraddleResponse });
         } else if (url.includes('net-flow-ticks')) {
-          caps.tide.push({ url, body: body as ApiNetFlowResponse });
+          const tide = body as ApiNetFlowResponse;
+          caps.tide.push({ url, body: tide });
+          logger.info(
+            { url, points: tide.data?.length ?? 0, returnedDate: tide.data?.[0]?.date ?? null },
+            'captured net-flow-ticks (Market Tide)',
+          );
         } else if (url.includes('index_candles')) {
-          caps.candles.push({ url, body: body as ApiCandleEntry[] });
+          // The index_candles endpoints return { data: [...] }, NOT a bare
+          // array. Storing the raw object made caps.candles.flatMap(r => r.body)
+          // iterate the wrong shape, so the daily-close spot lookup (and cone
+          // candle fallback) found nothing. Unwrap `.data` here.
+          const arr = Array.isArray(body)
+            ? (body as ApiCandleEntry[])
+            : ((body as { data?: ApiCandleEntry[] }).data ?? []);
+          caps.candles.push({ url, body: arr });
+          logger.info(
+            { url, candles: arr.length, first: arr[0]?.date ?? null, last: arr[arr.length - 1]?.date ?? null },
+            'captured index_candles',
+          );
         } else if (url.includes('one_minute_ticks')) {
           caps.ticks.push({ url, body: body as ApiSpxTickResponse });
         }
