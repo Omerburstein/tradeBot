@@ -179,10 +179,13 @@ export function etDateOf(d: Date): string {
  *
  * The candle `start` is offset from the wall-clock grid (e.g. 13:34Z), so we
  * snap it to the nearest 5-min boundary (→ 13:35Z) to align with the Market
- * Tide cadence; `c` (close) is the spot. After-hours points survive here but
- * are dropped by the RTH filter at insert time. The 5m endpoint only reaches
- * ~30 trading days back (a server row cap), so older days aren't returned and
- * the caller falls back to the daily close.
+ * Tide cadence; `o` (open) is the spot — the price AT the candle's start, so
+ * it lines up with that boundary timestamp (the slot instant the Greeks /
+ * Market Tide rows are stamped at). Using the close instead would store the
+ * price ~5 min later under the start's label. After-hours points survive here
+ * but are dropped by the RTH filter at insert time. The 5m endpoint only
+ * reaches ~30 trading days back (a server row cap), so older days aren't
+ * returned and the caller falls back to the daily close.
  */
 export function candles5mToSpotRowsByDate(
   candles: ReadonlyArray<ApiIntradayCandle>,
@@ -191,7 +194,7 @@ export function candles5mToSpotRowsByDate(
   for (const c of candles) {
     const t = new Date(c.start).getTime();
     if (Number.isNaN(t)) continue;
-    const spot = Number.parseFloat(c.c);
+    const spot = Number.parseFloat(c.o);
     if (!Number.isFinite(spot) || spot <= 0) continue;
     const snapped = new Date(Math.round(t / FIVE_MIN_MS) * FIVE_MIN_MS);
     const capturedAt = snapped.toISOString();

@@ -65,15 +65,15 @@ CREATE TABLE IF NOT EXISTS positions (
 
 
 -- ----------------------------------------------------------------------------
--- market_tide — net-flow (Market Tide) per 10-min slot
---   captured_at = the data point's own 10-min slot boundary (UTC)
+-- market_tide — net-flow (Market Tide) per 5-min slot
+--   captured_at = the data point's own 5-min slot boundary (UTC)
 -- Insert: db/market-tide.ts → insertMarketTide (batched 500/call).
 -- Supersedes the legacy `market_tide_ticks` table (renamed 2026; the old
 -- tick_at/date/scrape-time columns were dropped). If a `market_tide_ticks`
 -- table still exists in your database it is unused and can be dropped.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS market_tide (
-  captured_at      TIMESTAMPTZ   NOT NULL,     -- data point's 10-min boundary (UTC)
+  captured_at      TIMESTAMPTZ   NOT NULL,     -- data point's 5-min boundary (UTC)
   net_call_premium NUMERIC(18,4) NOT NULL,
   net_put_premium  NUMERIC(18,4) NOT NULL,
   net_volume       BIGINT        NOT NULL,
