@@ -21,7 +21,10 @@ export async function insertSpotPrice(
   await sql(
     `INSERT INTO spot_prices (captured_at, date, spot) ` +
     `VALUES ($1, $2, $3) ` +
-    `ON CONFLICT (captured_at, date) DO NOTHING`,
+    // Upsert (not DO NOTHING): a re-run must be able to CORRECT an existing
+    // row's spot when the source/derivation changes (e.g. close → open),
+    // otherwise stale values are pinned forever.
+    `ON CONFLICT (captured_at, date) DO UPDATE SET spot = EXCLUDED.spot`,
     [capturedAt, expiry, spot],
   );
 }
@@ -64,21 +67,27 @@ export async function insertSpotPrices(
       params.push(s.capturedAt, s.expiry, s.spot);
     }
 
-    // RETURNING lets us log how many rows were ACTUALLY inserted vs skipped by
-    // ON CONFLICT (already present) — invaluable when debugging "nothing saved".
+    // Upsert so a re-run CORRECTS existing rows (e.g. close → open) instead of
+    // pinning stale values. `RETURNING (xmax = 0)` flags each row as a fresh
+    // insert (xmax 0) vs an in-place update, so the logs still distinguish
+    // them — invaluable when debugging "the value didn't change".
     const text =
       `INSERT INTO spot_prices (captured_at, date, spot) ` +
       `VALUES ${placeholders.join(', ')} ` +
-      `ON CONFLICT (captured_at, date) DO NOTHING ` +
-      `RETURNING captured_at`;
+      `ON CONFLICT (captured_at, date) DO UPDATE SET spot = EXCLUDED.spot ` +
+      `RETURNING (xmax = 0) AS inserted`;
 
     try {
       const out = await sql(text, params);
-      const newRows = Array.isArray(out) ? out.length : 0;
-      inserted += newRows;
+      const rows = Array.isArray(out) ? out : [];
+      const newlyInserted = rows.filter(
+        (r) => r.inserted === true || r.inserted === 't',
+      ).length;
+      const updated = rows.length - newlyInserted;
+      inserted += rows.length;
       logger.info(
-        { chunkSize: chunk.length, newlyInserted: newRows, conflictsSkipped: chunk.length - newRows },
-        'insertSpotPrices: chunk written',
+        { chunkSize: chunk.length, newlyInserted, updated },
+        'insertSpotPrices: chunk upserted',
       );
     } catch (err) {
       logger.error(
@@ -93,6 +102,6 @@ export async function insertSpotPrices(
     }
   }
 
-  logger.info({ totalNewlyInserted: inserted }, 'insertSpotPrices: done');
+  logger.info({ totalWritten: inserted }, 'insertSpotPrices: done');
   return inserted;
 }
