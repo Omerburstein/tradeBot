@@ -32,6 +32,19 @@ import type {
 } from './api-types.js';
 
 /**
+ * How many market days back the net-flow-ticks (Market Tide) endpoint is asked
+ * to return via its `market_day_timeframe` param. The endpoint IGNORES its
+ * `date` param and instead serves the last `market_day_timeframe` sessions, so
+ * the dashboard's default of 1 can only ever supply *today's* tide — which is
+ * why backfilling a viewed date used to store nothing. Widening it to 30 makes
+ * the last ~month of sessions available, so any date within that window finds
+ * its own day's tide. The multi-day payload is then filtered down to the
+ * requested date by netFlowToTideRows, and storeMarketTide stores nothing when
+ * the date isn't present — never another day's data.
+ */
+const MARKET_TIDE_LOOKBACK_DAYS = 30;
+
+/**
  * Three-tier best-response selection for market_maker_exposures.
  * Prefers the most-recent response whose URL matches `expiry=<targetExpiry>`,
  * then any non-"all" expiry response, then the last response as a last resort.
@@ -102,8 +115,11 @@ export function latestTideRow(caps: ApiCaptures, date: string): MarketTideRow | 
  * changes. So every backfill day (whose target date differs from the page's
  * default) would otherwise capture no tide at all and store 0 rows.
  * `templateUrl` is a net-flow-ticks URL observed at page load whose `date`
- * param is swapped for `date`; page.request shares the context cookies, so
- * the call is authenticated. Non-blocking — logs a warning on any failure.
+ * param is swapped for `date` and whose `market_day_timeframe` is widened to
+ * MARKET_TIDE_LOOKBACK_DAYS so the response spans the last ~month — any date
+ * within that window then has its own session present (older dates still come
+ * back without it and store nothing). page.request shares the context cookies,
+ * so the call is authenticated. Non-blocking — logs a warning on any failure.
  */
 export async function captureTideForDate(
   page: Page,
@@ -118,9 +134,15 @@ export async function captureTideForDate(
     );
     return;
   }
-  const url = /[?&]date=/.test(templateUrl)
+  // Swap the date param, then widen market_day_timeframe so the response spans
+  // the last ~month of sessions (the endpoint ignores `date` and returns the
+  // last market_day_timeframe days — see MARKET_TIDE_LOOKBACK_DAYS).
+  const withDate = /[?&]date=/.test(templateUrl)
     ? templateUrl.replace(/([?&]date=)[^&]*/, `$1${date}`)
     : `${templateUrl}${templateUrl.includes('?') ? '&' : '?'}date=${date}`;
+  const url = /[?&]market_day_timeframe=/.test(withDate)
+    ? withDate.replace(/([?&]market_day_timeframe=)[^&]*/, `$1${MARKET_TIDE_LOOKBACK_DAYS}`)
+    : `${withDate}&market_day_timeframe=${MARKET_TIDE_LOOKBACK_DAYS}`;
   try {
     const resp = await page.request.get(url);
     if (!resp.ok()) {
