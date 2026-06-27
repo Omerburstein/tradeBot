@@ -1,6 +1,21 @@
 import { getDb, isRthInstant, MAX_ROWS_PER_INSERT } from './client.js';
 import { logger } from '../scraper/core/logger.js';
 
+/**
+ * Master kill-switch for spot writes — DISABLED for now.
+ *
+ * UW's API exposes no historical intraday SPX that matches the Periscope price
+ * chart for a backfilled date: the only date-respecting source
+ * (index_candles/SPX/5m?interval) is a coarser, time-shifted series whose
+ * open/close don't equal the chart's, and every 1-minute / date-param endpoint
+ * ignores the requested day and returns only the live session. So backfilled
+ * spot can't be made chart-accurate. Until we decide how to handle that, skip
+ * spot writes entirely (the insert logic below is intact — flip this to `true`
+ * to re-enable). Live-tick spot reads the page header, which DOES match the
+ * chart, so this can be re-enabled for live-only capture later.
+ */
+const SPOT_WRITES_ENABLED = false;
+
 const CREATE_SPOT_PRICES_TABLE =
   `CREATE TABLE IF NOT EXISTS spot_prices (` +
   `captured_at TIMESTAMPTZ NOT NULL, ` +
@@ -14,6 +29,7 @@ export async function insertSpotPrice(
   expiry: string,
   spot: number,
 ): Promise<void> {
+  if (!SPOT_WRITES_ENABLED) return;
   if (!isRthInstant(capturedAt)) return;
 
   const sql = getDb();
@@ -32,6 +48,13 @@ export async function insertSpotPrice(
 export async function insertSpotPrices(
   spotsAll: ReadonlyArray<{ capturedAt: string; expiry: string; spot: number }>,
 ): Promise<number> {
+  if (!SPOT_WRITES_ENABLED) {
+    logger.info(
+      { received: spotsAll.length },
+      'insertSpotPrices: SKIPPED — spot writes disabled (SPOT_WRITES_ENABLED=false)',
+    );
+    return 0;
+  }
   const spots = spotsAll.filter((s) => isRthInstant(s.capturedAt));
   const droppedByRth = spotsAll.filter((s) => !isRthInstant(s.capturedAt));
   logger.info(
