@@ -5,6 +5,7 @@
     "tick": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/index.ts",
     "read-all": "node --env-file=.env --import=tsx/esm scraper/tools/read-all.ts",
     "probe": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/tools/probe.ts",
+    "probe:candles": "node --env-file=.env --import=tsx/esm scraper/tools/probe-candles.ts",
     "discover": "node --env-file=.env --import=tsx/esm scraper/tools/discover.ts",
     "test:unit": "node --import=tsx/esm scraper/tests/schedule.test.ts",
     "test:integration": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/tests/integration.test.ts",
