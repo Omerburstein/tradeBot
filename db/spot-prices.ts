@@ -1,4 +1,4 @@
-import { getDb, isRthRow, MAX_ROWS_PER_INSERT } from './client.js';
+import { getDb, isRthInstant, MAX_ROWS_PER_INSERT } from './client.js';
 import { logger } from '../scraper/core/logger.js';
 
 const CREATE_SPOT_PRICES_TABLE =
@@ -14,7 +14,7 @@ export async function insertSpotPrice(
   expiry: string,
   spot: number,
 ): Promise<void> {
-  if (!isRthRow(capturedAt)) return;
+  if (!isRthInstant(capturedAt)) return;
 
   const sql = getDb();
   await sql(CREATE_SPOT_PRICES_TABLE, []);
@@ -29,8 +29,8 @@ export async function insertSpotPrice(
 export async function insertSpotPrices(
   spotsAll: ReadonlyArray<{ capturedAt: string; expiry: string; spot: number }>,
 ): Promise<number> {
-  const spots = spotsAll.filter((s) => isRthRow(s.capturedAt));
-  const droppedByRth = spotsAll.filter((s) => !isRthRow(s.capturedAt));
+  const spots = spotsAll.filter((s) => isRthInstant(s.capturedAt));
+  const droppedByRth = spotsAll.filter((s) => !isRthInstant(s.capturedAt));
   logger.info(
     {
       received: spotsAll.length,

@@ -1,12 +1,12 @@
 import type { MarketTideRow } from '../scraper/core/types.js';
-import { getDb, isRthRow, MAX_ROWS_PER_INSERT } from './client.js';
+import { getDb, isRthInstant, MAX_ROWS_PER_INSERT } from './client.js';
 import { logger } from '../scraper/core/logger.js';
 
 export async function insertMarketTide(
   rowsAll: ReadonlyArray<MarketTideRow>,
 ): Promise<number> {
-  const rows = rowsAll.filter((r) => isRthRow(r.capturedAt));
-  const droppedByRth = rowsAll.filter((r) => !isRthRow(r.capturedAt));
+  const rows = rowsAll.filter((r) => isRthInstant(r.capturedAt));
+  const droppedByRth = rowsAll.filter((r) => !isRthInstant(r.capturedAt));
   logger.info(
     {
       received: rowsAll.length,
