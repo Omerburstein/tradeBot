@@ -1,103 +1,99 @@
 /**
- * Candle/tick probe — for one ET date, dumps BOTH intraday SPX price sources
- * so we can see which one matches the UW price chart and whether it respects
- * the `date` param (i.e. is usable for backfill):
+ * Chart-source finder. Drives the Periscope chart to CANDLE_DATE and captures
+ * EVERY JSON response, so we can identify exactly which endpoint feeds the
+ * price candles for a historical day (one_minute_ticks ignores its date param;
+ * index_candles/5m respects it but is mistimed, so the chart must use something
+ * else for past dates).
  *
- *   1. index_ticks/SPX/one_minute_ticks?date=…  — per-minute OHLC (what the
- *      chart's 5-min candles are aggregated from). Prints the returned session
- *      date (to expose date-param-ignoring) and the 09:30–09:45 ticks, plus the
- *      open at each 5-min boundary (the candidate spot value).
- *   2. index_candles/SPX/5m?interval=40d         — the source we currently use;
- *      sorted + filtered to the date, morning bars printed for comparison.
+ * Set TARGET_VALUE to a price you read off the chart (e.g. an open/close) and
+ * the probe reports which endpoint + JSON path contains that exact value — that
+ * endpoint IS the chart's source. Without it, prints a summary of every
+ * candle/tick endpoint seen for the date.
  *
  * No DB writes. Run:
- *   CANDLE_DATE=2026-05-26 npm run probe:candles
+ *   CANDLE_DATE=2026-05-26 TARGET_VALUE=7513.68 npm run probe:candles
  */
 import { UW_PERISCOPE_URL } from '../core/config.js';
 import { logger } from '../core/logger.js';
 import { withBrowser } from '../scrape/browser.js';
 import { waitForChartReady, clickZoomOut } from '../scrape/chart.js';
-import { etDateOf } from '../scrape/api-transforms.js';
-import type { ApiIntradayCandle, ApiSpxTickResponse } from '../scrape/api-types.js';
-
-const ORIGIN = 'https://phx.unusualwhales.com';
-const FIVE_MIN_MS = 5 * 60 * 1000;
-
-/** ET HH:MM:SS of a UTC instant. */
-function etClock(d: Date): string {
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  }).format(d);
-}
+import { walkDateToTarget } from '../scrape/navigation.js';
 
 const targetDate = (process.env.CANDLE_DATE ?? '').trim();
+const targetValue = (process.env.TARGET_VALUE ?? '').trim();
 if (!targetDate) {
   logger.error('set CANDLE_DATE=YYYY-MM-DD (ET) — e.g. CANDLE_DATE=2026-05-26');
   process.exit(1);
 }
 
+/** Find JSON paths where a value equals `needle` (string-compared, tolerant of
+ *  numeric vs string). Returns up to `cap` dotted paths. */
+function findValuePaths(node: unknown, needle: string, cap = 8, path = '$'): string[] {
+  const hits: string[] = [];
+  const visit = (n: unknown, p: string) => {
+    if (hits.length >= cap) return;
+    if (n === null || n === undefined) return;
+    if (typeof n === 'object') {
+      for (const [k, v] of Object.entries(n as Record<string, unknown>)) {
+        visit(v, Array.isArray(n) ? `${p}[${k}]` : `${p}.${k}`);
+        if (hits.length >= cap) return;
+      }
+      return;
+    }
+    if (String(n) === needle) hits.push(p);
+  };
+  visit(node, path);
+  return hits;
+}
+
 await withBrowser(async (_browser, page) => {
-  logger.info({ url: UW_PERISCOPE_URL, targetDate }, 'probe-candles: navigating');
+  const captured: Array<{ url: string; body: unknown }> = [];
+  page.on('response', (resp) => {
+    const ct = resp.headers()['content-type'] ?? '';
+    if (!ct.includes('json')) return;
+    const url = resp.url();
+    resp.json().then((body) => captured.push({ url, body })).catch(() => undefined);
+  });
+
+  logger.info({ url: UW_PERISCOPE_URL, targetDate, targetValue: targetValue || null }, 'probe: navigating');
   await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
   await waitForChartReady(page);
   await clickZoomOut(page);
 
-  // ── Source 1: one_minute_ticks (chart source) ──
-  const tickUrl = `${ORIGIN}/api/index_ticks/SPX/one_minute_ticks?date=${targetDate}`;
-  const tickResp = await page.request.get(tickUrl);
-  if (tickResp.ok()) {
-    const body = (await tickResp.json()) as ApiSpxTickResponse;
-    const data = body.data ?? [];
-    const firstET = data[0] ? etDateOf(new Date(data[0].start_time)) : null;
-    logger.info(
-      {
-        requestedDate: targetDate,
-        returnedSessionDate: firstET,
-        respectsDate: firstET === targetDate,
-        ticks: data.length,
-        firstStart: data[0]?.start_time ?? null,
-        lastStart: data[data.length - 1]?.start_time ?? null,
-      },
-      'one_minute_ticks: SUMMARY (respectsDate=false ⇒ latest-session only, no backfill)',
-    );
-    // Morning ticks 09:30–09:45 + the open at each 5-min boundary.
-    for (const t of data) {
-      const d = new Date(t.start_time);
-      const et = etClock(d);
-      if (et < '09:30:00' || et > '09:45:00') continue;
-      const isBoundary = d.getUTCMinutes() % 5 === 0;
-      logger.info(
-        { startET: et, open: t.open, close: t.close, high: t.high, low: t.low, fiveMinBoundary: isBoundary, spotIfBoundary: isBoundary ? t.open : null },
-        'one_minute_ticks bar',
-      );
-    }
-  } else {
-    logger.warn({ status: tickResp.status() }, 'one_minute_ticks fetch non-OK');
+  // Drive the chart to the target date — this fires whatever endpoint the chart
+  // uses to load that day's candles.
+  captured.length = 0;
+  logger.info({ targetDate }, 'probe: walking chart to date');
+  await walkDateToTarget(page, targetDate);
+  await page.waitForLoadState('networkidle').catch(() => undefined);
+  await page.waitForTimeout(3_000);
+
+  logger.info({ responses: captured.length }, 'probe: captured responses after date change');
+
+  // List every candle/tick/price-ish endpoint seen.
+  for (const { url, body } of captured) {
+    if (!/candle|tick|price|ohlc|chart|flow|index/i.test(url)) continue;
+    const b = body as Record<string, unknown>;
+    const data = (b?.data ?? b) as unknown;
+    const len = Array.isArray(data) ? data.length : null;
+    logger.info({ url, rows: len, topKeys: b && typeof b === 'object' ? Object.keys(b).slice(0, 6) : null }, 'candle/tick endpoint');
   }
 
-  // ── Source 2: index_candles/5m (current source) ──
-  const candUrl = `${ORIGIN}/api/index_candles/SPX/5m?interval=40d`;
-  const candResp = await page.request.get(candUrl);
-  if (candResp.ok()) {
-    const body = (await candResp.json()) as { data?: ApiIntradayCandle[] };
-    const forDate = (body.data ?? [])
-      .filter((c) => etDateOf(new Date(c.start)) === targetDate)
-      .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-    logger.info({ targetDate, candlesForDate: forDate.length }, 'index_candles/5m: SUMMARY');
-    for (const c of forDate) {
-      const et = etClock(new Date(c.start));
-      if (et < '09:30:00' || et > '09:50:00') continue;
-      const snapped = new Date(Math.round(new Date(c.start).getTime() / FIVE_MIN_MS) * FIVE_MIN_MS);
-      logger.info(
-        { startET: et, snappedET: etClock(snapped), o: c.o, h: c.h, l: c.l, c: c.c },
-        'index_candles/5m bar',
+  // If a target value was given, report which endpoint(s) contain it.
+  if (targetValue) {
+    let found = false;
+    for (const { url, body } of captured) {
+      const paths = findValuePaths(body, targetValue);
+      if (paths.length > 0) {
+        found = true;
+        logger.info({ url, paths }, `>>> TARGET_VALUE ${targetValue} FOUND — likely the chart source`);
+      }
+    }
+    if (!found) {
+      logger.warn(
+        { targetValue },
+        'TARGET_VALUE not found in any captured response — try a different chart value, or the chart may format/round it (paste a few exact on-chart numbers)',
       );
     }
-  } else {
-    logger.warn({ status: candResp.status() }, 'index_candles/5m fetch non-OK');
   }
 });
