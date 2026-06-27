@@ -93,25 +93,37 @@ export function isInRth(d: Date): boolean {
   return minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight <= 16 * 60;
 }
 
+/** ET market open (09:30) in minutes-since-midnight — the lower bound for the
+ *  5-min instant datasets (spot, Market Tide), whose first points are 09:30
+ *  and 09:35. */
+export const MARKET_OPEN_MIN = 9 * 60 + 30;
+
+/** ET end of the first 10-min Greek slot (09:40) — the lower bound for the
+ *  Greek/position snapshots, whose captured_at is the slot END. */
+export const FIRST_GREEK_SLOT_END_MIN = 9 * 60 + 40;
+
 /**
  * Returns true when a captured slot's END time (its captured_at instant)
- * belongs to the data we persist: Mon-Fri, 09:40-16:00 ET inclusive.
- * DST-aware.
+ * belongs to the data we persist: Mon-Fri, up to 16:00 ET inclusive,
+ * DST-aware. The lower bound depends on the dataset's cadence:
  *
- * This is STRICTER than `isInRth`: it also excludes the opening
- * 09:20-09:30 slot (which ends at 09:30 and straddles the bell). The
- * first persisted slot is therefore 09:30-09:40 (ends 09:40) and the
- * last is 15:50-16:00 (ends 16:00). Premarket and postmarket slots are
- * excluded as well.
+ *   - Greeks / positions (10-min slots, captured_at = slot END) → 09:40,
+ *     excluding the opening 09:20-09:30 slot that straddles the bell. This is
+ *     the default (`FIRST_GREEK_SLOT_END_MIN`).
+ *   - Spot / Market Tide (5-min instants) → pass `MARKET_OPEN_MIN` (09:30) so
+ *     the 09:30 and 09:35 points are kept — they're real prices at the bell,
+ *     not a straddling 10-min slot.
  *
- * Used as the single retention gate across every persistence path —
- * live tick, single-date backfill, range backfill, walk-back — so
+ * Used as the single retention gate across every persistence path so
  * out-of-window slots are dropped no matter which path produced them.
  */
-export function isPersistableSlot(d: Date): boolean {
+export function isPersistableSlot(
+  d: Date,
+  lowerBoundMin: number = FIRST_GREEK_SLOT_END_MIN,
+): boolean {
   const { weekday, minutesSinceMidnight } = etParts(d);
   if (weekday === 'Sat' || weekday === 'Sun') return false;
-  return minutesSinceMidnight >= 9 * 60 + 40 && minutesSinceMidnight <= 16 * 60;
+  return minutesSinceMidnight >= lowerBoundMin && minutesSinceMidnight <= 16 * 60;
 }
 
 /**
