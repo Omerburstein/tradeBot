@@ -71,6 +71,23 @@ export function checkStopLoss(
 }
 
 /**
+ * The fixed take-profit distance in SPX points: stopLossPoints × riskRewardRatio.
+ * Single source of truth for both the exit check and the min-TP entry gate.
+ */
+export function takeProfitTargetPoints(config: AlgoConfig): number {
+  return config.risk.stopLossPoints * config.risk.riskRewardRatio;
+}
+
+/**
+ * Whether a trade's take-profit target clears the configured minimum (default
+ * 10 pts). Entries below the floor are skipped — the edge is too thin to cover
+ * round-trip cost/slippage. See {@link RiskParams.minTakeProfitPoints}.
+ */
+export function meetsMinTakeProfit(config: AlgoConfig): boolean {
+  return takeProfitTargetPoints(config) >= config.risk.minTakeProfitPoints;
+}
+
+/**
  * Check whether the fixed profit target has been reached.
  *
  * The target sits at stopLossPoints × riskRewardRatio from entry, enforcing
@@ -89,7 +106,7 @@ export function checkTakeProfit(
   const { risk } = config;
   const direction = state.position === 'long' ? 1 : -1;
   const pnlPoints = (currentSpot - state.entryPrice) * direction;
-  const targetPoints = risk.stopLossPoints * risk.riskRewardRatio;
+  const targetPoints = takeProfitTargetPoints(config);
 
   if (pnlPoints >= targetPoints) {
     return {

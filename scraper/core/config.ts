@@ -14,7 +14,35 @@ function requireEnv(name: string): string {
   return value;
 }
 
-export const DATABASE_URL = requireEnv('DATABASE_URL');
+/**
+ * Deployment environment. `staging` swaps the DB target to
+ * STAGING_DATABASE_URL so test ticks never touch the production Neon
+ * branch. Anything else (default) is treated as production.
+ */
+export const APP_ENV = process.env.APP_ENV ?? 'production';
+export const IS_STAGING = APP_ENV === 'staging';
+
+/**
+ * Resolve the Neon connection string for the active environment.
+ *   - production: DATABASE_URL (required, as before)
+ *   - staging:    STAGING_DATABASE_URL (required when APP_ENV=staging)
+ * Keeping them in separate vars means a stray `APP_ENV=staging` can never
+ * silently fall back to the prod URL — a missing staging URL fails loudly.
+ */
+function resolveDatabaseUrl(): string {
+  if (IS_STAGING) {
+    const staging = process.env.STAGING_DATABASE_URL;
+    if (staging === undefined || staging.trim() === '') {
+      throw new Error(
+        'APP_ENV=staging but STAGING_DATABASE_URL is unset — refusing to fall back to production DATABASE_URL',
+      );
+    }
+    return staging;
+  }
+  return requireEnv('DATABASE_URL');
+}
+
+export const DATABASE_URL = resolveDatabaseUrl();
 // SENTRY_DSN is optional — when empty, index.ts skips Sentry.init and
 // errors land on stdout only. Useful for local dev runs without
 // Sentry credentials.

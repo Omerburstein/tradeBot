@@ -31,8 +31,10 @@ import {
   checkTimeGates,
   computePositionSize,
   createFlatState,
+  meetsMinTakeProfit,
   recordEntry,
   recordExit,
+  takeProfitTargetPoints,
   updateTradeMetrics,
 } from './risk-manager.js';
 import { computeScore } from './score-engine.js';
@@ -152,6 +154,13 @@ export class SignalGenerator {
     const dailyLimits = checkDailyLimits(this.state, config);
     if (dailyLimits.blocked) {
       return this.makeSignal('hold', score, cone, snapshot, 'low', `daily limit: ${dailyLimits.reason}`);
+    }
+
+    // Minimum take-profit gate: skip entries whose target is too small to be
+    // worth the round-trip (TODO #5 — floor of risk.minTakeProfitPoints).
+    if (!meetsMinTakeProfit(config)) {
+      return this.makeSignal('hold', score, cone, snapshot, 'low',
+        `take-profit target ${takeProfitTargetPoints(config).toFixed(1)} pts < ${config.risk.minTakeProfitPoints} pt minimum`);
     }
 
     return this.checkEntries(score, cone, snapshot);
