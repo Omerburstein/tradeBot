@@ -122,6 +122,8 @@ All scraping paths — the live tick (`panels.ts`) and every backfill path (`orc
 | `UW_PERISCOPE_URL` | Periscope page URL (default: `https://unusualwhales.com/dashboard/4`) |
 | `LOG_LEVEL` | Pino log level (default: `info`) |
 | `SENTRY_DSN` | If unset, errors go to stdout only |
+| `APP_ENV` | `staging` routes all DB writes to `STAGING_DATABASE_URL` instead of `DATABASE_URL`. Any other value (default) = production. |
+| `STAGING_DATABASE_URL` | Neon staging-branch connection string. **Required** when `APP_ENV=staging`; the scraper fails loudly rather than falling back to prod. |
 
 ### Railway Deployment
 | Var | Purpose |

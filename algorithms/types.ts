@@ -133,6 +133,12 @@ export interface RiskParams {
    * a 1:3 risk:reward (risk 1 point to make 3).
    */
   riskRewardRatio: number;
+  /**
+   * Minimum take-profit distance (SPX points) required to take a trade. Entries
+   * whose target (stopLossPoints × riskRewardRatio) falls below this floor are
+   * rejected — the edge is too small to be worth the round-trip cost/slippage.
+   */
+  minTakeProfitPoints: number;
   /** Profit threshold (SPX pts) to activate trailing stop. */
   trailingStopActivation: number;
   /** Distance (SPX pts) the trailing stop trails behind HWM. */
@@ -251,6 +257,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     maxRiskPerTrade: 0.01,
     stopLossPoints: 10,
     riskRewardRatio: 3, // 1:3 risk:reward → take-profit at 30 pts
+    minTakeProfitPoints: 10, // skip trades whose TP target is under 10 pts
     trailingStopActivation: 5,
     trailingStopDistance: 7,
     maxDailyLoss: 0.02,

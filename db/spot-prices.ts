@@ -14,7 +14,7 @@ import { logger } from '../scraper/core/logger.js';
  * to re-enable). Live-tick spot reads the page header, which DOES match the
  * chart, so this can be re-enabled for live-only capture later.
  */
-const SPOT_WRITES_ENABLED = false;
+const SPOT_WRITES_ENABLED = true;
 
 const CREATE_SPOT_PRICES_TABLE =
   `CREATE TABLE IF NOT EXISTS spot_prices (` +

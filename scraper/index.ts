@@ -84,7 +84,7 @@ if (rawSentryDsn != null && rawSentryDsn.trim() !== '') {
 }
 
 // Now safe to load config (and capture its throws via the Sentry above).
-const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow } =
+const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow, APP_ENV, IS_STAGING } =
   await import('./core/config.js');
 const { expectedWindowEnd, parseSlotEnd, isPersistableSlot } = await import('./core/dates.js');
 const { insertSnapshots, insertSpotPrice, insertPositions } = await import('../db/index.js');
@@ -481,7 +481,7 @@ async function gracefulExit(code: number): Promise<void> {
   setTimeout(() => process.exit(code), 2_000).unref();
 }
 
-logger.info('periscope-scraper starting');
+logger.info({ appEnv: APP_ENV, staging: IS_STAGING }, 'periscope-scraper starting');
 
 const forceTick =
   (process.env.FORCE_TICK ?? '').trim().toLowerCase() === 'true';
