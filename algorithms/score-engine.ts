@@ -2,12 +2,19 @@
  * Score engine: computes the composite directional score from a snapshot.
  *
  * Factors (user requirements):
- *   1. Gamma exposure (GEX) — directional gamma pressure per strike
+ *   1. Gamma exposure (GEX) — directional gamma pressure per strike. The gamma
+ *      LEVEL is taken as an absolute magnitude: + and - gamma both add
+ *      same-direction pressure (no netting between opposite-sign strikes);
+ *      direction comes from the strike's position vs spot. Positive gamma is
+ *      weighted slightly higher than negative via positiveGammaBias.
  *   2. Net MM positions — directional positioning pressure per strike, but
  *      only where gamma is strong at the SAME strike, and compressed
- *      non-linearly so an extremely large position print can't dominate
- *   3. dGamma/dt — rate of change of gamma across successive snapshots
- *   4. dPositions/dt — rate of change of net MM positions (same gating)
+ *      non-linearly so an extremely large position print can't dominate. The
+ *      positions LEVEL is also taken as an absolute magnitude (no netting);
+ *      direction comes from position vs spot (no positive bias — gamma only).
+ *   3. dGamma/dt — rate of change of gamma across successive snapshots (signed:
+ *      a delta's sign is momentum, so it is NOT taken absolute)
+ *   4. dPositions/dt — rate of change of net MM positions (same gating, signed)
  *   5. Distance weighting — further strikes contribute MORE score
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
@@ -72,10 +79,12 @@ export function computeScore(
       1.0 + config.distanceWeightSpan * Math.pow(absDistance / config.strikeWindow, config.pDistance);
 
     // Factor 1: Gamma exposure (GEX)
-    // Positive gamma above spot → MM sells into rallies (resistance, pulls price up as magnet)
-    // Positive gamma below spot → MM buys dips (support, pulls price down as magnet)
-    // Net effect: gamma * sign gives directional bias, shaped by pGamma.
-    gexRaw += signedPow(s.gamma, config.pGamma) * sign * dWeight;
+    // Absolute magnitude: + and - gamma both add same-direction pressure (no
+    // netting between opposite-sign strikes); direction comes from `sign`
+    // (strike position vs spot). Positive gamma is weighted slightly higher
+    // than negative via positiveGammaBias. Magnitude shaped non-linearly by pGamma.
+    const gammaBias = s.gamma >= 0 ? config.positiveGammaBias : 1.0;
+    gexRaw += Math.pow(Math.abs(s.gamma), config.pGamma) * gammaBias * sign * dWeight;
 
     // Factor 2: Net MM positions exposure — gated and weighted by gamma.
     // A strike's positions only count when its gamma is strong relative to
@@ -86,7 +95,10 @@ export function computeScore(
     const positionsCounts = gammaStrength >= config.positionsGammaGate;
 
     if (positionsCounts) {
-      positionsRaw += signedPow(s.positions, config.pPositions) * gammaStrength * sign * dWeight;
+      // Absolute magnitude (no netting): position size adds pressure regardless
+      // of its own sign; direction comes from `sign`. No positive bias here —
+      // the bias is gamma-only.
+      positionsRaw += Math.pow(Math.abs(s.positions), config.pPositions) * gammaStrength * sign * dWeight;
     }
 
     // Factors 3 & 4: rate-of-change of gamma and positions across snapshots
