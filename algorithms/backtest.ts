@@ -260,6 +260,26 @@ function fmtUsd(n: number): string {
 }
 
 /**
+ * Render a UTC instant as Eastern Time wall-clock ("YYYY-MM-DD HH:MM ET"),
+ * matching the trading time the UW dashboard shows. Display-only — the stored
+ * entry/exit times stay absolute UTC (the look-ahead guard + time-gates rely
+ * on that). Offset is resolved per-instant via Intl, so DST is handled.
+ */
+function fmtEt(utcIso: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(utcIso));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} ET`;
+}
+
+/**
  * Print every trade taken: entry/exit time + price, direction, size, the
  * stop/target levels implied at entry, realized PnL, and the exit reason.
  * (TODO #11 — full trade detail.)
@@ -273,7 +293,7 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
   for (const t of trades) {
     const dir = t.direction.padEnd(5);
     console.log(
-      `  ${t.entryTime.slice(0, 16)} → ${t.exitTime.slice(0, 16)}  ${dir}  ${t.contracts}x  ` +
+      `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  ${t.contracts}x  ` +
         `entry=${t.entryPrice.toFixed(2)} exit=${t.exitPrice.toFixed(2)} ` +
         `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)}  ` +
         `${fmtUsd(t.pnl).padStart(11)}  ${t.reason}`,
