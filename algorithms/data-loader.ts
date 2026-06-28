@@ -8,7 +8,7 @@
  */
 
 import { getDb } from '../db/index.js';
-import type { Snapshot, StrikeData } from './types.js';
+import type { ConeEndpoints, Snapshot, StrikeData } from './types.js';
 
 /**
  * Load snapshots for a single trading day, joining gamma/charm/vanna
@@ -36,8 +36,9 @@ export async function loadDay(
 
   if (rows.length === 0) return [];
 
-  // Step 2: Try to get spot prices from dedicated table
+  // Step 2: Try to get spot prices from dedicated table, plus the day's cone
   const spotRows = await loadSpotPrices(date);
+  const cone = await loadCone(date);
 
   // Step 3: Group rows by captured_at
   const byTime = new Map<string, { timeframe: string; expiry: string; strikes: Map<number, Partial<StrikeData>> }>();
@@ -93,6 +94,7 @@ export async function loadDay(
       timeframe: group.timeframe,
       spot,
       strikes: strikes.sort((a, b) => a.strike - b.strike),
+      cone,
     });
   }
 
@@ -126,6 +128,37 @@ async function loadSpotPrices(date: string): Promise<Map<string, number>> {
   }
 
   return map;
+}
+
+/**
+ * Load the day's expected-move cone from the `cone_snapshots` table.
+ * Returns the three stored points (apex + two end-of-day endpoints) or `null`
+ * when no cone was captured for the day (or the table doesn't exist yet).
+ *
+ * Matched by ET date — mirrors the `AT TIME ZONE 'America/New_York'` predicate
+ * the scraper uses in `db/cone.ts`, since the cone row is keyed at 09:30 ET.
+ */
+export async function loadCone(date: string): Promise<ConeEndpoints | null> {
+  const sql = getDb();
+  try {
+    const rows = await sql(
+      `SELECT spx_open, cone_upper, cone_lower
+       FROM cone_snapshots
+       WHERE (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+       LIMIT 1`,
+      [date],
+    );
+    if (rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      spxOpen: Number(r.spx_open),
+      coneUpper: Number(r.cone_upper),
+      coneLower: Number(r.cone_lower),
+    };
+  } catch {
+    // cone_snapshots table may not exist yet — cone simply unavailable.
+    return null;
+  }
 }
 
 /**
