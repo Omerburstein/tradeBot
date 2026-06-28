@@ -15,23 +15,29 @@
  * used for optimization and an out-of-sample (test) slice the winner is
  * reported on — if test performance collapses, the config is overfit.
  *
+ * Capital account (TODO #9): every config is replayed against a seeded account
+ * (default $100k, fail at $98k). A config whose run hits the floor is a failure
+ * and is rejected outright (score = -Infinity) — its params must change.
+ *
  * Usage:
  *   TUNE_START=2025-05-10 TUNE_END=2025-06-15 npm run tune
  *
  * Optional env:
  *   TUNE_ITERS=400          random-search samples (default 300)
  *   TUNE_REFINE=120         local-refinement samples (default 100)
- *   TUNE_OBJECTIVE=sharpe   sharpe | totalPnl | profitFactor (default sharpe)
+ *   TUNE_OBJECTIVE=totalPnl sharpe | totalPnl | profitFactor (default totalPnl)
  *   TUNE_TRAIN_FRAC=0.7     fraction of days used for training (default 0.7)
  *   TUNE_MIN_TRADES=15      configs with fewer train trades are rejected
  *   TUNE_SEED=42            reproducible runs (default: time-seeded)
+ *   INITIAL_CAPITAL=100000  seed capital for each run (default 100000)
+ *   EQUITY_FLOOR=98000      hard equity floor; runs that hit it fail (default 98000)
  */
 
 import pino from 'pino';
 import { loadDateRange } from './data-loader.js';
-import { simulate } from './backtest.js';
-import type { AlgoConfig, BacktestResult, Snapshot } from './types.js';
-import { DEFAULT_CONFIG } from './types.js';
+import { simulate, printTradeLog, printSummary } from './backtest.js';
+import type { AlgoConfig, BacktestResult, EquitySettings, Snapshot } from './types.js';
+import { DEFAULT_CONFIG, DEFAULT_EQUITY } from './types.js';
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
@@ -114,6 +120,8 @@ export interface TuneOptions {
   minTrades?: number;
   seed?: number;
   space?: Record<string, ParamRange>;
+  /** Capital-account settings applied to every config's replay. Defaults to {@link DEFAULT_EQUITY}. */
+  equity?: EquitySettings;
 }
 
 export interface TuneCandidate {
@@ -131,12 +139,13 @@ export interface TuneResult {
 }
 
 export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
-  const objective = opts.objective ?? 'sharpe';
+  const objective = opts.objective ?? 'totalPnl';
   const iterations = opts.iterations ?? 300;
   const refineIterations = opts.refineIterations ?? 100;
   const trainFraction = opts.trainFraction ?? 0.7;
   const minTrades = opts.minTrades ?? 15;
   const space = opts.space ?? DEFAULT_SEARCH_SPACE;
+  const equity = opts.equity ?? DEFAULT_EQUITY;
   const rng = makeRng(opts.seed ?? Date.now());
 
   log.info({ startDate: opts.startDate, endDate: opts.endDate }, 'loading snapshots for tuning');
@@ -153,9 +162,11 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
   );
 
   const evaluate = (config: AlgoConfig): TuneCandidate => {
-    const result = simulate(train, config);
-    // Reject configs that barely trade — their metrics aren't meaningful.
-    const score = result.trades.length < minTrades ? -Infinity : objectiveValue(result, objective);
+    const result = simulate(train, config, undefined, equity);
+    // Reject configs that blow the account (TODO #9) or barely trade — their
+    // metrics aren't meaningful / the run is a declared failure.
+    const usable = !result.failed && result.trades.length >= minTrades;
+    const score = usable ? objectiveValue(result, objective) : -Infinity;
     return { config, score, train: result };
   };
 
@@ -181,7 +192,7 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
     .slice(0, 10);
 
   // Out-of-sample evaluation of the winner.
-  const testResult = simulate(test, best.config);
+  const testResult = simulate(test, best.config, undefined, equity);
 
   return {
     best: best.config,
@@ -311,10 +322,14 @@ if (isMain) {
     endDate,
     iterations: num(process.env.TUNE_ITERS, 300),
     refineIterations: num(process.env.TUNE_REFINE, 100),
-    objective: (process.env.TUNE_OBJECTIVE as ObjectiveName) ?? 'sharpe',
+    objective: (process.env.TUNE_OBJECTIVE as ObjectiveName) ?? 'totalPnl',
     trainFraction: num(process.env.TUNE_TRAIN_FRAC, 0.7),
     minTrades: num(process.env.TUNE_MIN_TRADES, 15),
     seed: process.env.TUNE_SEED ? Number(process.env.TUNE_SEED) : undefined,
+    equity: {
+      initialCapital: num(process.env.INITIAL_CAPITAL, DEFAULT_EQUITY.initialCapital),
+      equityFloor: num(process.env.EQUITY_FLOOR, DEFAULT_EQUITY.equityFloor),
+    },
   })
     .then((res) => {
       if (!res) {
@@ -324,11 +339,12 @@ if (isMain) {
 
       console.log('\n=== TUNING COMPLETE ===');
       console.log(`Configs evaluated: ${res.evaluated}`);
-      console.log(`Objective:         ${process.env.TUNE_OBJECTIVE ?? 'sharpe'}`);
+      console.log(`Objective:         ${process.env.TUNE_OBJECTIVE ?? 'totalPnl'}`);
 
       const fmt = (r: BacktestResult) =>
         `trades=${r.trades.length} pnl=$${r.totalPnl.toFixed(0)} win=${(r.winRate * 100).toFixed(0)}% ` +
-        `pf=${r.profitFactor.toFixed(2)} sharpe=${r.sharpe.toFixed(2)} maxDD=$${r.maxDrawdown.toFixed(0)}`;
+        `pf=${r.profitFactor.toFixed(2)} sharpe=${r.sharpe.toFixed(2)} maxDD=$${r.maxDrawdown.toFixed(0)} ` +
+        `eq=$${r.finalEquity.toFixed(0)} ${r.failed ? 'FAILED' : 'OK'}`;
 
       console.log(`\nIn-sample  (train): ${fmt(res.trainResult)}`);
       console.log(`Out-sample (test):  ${fmt(res.testResult)}`);
@@ -340,6 +356,12 @@ if (isMain) {
       res.leaderboard.forEach((c, i) => {
         console.log(`  #${(i + 1).toString().padStart(2)}  score=${c.score.toFixed(3)}  ${fmt(c.train)}`);
       });
+
+      // Full trade detail + summary for the winning config (TODO #11).
+      printTradeLog(res.trainResult.trades, 'WINNING CONFIG — TRAIN TRADES');
+      printSummary(res.trainResult, 'WINNING CONFIG — TRAIN SUMMARY');
+      printTradeLog(res.testResult.trades, 'WINNING CONFIG — TEST TRADES');
+      printSummary(res.testResult, 'WINNING CONFIG — TEST SUMMARY');
     })
     .catch((e) => {
       console.error('Tuning failed:', e);

@@ -6,14 +6,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Algorithm
 
-- [x] **5. Enforce a minimum take-profit of 10 points per trade.**
-  Only take trades whose take-profit target is at least 10 points.
-  *Done: `minTakeProfitPoints` config (default 10) in `types.ts`;
-  `takeProfitTargetPoints` / `meetsMinTakeProfit` helpers in `risk-manager.ts`;
-  `signal-generator.ts` blocks entries when the target
-  (stopLossPoints × riskRewardRatio) falls below the floor.*
-
-- [ ] **6. Make next-day (1DTE) strikes less relevant than current-day (0DTE) strikes (factor ≥ 0.5).**
+- [ ] **1. Make next-day (1DTE) strikes less relevant than current-day (0DTE) strikes (factor ≥ 0.5).**
   Down-weight next-day strikes relative to current-day strikes by a factor of at
   least 0.5 (next-day counts at most half as much).
   *Context:* the scraper stores **two expiries per session** (`orchestrate.ts`
@@ -30,16 +23,8 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Training / Backtesting
 
-- [ ] **7. Train the algorithm on historical data pulled from the DB.**
-  Add a way for the algorithm to train/backtest against historical snapshots
-  read from the DB (replay the stored slots chronologically and run the strategy
-  over them).
-
-- [ ] **8. Optimize parameters to maximize profit across the data.**
-  Have the training run search/tune the strategy params so it maximizes total
-  profit over the historical dataset.
-
-- [ ] **9. Start with $100,000 capital and a hard stop-loss at $98,000.**
-  Seed each training run with $100,000 of initial capital and a $2,000 max
-  drawdown stop: if equity drops to $98,000 (i.e. $2,000 lost), the run is a
-  failure and the params must be changed.
+- [ ] **2. No look-ahead: the algo sees only the current frame and earlier ones.**
+  During backtest/training the strategy must only ever see one slot at a time
+  plus the slots that came before it — never any future data. Enforce strictly
+  causal replay (feed snapshots one `captured_at` at a time, in order) so no
+  decision can peek at slots that haven't happened yet.

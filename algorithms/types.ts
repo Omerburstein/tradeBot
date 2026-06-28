@@ -269,6 +269,31 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   },
 };
 
+// ── Capital account (backtest / training) ──
+
+/**
+ * Capital-account settings for a backtest or training run. This models the
+ * *real cash balance* and is deliberately separate from `RiskParams.accountEquity`
+ * (which only governs per-trade position sizing). A run is seeded with
+ * `initialCapital` and is declared a failure the instant realized equity touches
+ * `equityFloor` — see TODO #9.
+ */
+export interface EquitySettings {
+  /** Initial capital seeded at the start of the run (USD). */
+  initialCapital: number;
+  /** Hard equity floor: if equity ≤ this at any point, the run fails (USD). */
+  equityFloor: number;
+}
+
+/**
+ * Default training account: start at $100,000, fail if equity hits $98,000
+ * (a hard $2,000 max-drawdown stop). See TODO #9.
+ */
+export const DEFAULT_EQUITY: EquitySettings = {
+  initialCapital: 100_000,
+  equityFloor: 98_000,
+};
+
 // ── Backtest Results ──
 
 export interface TradeRecord {
@@ -278,6 +303,10 @@ export interface TradeRecord {
   exitTime: string;
   exitPrice: number;
   contracts: number;
+  /** Hard stop-loss level (SPX), computed from entry price at entry. */
+  stopPrice: number;
+  /** Take-profit target level (SPX), computed from entry price at entry. */
+  targetPrice: number;
   pnl: number;
   reason: string;
 }
@@ -292,4 +321,17 @@ export interface BacktestResult {
   maxDrawdown: number;
   sharpe: number;
   totalDays: number;
+
+  // ── Capital account (TODO #9) ──
+  /** Capital seeded at the start of the run (USD). */
+  initialCapital: number;
+  /** Equity at the end of the run = initialCapital + realized PnL of counted trades. */
+  finalEquity: number;
+  /** Lowest equity touched during the run (USD). */
+  minEquity: number;
+  /**
+   * True if equity hit `equityFloor` at any point — the run is a failure and the
+   * params must be changed. Trades after the breach are not counted.
+   */
+  failed: boolean;
 }

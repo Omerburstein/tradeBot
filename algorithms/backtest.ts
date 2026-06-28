@@ -15,10 +15,11 @@ import { SignalGenerator } from './signal-generator.js';
 import type {
   AlgoConfig,
   BacktestResult,
+  EquitySettings,
   Snapshot,
   TradeRecord,
 } from './types.js';
-import { DEFAULT_CONFIG } from './types.js';
+import { DEFAULT_CONFIG, DEFAULT_EQUITY } from './types.js';
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
@@ -26,6 +27,8 @@ export interface BacktestOptions {
   startDate: string;
   endDate: string;
   config?: AlgoConfig;
+  /** Capital-account settings (seed + kill-switch). Defaults to {@link DEFAULT_EQUITY}. */
+  equity?: EquitySettings;
 }
 
 /**
@@ -36,18 +39,19 @@ export interface BacktestOptions {
  */
 export async function runBacktest(opts: BacktestOptions): Promise<BacktestResult> {
   const config = opts.config ?? DEFAULT_CONFIG;
+  const equity = opts.equity ?? DEFAULT_EQUITY;
 
   log.info({ startDate: opts.startDate, endDate: opts.endDate }, 'loading snapshots');
   const allSnapshots = await loadDateRange(opts.startDate, opts.endDate, config.strikeWindow);
 
   if (allSnapshots.length === 0) {
     log.warn('no snapshots found in date range');
-    return emptyResult();
+    return emptyResult(equity);
   }
 
   log.info({ snapshots: allSnapshots.length }, 'snapshots loaded');
 
-  const result = simulate(allSnapshots, config, log);
+  const result = simulate(allSnapshots, config, log, equity);
 
   log.info(
     {
@@ -57,6 +61,8 @@ export async function runBacktest(opts: BacktestOptions): Promise<BacktestResult
       profitFactor: result.profitFactor.toFixed(2),
       maxDrawdown: result.maxDrawdown.toFixed(2),
       sharpe: result.sharpe.toFixed(2),
+      finalEquity: result.finalEquity.toFixed(2),
+      failed: result.failed,
       days: result.totalDays,
     },
     'backtest complete',
@@ -80,6 +86,7 @@ export function simulate(
   allSnapshots: Snapshot[],
   config: AlgoConfig,
   logger?: pino.Logger,
+  equity: EquitySettings = DEFAULT_EQUITY,
 ): BacktestResult {
   // Group snapshots by trading day (expiry)
   const byDay = new Map<string, Snapshot[]>();
@@ -96,6 +103,15 @@ export function simulate(
   const dailyPnls: number[] = [];
   const tradingDays = [...byDay.keys()].sort();
 
+  // Running capital account (TODO #9): seed at initialCapital and fail the run
+  // the instant realized equity touches the floor. The kill-switch is checked
+  // after every completed trade — intra-day, in chronological order — so trades
+  // taken after the account is dead are never counted.
+  let accountEquity = equity.initialCapital;
+  let minEquity = accountEquity;
+  let failed = false;
+  let daysProcessed = 0;
+
   for (const day of tradingDays) {
     const daySnapshots = byDay.get(day)!;
     // Passing the logger makes the generator emit an ENTRY/EXIT line per action.
@@ -105,20 +121,33 @@ export function simulate(
       generator.processSnapshot(snapshot);
     }
 
-    const finalState = generator.getState();
     const dayTrades = generator.getTrades();
-    allTrades.push(...dayTrades);
+    daysProcessed++;
 
-    const dayPnl = dayTrades.reduce((sum, t) => sum + t.pnl, 0);
+    let dayPnl = 0;
+    let dayCount = 0;
+    for (const t of dayTrades) {
+      accountEquity += t.pnl;
+      dayPnl += t.pnl;
+      dayCount++;
+      allTrades.push(t);
+      if (accountEquity < minEquity) minEquity = accountEquity;
+      if (accountEquity <= equity.equityFloor) {
+        failed = true;
+        break;
+      }
+    }
     dailyPnls.push(dayPnl);
 
     logger?.info(
-      { day, trades: dayTrades.length, pnl: dayPnl.toFixed(2), position: finalState.position },
-      'day complete',
+      { day, trades: dayCount, pnl: dayPnl.toFixed(2), equity: accountEquity.toFixed(2) },
+      failed ? `run FAILED — equity ${accountEquity.toFixed(2)} ≤ floor ${equity.equityFloor}` : 'day complete',
     );
+
+    if (failed) break;
   }
 
-  return computeMetrics(allTrades, dailyPnls, tradingDays.length);
+  return computeMetrics(allTrades, dailyPnls, daysProcessed, equity, accountEquity, minEquity, failed);
 }
 
 /**
@@ -128,9 +157,20 @@ function computeMetrics(
   trades: TradeRecord[],
   dailyPnls: number[],
   totalDays: number,
+  equity: EquitySettings,
+  finalEquity: number,
+  minEquity: number,
+  failed: boolean,
 ): BacktestResult {
+  const equityFields = {
+    initialCapital: equity.initialCapital,
+    finalEquity,
+    minEquity,
+    failed,
+  };
+
   if (trades.length === 0) {
-    return { ...emptyResult(), totalDays };
+    return { ...emptyResult(equity), totalDays, ...equityFields };
   }
 
   const wins = trades.filter((t) => t.pnl > 0);
@@ -169,6 +209,7 @@ function computeMetrics(
     maxDrawdown,
     sharpe,
     totalDays,
+    ...equityFields,
   };
 }
 
@@ -190,7 +231,7 @@ function computeSharpe(dailyPnls: number[]): number {
   return (mean / std) * Math.sqrt(252);
 }
 
-function emptyResult(): BacktestResult {
+function emptyResult(equity: EquitySettings = DEFAULT_EQUITY): BacktestResult {
   return {
     trades: [],
     totalPnl: 0,
@@ -201,7 +242,60 @@ function emptyResult(): BacktestResult {
     maxDrawdown: 0,
     sharpe: 0,
     totalDays: 0,
+    initialCapital: equity.initialCapital,
+    finalEquity: equity.initialCapital,
+    minEquity: equity.initialCapital,
+    failed: false,
   };
+}
+
+// ── Reporting (shared by the backtest CLI and the tuner) ──
+
+/** Format a signed dollar amount, e.g. `+$1500.00` / `-$500.00`. */
+function fmtUsd(n: number): string {
+  return n >= 0 ? `+$${n.toFixed(2)}` : `-$${Math.abs(n).toFixed(2)}`;
+}
+
+/**
+ * Print every trade taken: entry/exit time + price, direction, size, the
+ * stop/target levels implied at entry, realized PnL, and the exit reason.
+ * (TODO #11 — full trade detail.)
+ */
+export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void {
+  if (trades.length === 0) {
+    console.log(`\n=== ${title} ===\n  (no trades)`);
+    return;
+  }
+  console.log(`\n=== ${title} ===`);
+  for (const t of trades) {
+    const dir = t.direction.padEnd(5);
+    console.log(
+      `  ${t.entryTime.slice(0, 16)} → ${t.exitTime.slice(0, 16)}  ${dir}  ${t.contracts}x  ` +
+        `entry=${t.entryPrice.toFixed(2)} exit=${t.exitPrice.toFixed(2)} ` +
+        `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)}  ` +
+        `${fmtUsd(t.pnl).padStart(11)}  ${t.reason}`,
+    );
+  }
+}
+
+/**
+ * Print end-of-run summary stats: total PnL, trade count, win rate, average
+ * winner/loser, profit factor, and the capital-account result. (TODO #11.)
+ */
+export function printSummary(result: BacktestResult, title = 'SUMMARY'): void {
+  console.log(`\n=== ${title} ===`);
+  console.log(`Total trades:   ${result.trades.length}`);
+  console.log(`Total PnL:      ${fmtUsd(result.totalPnl)}`);
+  console.log(`Win rate:       ${(result.winRate * 100).toFixed(1)}%`);
+  console.log(`Avg win:        ${fmtUsd(result.avgWin)}`);
+  console.log(`Avg loss:       ${fmtUsd(result.avgLoss)}`);
+  console.log(`Profit factor:  ${result.profitFactor.toFixed(2)}`);
+  console.log(`Max drawdown:   $${result.maxDrawdown.toFixed(2)}`);
+  console.log(`Sharpe ratio:   ${result.sharpe.toFixed(2)}`);
+  console.log(`Initial capital: $${result.initialCapital.toFixed(2)}`);
+  console.log(`Final equity:    $${result.finalEquity.toFixed(2)}`);
+  console.log(`Min equity:      $${result.minEquity.toFixed(2)}`);
+  console.log(`Status:          ${result.failed ? 'FAILED — equity hit the floor' : 'OK'}`);
 }
 
 // ── CLI Entry Point ──
@@ -226,29 +320,21 @@ if (isMain) {
       })
       .catch((e) => console.error('  (could not query DB)', e.message));
   } else {
-    runBacktest({ startDate, endDate })
-      .then((result) => {
-        console.log('\n=== BACKTEST RESULTS ===');
-        console.log(`Period:         ${startDate} → ${endDate} (${result.totalDays} trading days)`);
-        console.log(`Total trades:   ${result.trades.length}`);
-        console.log(`Total PnL:      $${result.totalPnl.toFixed(2)}`);
-        console.log(`Win rate:       ${(result.winRate * 100).toFixed(1)}%`);
-        console.log(`Avg win:        $${result.avgWin.toFixed(2)}`);
-        console.log(`Avg loss:       $${result.avgLoss.toFixed(2)}`);
-        console.log(`Profit factor:  ${result.profitFactor.toFixed(2)}`);
-        console.log(`Max drawdown:   $${result.maxDrawdown.toFixed(2)}`);
-        console.log(`Sharpe ratio:   ${result.sharpe.toFixed(2)}`);
+    const equity: EquitySettings = {
+      initialCapital: process.env.INITIAL_CAPITAL
+        ? Number(process.env.INITIAL_CAPITAL)
+        : DEFAULT_EQUITY.initialCapital,
+      equityFloor: process.env.EQUITY_FLOOR
+        ? Number(process.env.EQUITY_FLOOR)
+        : DEFAULT_EQUITY.equityFloor,
+    };
 
-        if (result.trades.length > 0) {
-          console.log('\n=== TRADE LOG ===');
-          for (const t of result.trades) {
-            const dir = t.direction.padEnd(5);
-            const pnlStr = t.pnl >= 0 ? `+$${t.pnl.toFixed(2)}` : `-$${Math.abs(t.pnl).toFixed(2)}`;
-            console.log(
-              `  ${t.entryTime.slice(0, 16)} → ${t.exitTime.slice(0, 16)}  ${dir}  ${t.contracts}x  ${pnlStr.padStart(10)}  ${t.reason}`,
-            );
-          }
-        }
+    runBacktest({ startDate, endDate, equity })
+      .then((result) => {
+        console.log(`\nPeriod: ${startDate} → ${endDate} (${result.totalDays} trading days), ` +
+          `floor $${equity.equityFloor.toFixed(0)}`);
+        printTradeLog(result.trades);
+        printSummary(result, 'BACKTEST RESULTS');
       })
       .catch((e) => {
         console.error('Backtest failed:', e);

@@ -309,6 +309,11 @@ export class SignalGenerator {
         config.risk.pointValue,
       );
 
+      // Stop/target levels (SPX) implied by the entry fill — for the trade log.
+      const dir = this.state.position === 'long' ? 1 : -1;
+      const stopPrice = this.state.entryPrice! - dir * config.risk.stopLossPoints;
+      const targetPrice = this.state.entryPrice! + dir * takeProfitTargetPoints(config);
+
       // Record completed trade
       this.trades.push({
         direction: this.state.position as 'long' | 'short',
@@ -317,6 +322,8 @@ export class SignalGenerator {
         exitTime: snapshot.capturedAt,
         exitPrice: snapshot.spot,
         contracts: this.state.contracts,
+        stopPrice,
+        targetPrice,
         pnl: realizedPnl,
         reason: signal.reason,
       });
