@@ -24,9 +24,13 @@ export async function loadDay(
 ): Promise<Snapshot[]> {
   const sql = getDb();
 
-  // Step 1: Get all snapshot rows for this expiry date across the panels
+  // Step 1: Get all snapshot rows for this expiry date across the panels.
+  // expiry is a DATE column; cast it to text so the Neon driver returns a
+  // clean "YYYY-MM-DD" string rather than a JS Date (whose String() form is
+  // host-timezone-dependent and breaks re-casts on non-UTC machines).
   const rows = await sql(
-    `SELECT captured_at, expiry, panel, strike, value, timeframe
+    `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at,
+            expiry::text AS expiry, panel, strike, value, timeframe
      FROM periscope_snapshots
      WHERE expiry = $1
        AND panel IN ('gamma', 'charm', 'vanna', 'positions')
@@ -114,7 +118,8 @@ async function loadSpotPrices(date: string): Promise<Map<string, number>> {
 
   try {
     const rows = await sql(
-      `SELECT captured_at, spot
+      // Same captured_at rendering as loadDay so the join keys match exactly.
+      `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at, spot
        FROM spot_prices
        WHERE date = $1
        ORDER BY captured_at`,
@@ -195,9 +200,12 @@ export async function loadDateRange(
 ): Promise<Snapshot[]> {
   const sql = getDb();
 
-  // Get distinct trading days in range that have data
+  // Get distinct trading days in range that have data. Cast expiry to text
+  // (see loadDay) so `day` is a plain "YYYY-MM-DD" string when fed back into
+  // per-day queries — a JS Date here would re-serialize with the host TZ and
+  // make `$1::date` casts fail on non-UTC machines.
   const dayRows = await sql(
-    `SELECT DISTINCT expiry
+    `SELECT DISTINCT expiry::text AS expiry
      FROM periscope_snapshots
      WHERE expiry >= $1 AND expiry <= $2
        AND panel = 'gamma'
@@ -221,7 +229,7 @@ export async function loadDateRange(
 export async function getAvailableDates(): Promise<string[]> {
   const sql = getDb();
   const rows = await sql(
-    `SELECT DISTINCT expiry
+    `SELECT DISTINCT expiry::text AS expiry
      FROM periscope_snapshots
      WHERE panel = 'gamma'
      ORDER BY expiry`,
