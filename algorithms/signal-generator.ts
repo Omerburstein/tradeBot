@@ -79,8 +79,19 @@ export class SignalGenerator {
    * Process a new snapshot and return a signal.
    *
    * Call this once per 10-minute snapshot, in chronological order.
+   * Throws if a snapshot arrives out of order (look-ahead guard).
    */
   processSnapshot(snapshot: Snapshot): Signal {
+    if (this.previousSnapshot !== null) {
+      const prevMs = new Date(this.previousSnapshot.capturedAt).getTime();
+      const currMs = new Date(snapshot.capturedAt).getTime();
+      if (currMs < prevMs) {
+        throw new Error(
+          `Look-ahead violation: snapshot ${snapshot.capturedAt} arrived after ${this.previousSnapshot.capturedAt}`,
+        );
+      }
+    }
+
     const { config } = this;
 
     // 1. Compute score

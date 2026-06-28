@@ -23,8 +23,11 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Training / Backtesting
 
-- [ ] **2. No look-ahead: the algo sees only the current frame and earlier ones.**
+- [x] **2. No look-ahead: the algo sees only the current frame and earlier ones.**
   During backtest/training the strategy must only ever see one slot at a time
   plus the slots that came before it — never any future data. Enforce strictly
   causal replay (feed snapshots one `captured_at` at a time, in order) so no
   decision can peek at slots that haven't happened yet.
+  *Done* — `simulate()` now explicitly sorts each day's snapshots by `capturedAt`
+  before processing (safe even if input arrives unordered); `SignalGenerator.processSnapshot()`
+  throws a `Look-ahead violation` error if a snapshot arrives out of chronological order.

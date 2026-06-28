@@ -113,7 +113,10 @@ export function simulate(
   let daysProcessed = 0;
 
   for (const day of tradingDays) {
-    const daySnapshots = byDay.get(day)!;
+    // Sort within the day so causal order is guaranteed regardless of input order.
+    const daySnapshots = [...byDay.get(day)!].sort(
+      (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
+    );
     // Passing the logger makes the generator emit an ENTRY/EXIT line per action.
     const generator = new SignalGenerator(config, logger);
 
