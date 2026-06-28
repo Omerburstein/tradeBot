@@ -1,32 +1,34 @@
 /**
- * Expected move cone: computes the intraday expected move boundary
- * and tracks state transitions (inside/above/below) for trade triggers.
+ * Expected-move cone: the chart-accurate intraday cone, built from the three
+ * points the scraper stores in `cone_snapshots` (apex + two end-of-day
+ * endpoints), and the state transitions (inside/above/below) it produces.
+ *
+ * The cone is two straight lines fanning out from the apex `(09:30, spxOpen)`
+ * to `(16:00, coneUpper)` and `(16:00, coneLower)` — so the band WIDENS through
+ * the session. A "pass" = price crossing one of those lines.
  *
  * The cone acts as a support/resistance trigger gate (NOT a magnet):
- * - Price breaking ABOVE the cone + bullish gamma signal → long entry (continuation)
- * - Price breaking BELOW the cone + bearish gamma signal → short entry (continuation)
+ * - Price crossing ABOVE the cone + bullish gamma signal → long (continuation)
+ * - Price crossing BELOW the cone + bearish gamma signal → short (continuation)
  * - Price returning INSIDE the cone → exit (breakout failed)
  */
 
-import type { AlgoConfig, ConeInfo, ConeState } from './types.js';
+import type { ConeEndpoints, ConeInfo, ConeState } from './types.js';
 
-/** Minutes in a full trading day (09:30–16:00 ET = 08:30–15:00 CT). */
+/** RTH session length in minutes (09:30–16:00 ET = 08:30–15:00 CT). */
 const RTH_MINUTES = 390;
-
-/** Trading days per year. */
-const TRADING_DAYS = 252;
 
 /**
  * Tracks cone state across successive snapshots within a trading day.
- * Create a new instance at the start of each day.
+ * Create a new instance at the start of each day, seeded with that day's
+ * stored cone endpoints (or `null` when no cone was captured).
  */
 export class ConeTracker {
-  private openSpot: number | null = null;
+  private readonly endpoints: ConeEndpoints | null;
   private previousState: ConeState | null = null;
-  private config: AlgoConfig;
 
-  constructor(config: AlgoConfig) {
-    this.config = config;
+  constructor(endpoints: ConeEndpoints | null) {
+    this.endpoints = endpoints;
   }
 
   /**
@@ -34,19 +36,31 @@ export class ConeTracker {
    *
    * @param spot          Current SPX price
    * @param capturedAtUtc ISO UTC timestamp of the snapshot
-   * @returns ConeInfo with boundaries, state, and crossing events
+   * @returns ConeInfo with the interpolated boundaries, state, and crossings
    */
   update(spot: number, capturedAtUtc: string): ConeInfo {
-    // Record open price on first call of the day
-    if (this.openSpot === null) {
-      this.openSpot = spot;
+    // No stored cone for this day → cone unavailable: treat the price as always
+    // inside an unbounded band so no cone-pass trigger fires.
+    if (!this.endpoints) {
+      const info: ConeInfo = {
+        upper: Number.POSITIVE_INFINITY,
+        lower: Number.NEGATIVE_INFINITY,
+        state: 'inside',
+        previousState: this.previousState,
+        crossed: null,
+      };
+      this.previousState = 'inside';
+      return info;
     }
 
-    const minutesRemaining = this.minutesUntilClose(capturedAtUtc);
-    const expectedMove = this.computeExpectedMove(this.openSpot, minutesRemaining);
+    const { spxOpen, coneUpper, coneLower } = this.endpoints;
 
-    const upper = this.openSpot + expectedMove;
-    const lower = this.openSpot - expectedMove;
+    // Fraction of the RTH session elapsed since the apex. The two stored
+    // endpoints define straight lines from the apex; at fraction f the boundary
+    // sits f of the way from the apex price to its end-of-day endpoint.
+    const f = this.sessionFraction(capturedAtUtc);
+    const upper = spxOpen + (coneUpper - spxOpen) * f;
+    const lower = spxOpen + (coneLower - spxOpen) * f;
 
     // Determine current cone state
     let state: ConeState;
@@ -84,29 +98,16 @@ export class ConeTracker {
 
   /** Reset for a new trading day. */
   reset(): void {
-    this.openSpot = null;
     this.previousState = null;
   }
 
   /**
-   * Compute the expected move in SPX points.
-   *
-   * Uses the annualized expected move formula scaled to intraday:
-   *   EM = spot * dailyExpectedMovePct * sqrt(minutesRemaining / RTH_MINUTES)
-   *
-   * The cone narrows as the day progresses (sqrt decay).
-   * At market open, the full daily expected move applies.
-   * Near close, the cone shrinks to near-zero.
+   * Fraction (0–1) of the RTH session elapsed at `capturedAtUtc`.
+   * 0 at the 09:30 apex, 1 at the 16:00 close.
    */
-  private computeExpectedMove(openSpot: number, minutesRemaining: number): number {
-    // Clamp to avoid negative or zero remaining time
-    const minRemaining = Math.max(minutesRemaining, 1);
-
-    // Scale the daily expected move by the fraction of the day remaining
-    // sqrt scaling: volatility scales with sqrt(time)
-    const timeScale = Math.sqrt(minRemaining / RTH_MINUTES);
-
-    return openSpot * this.config.dailyExpectedMovePct * timeScale;
+  private sessionFraction(capturedAtUtc: string): number {
+    const elapsed = RTH_MINUTES - this.minutesUntilClose(capturedAtUtc);
+    return Math.min(1, Math.max(0, elapsed / RTH_MINUTES));
   }
 
   /**

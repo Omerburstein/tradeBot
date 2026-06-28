@@ -5,8 +5,14 @@
  * Entry logic (user requirements):
  *   The cone is treated as support/resistance, NOT a magnet. A breakout
  *   through a band is a continuation signal — trade in the breakout direction.
- *   - LONG:  composite > +1.5 AND dGamma rising  AND (broke UP through resistance OR strong inside signal)
- *   - SHORT: composite < -1.5 AND dGamma falling AND (broke DOWN through support  OR strong inside signal)
+ *   Every cone-line pass is a trade trigger, but ONLY when it agrees with the
+ *   Greek/momentum direction (conviction floor = entryThreshold). A pass up
+ *   with bearish Greeks (or a pass down with bullish Greeks) is a mismatch and
+ *   is rejected.
+ *   - LONG:  cone pass UP   + composite > +entryThreshold AND dGamma rising
+ *            (or, with no pass, a strong inside signal: composite > strongEntryThreshold)
+ *   - SHORT: cone pass DOWN + composite < -entryThreshold AND dGamma falling
+ *            (or, with no pass, a strong inside signal: composite < -strongEntryThreshold)
  *
  * Exit logic:
  *   - Signal fade: composite drops below ±0.5
@@ -47,7 +53,8 @@ import type {
  */
 export class SignalGenerator {
   private config: AlgoConfig;
-  private cone: ConeTracker;
+  /** Built lazily from the first snapshot's stored cone endpoints. */
+  private cone: ConeTracker | null = null;
   private state: TradeState;
   private scoreHistory: ScoreComponents[] = [];
   private previousSnapshot: Snapshot | null = null;
@@ -62,7 +69,6 @@ export class SignalGenerator {
    */
   constructor(config: AlgoConfig, logger?: pino.Logger) {
     this.config = config;
-    this.cone = new ConeTracker(config);
     this.state = createFlatState();
     this.logger = logger;
   }
@@ -84,7 +90,8 @@ export class SignalGenerator {
     );
     this.scoreHistory.push(score);
 
-    // 2. Update cone
+    // 2. Update cone (built once from this day's stored cone endpoints)
+    this.cone ??= new ConeTracker(snapshot.cone ?? null);
     const cone = this.cone.update(snapshot.spot, snapshot.capturedAt);
 
     // 3. Update trade metrics (unrealized PnL, HWM)
@@ -196,43 +203,47 @@ export class SignalGenerator {
     snapshot: Snapshot,
   ): Signal {
     const { config } = this;
+    const z = score.composite.toFixed(2);
 
-    // ── LONG ENTRY ──
-    // Price broke UP through resistance (continuation long)
-    // OR inside cone with very strong bullish signal
-    const longConeTrigger = cone.crossed === 'up';
-    const longStrongInside = cone.state === 'inside' && score.composite > config.strongEntryThreshold;
-
-    if (
-      score.composite > config.entryThreshold &&
-      score.dGammaZ > 0 &&
-      (longConeTrigger || longStrongInside)
-    ) {
-      const confidence = this.assessConfidence(score, longConeTrigger);
-      const reason = longConeTrigger
-        ? `long entry: cone breakout up + bullish gamma (z=${score.composite.toFixed(2)})`
-        : `long entry: strong inside-cone signal (z=${score.composite.toFixed(2)})`;
-      return this.makeSignal('enter_long', score, cone, snapshot, confidence, reason);
+    // ── CONE-PASS ENTRIES ──
+    // Every cone-line pass is a trigger, but only when the Greeks point the
+    // same way (conviction floor = entryThreshold). A pass against the Greeks
+    // (e.g. pass up while bearish) is a mismatch and is explicitly rejected.
+    if (cone.crossed === 'up') {
+      if (score.composite > config.entryThreshold && score.dGammaZ > 0) {
+        const confidence = this.assessConfidence(score, true);
+        return this.makeSignal('enter_long', score, cone, snapshot, confidence,
+          `long entry: cone pass up + bullish Greeks (z=${z})`);
+      }
+      return this.makeSignal('hold', score, cone, snapshot, 'low',
+        `cone pass up ignored: Greeks not bullish enough (z=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
     }
 
-    // ── SHORT ENTRY ──
-    // Price broke DOWN through support (continuation short)
-    const shortConeTrigger = cone.crossed === 'down';
-    const shortStrongInside = cone.state === 'inside' && score.composite < -config.strongEntryThreshold;
-
-    if (
-      score.composite < -config.entryThreshold &&
-      score.dGammaZ < 0 &&
-      (shortConeTrigger || shortStrongInside)
-    ) {
-      const confidence = this.assessConfidence(score, shortConeTrigger);
-      const reason = shortConeTrigger
-        ? `short entry: cone breakout down + bearish gamma (z=${score.composite.toFixed(2)})`
-        : `short entry: strong inside-cone signal (z=${score.composite.toFixed(2)})`;
-      return this.makeSignal('enter_short', score, cone, snapshot, confidence, reason);
+    if (cone.crossed === 'down') {
+      if (score.composite < -config.entryThreshold && score.dGammaZ < 0) {
+        const confidence = this.assessConfidence(score, true);
+        return this.makeSignal('enter_short', score, cone, snapshot, confidence,
+          `short entry: cone pass down + bearish Greeks (z=${z})`);
+      }
+      return this.makeSignal('hold', score, cone, snapshot, 'low',
+        `cone pass down ignored: Greeks not bearish enough (z=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
     }
 
-    return this.makeSignal('hold', score, cone, snapshot, 'low', `no entry signal (z=${score.composite.toFixed(2)})`);
+    // ── STRONG INSIDE-CONE ENTRIES (no pass) ──
+    if (cone.state === 'inside') {
+      if (score.composite > config.strongEntryThreshold && score.dGammaZ > 0) {
+        const confidence = this.assessConfidence(score, false);
+        return this.makeSignal('enter_long', score, cone, snapshot, confidence,
+          `long entry: strong inside-cone signal (z=${z})`);
+      }
+      if (score.composite < -config.strongEntryThreshold && score.dGammaZ < 0) {
+        const confidence = this.assessConfidence(score, false);
+        return this.makeSignal('enter_short', score, cone, snapshot, confidence,
+          `short entry: strong inside-cone signal (z=${z})`);
+      }
+    }
+
+    return this.makeSignal('hold', score, cone, snapshot, 'low', `no entry signal (z=${z})`);
   }
 
   private assessConfidence(score: ScoreComponents, coneTrigger: boolean): Confidence {
