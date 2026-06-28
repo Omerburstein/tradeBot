@@ -57,6 +57,7 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
 
   // Non-linearity powers (never exactly 1).
   pGamma: { min: 0.8, max: 1.8 },
+  positiveGammaBias: { min: 1.0, max: 1.3 },
   pDGamma: { min: 0.8, max: 1.8 },
   pPositions: { min: 0.3, max: 0.9 },
   pDPositions: { min: 0.3, max: 0.9 },
@@ -75,7 +76,6 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
 
   // Stats.
   zScoreLookback: { min: 8, max: 40, integer: true },
-  dailyExpectedMovePct: { min: 0.005, max: 0.015 },
 
   // ── Risk (uncomment to co-tune money management) ──
   // 'risk.stopLossPoints': { min: 5, max: 20 },

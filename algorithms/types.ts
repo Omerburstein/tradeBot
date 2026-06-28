@@ -34,6 +34,12 @@ export interface Snapshot {
   spot: number;
   /** All strikes in the 120pt window with their Greek values. */
   strikes: StrikeData[];
+  /**
+   * The day's stored expected-move cone (from `cone_snapshots`), stamped onto
+   * every snapshot of the day so the in-memory backtest/tuner data flow carries
+   * it. `null` when no cone was captured for the day. See {@link ConeEndpoints}.
+   */
+  cone?: ConeEndpoints | null;
 }
 
 // ── Scoring ──
@@ -53,6 +59,21 @@ export interface ScoreComponents {
 }
 
 // ── Cone ──
+
+/**
+ * The three stored points that define a trading day's expected-move cone
+ * (one row in `cone_snapshots`). Two straight lines fan out from the apex
+ * `(09:30 ET, spxOpen)` to the end-of-day endpoints `(16:00 ET, coneUpper)`
+ * and `(16:00 ET, coneLower)`. The cone WIDENS through the session.
+ */
+export interface ConeEndpoints {
+  /** SPX settled open — the cone apex price (at 09:30 ET). */
+  spxOpen: number;
+  /** Upper endpoint at the close (spxOpen + ATM straddle). */
+  coneUpper: number;
+  /** Lower endpoint at the close (spxOpen − ATM straddle). */
+  coneLower: number;
+}
 
 export type ConeState = 'inside' | 'above' | 'below';
 export type ConeCrossing = 'up' | 'down' | 'returned' | null;
@@ -149,6 +170,12 @@ export interface AlgoConfig {
 
   /** Exponent on per-strike gamma. */
   pGamma: number;
+  /**
+   * Multiplier applied to positive per-strike gamma (negative gamma uses 1.0).
+   * Slightly > 1 makes positive gamma marginally more influential than negative
+   * gamma in the GEX score. Gamma-only — positions are not biased.
+   */
+  positiveGammaBias: number;
   /** Exponent on per-strike gamma change (dGamma/dt). */
   pDGamma: number;
   /** Exponent on per-strike net positions (saturating, < 1). */
@@ -189,9 +216,6 @@ export interface AlgoConfig {
   /** Number of past ScoreComponents snapshots for z-score lookback. */
   zScoreLookback: number;
 
-  /** Daily expected move as fraction of spot (e.g. 0.009 = 0.9%). */
-  dailyExpectedMovePct: number;
-
   risk: RiskParams;
 }
 
@@ -203,6 +227,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   wDPositions: 0.12,
 
   pGamma: 1.2,
+  positiveGammaBias: 1.1,
   pDGamma: 1.1,
   pPositions: 0.5,
   pDPositions: 0.5,
@@ -219,8 +244,6 @@ export const DEFAULT_CONFIG: AlgoConfig = {
 
   strikeWindow: 120,
   zScoreLookback: 20,
-
-  dailyExpectedMovePct: 0.009,
 
   risk: {
     maxPositionSize: 2,
