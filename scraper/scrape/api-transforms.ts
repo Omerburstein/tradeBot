@@ -190,15 +190,20 @@ export function etDateOf(d: Date): string {
 export function candles5mToSpotRowsByDate(
   candles: ReadonlyArray<ApiIntradayCandle>,
 ): Map<string, SpotRow[]> {
+  // Two-level map: ET date → (snapped slot instant → row). The inner map is
+  // keyed by the snapped timestamp so two candles landing in the same 5-min
+  // slot collapse to one row (last write wins), keeping the series clean.
   const byDate = new Map<string, Map<string, SpotRow>>();
   for (const c of candles) {
     const t = new Date(c.start).getTime();
-    if (Number.isNaN(t)) continue;
-    const spot = Number.parseFloat(c.o);
-    if (!Number.isFinite(spot) || spot <= 0) continue;
+    if (Number.isNaN(t)) continue; // skip unparseable timestamps
+    const spot = Number.parseFloat(c.o); // `o` (open) = spot at candle start
+    if (!Number.isFinite(spot) || spot <= 0) continue; // skip junk prices
+    // Snap the off-grid candle start to the nearest 5-min boundary so the row
+    // lines up with the Market Tide / Greeks slot instants.
     const snapped = new Date(Math.round(t / FIVE_MIN_MS) * FIVE_MIN_MS);
     const capturedAt = snapped.toISOString();
-    const date = etDateOf(snapped);
+    const date = etDateOf(snapped); // ET trading date this slot belongs to
     let slots = byDate.get(date);
     if (slots === undefined) {
       slots = new Map<string, SpotRow>();
@@ -206,6 +211,7 @@ export function candles5mToSpotRowsByDate(
     }
     slots.set(capturedAt, { capturedAt, expiry: date, spot });
   }
+  // Flatten each date's slot map to a chronologically sorted row array.
   const out = new Map<string, SpotRow[]>();
   for (const [date, slots] of byDate) {
     out.set(
