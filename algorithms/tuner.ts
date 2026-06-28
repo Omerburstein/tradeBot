@@ -34,7 +34,7 @@
  */
 
 import pino from 'pino';
-import { loadDateRange } from './data-loader.js';
+import { loadDateRange, getAvailableDates } from './data-loader.js';
 import { simulate, printTradeLog, printSummary } from './backtest.js';
 import type { AlgoConfig, BacktestResult, EquitySettings, Snapshot } from './types.js';
 import { DEFAULT_CONFIG, DEFAULT_EQUITY } from './types.js';
@@ -312,9 +312,17 @@ if (isMain) {
 
   if (!startDate || !endDate) {
     console.error('Usage: TUNE_START=YYYY-MM-DD TUNE_END=YYYY-MM-DD npm run tune');
-    process.exit(1);
-  }
-
+    console.error('\nAvailable dates:');
+    getAvailableDates()
+      .then((dates) => {
+        if (dates.length === 0) {
+          console.error('  (no data in database)');
+        } else {
+          console.error(`  ${dates[0]} to ${dates[dates.length - 1]} (${dates.length} days)`);
+        }
+      })
+      .catch((e) => console.error('  (could not query DB)', e.message));
+  } else {
   const num = (v: string | undefined, d: number) => (v ? Number(v) : d);
 
   runTuning({
@@ -367,4 +375,5 @@ if (isMain) {
       console.error('Tuning failed:', e);
       process.exit(1);
     });
+  }
 }
