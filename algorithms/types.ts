@@ -30,8 +30,15 @@ export interface Snapshot {
   expiry: string;
   /** UW slot label, e.g. "08:20 - 08:30". */
   timeframe: string;
-  /** SPX spot price at capture time. */
+  /** SPX spot price at capture time — the signal/decision price. */
   spot: number;
+  /**
+   * ES (front-month e-mini future) price at capture time — the instrument
+   * actually traded, so realized P&L is measured off this series (TODO #3).
+   * `null`/absent when no ES bar was ingested for the slot; P&L then falls back
+   * to {@link spot}. Joined from `es_prices` on the same `captured_at` as spot.
+   */
+  es?: number | null;
   /** All strikes in the 120pt window with their Greek values. */
   strikes: StrikeData[];
   /**
@@ -106,7 +113,13 @@ export interface Signal {
 
 export interface TradeState {
   position: 'flat' | 'long' | 'short';
+  /** SPX fill price at entry (slipped) — drives stop/target/HWM decisions. */
   entryPrice: number | null;
+  /**
+   * ES fill price at entry (slipped) — the basis for realized P&L (TODO #3).
+   * `entryPrice` (SPX) still decides WHEN to exit; this only measures money.
+   */
+  entryFill: number | null;
   entryTime: string | null;
   contracts: number;
   unrealizedPnl: number;
@@ -299,14 +312,21 @@ export const DEFAULT_EQUITY: EquitySettings = {
 export interface TradeRecord {
   direction: Direction;
   entryTime: string;
+  /** SPX entry price (slipped) — the signal-side decision price. */
   entryPrice: number;
   exitTime: string;
+  /** SPX exit price — the signal-side decision price. */
   exitPrice: number;
+  /** ES entry fill (slipped) — the price realized P&L was computed from. */
+  entryFill: number;
+  /** ES exit fill (slipped) — the price realized P&L was computed from. */
+  exitFill: number;
   contracts: number;
   /** Hard stop-loss level (SPX), computed from entry price at entry. */
   stopPrice: number;
   /** Take-profit target level (SPX), computed from entry price at entry. */
   targetPrice: number;
+  /** Realized P&L (USD), computed from the ES fills (TODO #3). */
   pnl: number;
   reason: string;
 }

@@ -40,8 +40,10 @@ export async function loadDay(
 
   if (rows.length === 0) return [];
 
-  // Step 2: Try to get spot prices from dedicated table, plus the day's cone
+  // Step 2: Try to get spot (SPX) + ES prices from their tables, plus the day's cone.
+  // SPX drives the signal; ES is the traded instrument used for P&L (TODO #3).
   const spotRows = await loadSpotPrices(date);
+  const esRows = await loadEsPrices(date);
   const cone = await loadCone(date);
 
   // Step 3: Group rows by captured_at
@@ -97,6 +99,7 @@ export async function loadDay(
       expiry: group.expiry,
       timeframe: group.timeframe,
       spot,
+      es: esRows.get(capturedAt) ?? null,
       strikes: strikes.sort((a, b) => a.strike - b.strike),
       cone,
     });
@@ -130,6 +133,36 @@ async function loadSpotPrices(date: string): Promise<Map<string, number>> {
     }
   } catch {
     // Table doesn't exist yet — caller will use fallback
+  }
+
+  return map;
+}
+
+/**
+ * Load ES (futures) close prices from the dedicated `es_prices` table.
+ * Returns a Map of captured_at → ES close. ES and SPX rows share the same
+ * `captured_at` instants (both written from one converted bar list by the
+ * ingest pipeline), so this map keys join the snapshots exactly like spot does.
+ * Returns an empty map if the table doesn't exist yet (P&L falls back to SPX).
+ */
+async function loadEsPrices(date: string): Promise<Map<string, number>> {
+  const sql = getDb();
+  const map = new Map<string, number>();
+
+  try {
+    const rows = await sql(
+      // Same captured_at rendering as loadDay so the join keys match exactly.
+      `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at, close
+       FROM es_prices
+       WHERE date = $1
+       ORDER BY captured_at`,
+      [date],
+    );
+    for (const row of rows) {
+      map.set(String(row.captured_at), Number(row.close));
+    }
+  } catch {
+    // Table doesn't exist yet — caller will fall back to SPX spot for P&L
   }
 
   return map;

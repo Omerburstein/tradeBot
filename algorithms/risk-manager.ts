@@ -190,6 +190,7 @@ export function createFlatState(): TradeState {
   return {
     position: 'flat',
     entryPrice: null,
+    entryFill: null,
     entryTime: null,
     contracts: 0,
     unrealizedPnl: 0,
@@ -201,25 +202,28 @@ export function createFlatState(): TradeState {
 
 /**
  * Record an entry: updates trade state to reflect a new position.
+ *
+ * Two fill prices are tracked: `spotPrice` (SPX) drives stop/target/HWM
+ * decisions, while `esPrice` (the traded future) is the basis for realized P&L
+ * (TODO #3). Slippage is applied to each in its own units.
  */
 export function recordEntry(
   state: TradeState,
   direction: Direction,
-  entryPrice: number,
+  spotPrice: number,
+  esPrice: number,
   entryTime: string,
   contracts: number,
   slippagePerSide: number,
 ): TradeState {
   // Apply slippage: long entry at higher price, short at lower
-  const slippedPrice =
-    direction === 'long'
-      ? entryPrice + slippagePerSide
-      : entryPrice - slippagePerSide;
+  const slip = direction === 'long' ? slippagePerSide : -slippagePerSide;
 
   return {
     ...state,
     position: direction,
-    entryPrice: slippedPrice,
+    entryPrice: spotPrice + slip,
+    entryFill: esPrice + slip,
     entryTime,
     contracts,
     unrealizedPnl: 0,
@@ -229,31 +233,37 @@ export function recordEntry(
 
 /**
  * Record an exit: closes position and updates daily PnL/trade count.
+ *
+ * Realized P&L is measured off the ES series (TODO #3): the slipped ES exit
+ * fill minus the slipped ES entry fill (`state.entryFill`). `esExitPrice` is the
+ * raw ES price at the exit slot; the returned `exitFill` is that price after
+ * slippage, so callers can record the exact level the P&L was derived from.
  */
 export function recordExit(
   state: TradeState,
-  exitPrice: number,
+  esExitPrice: number,
   slippagePerSide: number,
   pointValue: number,
-): { newState: TradeState; realizedPnl: number } {
-  if (state.position === 'flat' || state.entryPrice === null) {
-    return { newState: state, realizedPnl: 0 };
+): { newState: TradeState; realizedPnl: number; exitFill: number } {
+  if (state.position === 'flat' || state.entryFill === null) {
+    return { newState: state, realizedPnl: 0, exitFill: esExitPrice };
   }
 
   const direction = state.position === 'long' ? 1 : -1;
 
   // Apply slippage: long exit at lower price, short exit at higher
-  const slippedExit =
+  const exitFill =
     state.position === 'long'
-      ? exitPrice - slippagePerSide
-      : exitPrice + slippagePerSide;
+      ? esExitPrice - slippagePerSide
+      : esExitPrice + slippagePerSide;
 
-  const pnlPoints = (slippedExit - state.entryPrice) * direction;
+  const pnlPoints = (exitFill - state.entryFill) * direction;
   const realizedPnl = pnlPoints * pointValue * state.contracts;
 
   const newState: TradeState = {
     position: 'flat',
     entryPrice: null,
+    entryFill: null,
     entryTime: null,
     contracts: 0,
     unrealizedPnl: 0,
@@ -262,7 +272,7 @@ export function recordExit(
     highWaterMark: 0,
   };
 
-  return { newState, realizedPnl };
+  return { newState, realizedPnl, exitFill };
 }
 
 // ── Helpers ──

@@ -31,13 +31,22 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   `captured_at` slot so the algo can evaluate conditions at the moment of
   decision without look-ahead.
 
-- [ ] **3. Use ES price data from DB to calculate backtest and tune P&L.**
+- [x] **3. Use ES price data from DB to calculate backtest and tune P&L.**
   In both the backtesting and tuning paths, compute realized P&L using ES
   (futures) prices loaded from the DB rather than SPX. ES is the instrument
   actually traded, so fill prices, slippage, and outcome measurement should all
   be based on the ES series. The ES loader should fetch prices for the
   trade-open and trade-close timestamps to compute per-trade profit/loss
   accurately.
+  *Done:* `data-loader.ts` now joins `es_prices` (close) per `captured_at`
+  alongside spot and stamps `Snapshot.es`. The SPX `spot` still drives the
+  signal + stop/target/HWM decisions; the ES price is the fill basis.
+  `TradeState` gained `entryFill` (slipped ES entry); `recordEntry`/`recordExit`
+  take both the SPX decision price and the ES fill and compute realized P&L from
+  the ES fills (slippage in ES units); `TradeRecord` carries `entryFill`/`exitFill`.
+  Both paths run through `simulate()`, so backtest and tune share the change.
+  Falls back to SPX spot only when no ES bar exists for a slot. Trade log prints
+  `spx=…→… es=…→…`.
 
 ## Data
 
