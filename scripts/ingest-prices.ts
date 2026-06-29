@@ -32,29 +32,16 @@ import {
   etBarToUtcIso,
   fetchSpxDaily,
   parseEsCsv,
-  todayIsoEt,
-  type Anchor,
-  type DateFormat,
 } from './lib/es-spx.js';
+import { makeFlagGetter, parseCommonArgs, type CommonArgs } from './lib/cli.js';
 
-const DEFAULT_START = '2025-12-29';
-
-interface Args {
+interface Args extends CommonArgs {
   es: string;
-  tz: string;
-  start: string;
-  end: string;
-  spxSymbol: string;
-  dateFormat: DateFormat;
-  anchor: Anchor;
   dryRun: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const get = (flag: string): string | undefined => {
-    const i = argv.indexOf(flag);
-    return i >= 0 && i + 1 < argv.length ? argv[i + 1] : undefined;
-  };
+  const get = makeFlagGetter(argv);
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(
       [
@@ -73,25 +60,10 @@ function parseArgs(argv: string[]): Args {
     console.error('ERROR: --es <path> is required.');
     process.exit(1);
   }
-  const df = (get('--dateformat') ?? 'auto').toLowerCase();
-  if (!['iso', 'us', 'eu', 'auto'].includes(df)) {
-    console.error(`ERROR: --dateformat must be iso|us|eu|auto (got "${df}")`);
-    process.exit(1);
-  }
-  const anchor = (get('--anchor') ?? 'close').toLowerCase();
-  if (!['close', 'openclose'].includes(anchor)) {
-    console.error(`ERROR: --anchor must be close|openclose (got "${anchor}")`);
-    process.exit(1);
-  }
   return {
     es,
-    tz: get('--tz') ?? 'America/New_York',
-    start: get('--start') ?? DEFAULT_START,
-    end: get('--end') ?? todayIsoEt(),
-    spxSymbol: get('--spx-symbol') ?? '^GSPC',
-    dateFormat: df as DateFormat,
-    anchor: anchor as Anchor,
     dryRun: argv.includes('--dry-run'),
+    ...parseCommonArgs(get),
   };
 }
 

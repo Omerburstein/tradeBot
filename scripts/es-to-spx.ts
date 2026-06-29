@@ -62,39 +62,21 @@
  *   order Date,Open,High,Low,Close,Volume if headers aren't recognised.
  */
 
-import {
-  convertEsToSpx,
-  fetchSpxDaily,
-  parseEsCsv,
-  pad2,
-  todayIsoEt,
-  type Anchor,
-  type DateFormat,
-} from './lib/es-spx.js';
-
-const DEFAULT_START = '2025-12-29';
+import { convertEsToSpx, fetchSpxDaily, parseEsCsv, pad2 } from './lib/es-spx.js';
+import { makeFlagGetter, parseCommonArgs, type CommonArgs } from './lib/cli.js';
 
 // ---------------------------------------------------------------------------
 // Args
 // ---------------------------------------------------------------------------
 
-interface Args {
+interface Args extends CommonArgs {
   es: string;
   out: string;
-  tz: string;
-  start: string;
-  end: string;
-  spxSymbol: string;
-  dateFormat: DateFormat;
-  anchor: Anchor;
   scale: number;
 }
 
 function parseArgs(argv: string[]): Args {
-  const get = (flag: string): string | undefined => {
-    const i = argv.indexOf(flag);
-    return i >= 0 && i + 1 < argv.length ? argv[i + 1] : undefined;
-  };
+  const get = makeFlagGetter(argv);
   if (argv.includes('--help') || argv.includes('-h')) {
     printHelp();
     process.exit(0);
@@ -103,16 +85,6 @@ function parseArgs(argv: string[]): Args {
   if (!es) {
     printHelp();
     console.error('\nERROR: --es <path> is required.');
-    process.exit(1);
-  }
-  const df = (get('--dateformat') ?? 'auto').toLowerCase();
-  if (!['iso', 'us', 'eu', 'auto'].includes(df)) {
-    console.error(`ERROR: --dateformat must be iso|us|eu|auto (got "${df}")`);
-    process.exit(1);
-  }
-  const anchor = (get('--anchor') ?? 'close').toLowerCase();
-  if (!['close', 'openclose'].includes(anchor)) {
-    console.error(`ERROR: --anchor must be close|openclose (got "${anchor}")`);
     process.exit(1);
   }
   const scale = Number.parseFloat(get('--scale') ?? '1');
@@ -124,13 +96,8 @@ function parseArgs(argv: string[]): Args {
   return {
     es,
     out: get('--out') ?? `${base}.spx.csv`,
-    tz: get('--tz') ?? 'America/New_York',
-    start: get('--start') ?? DEFAULT_START,
-    end: get('--end') ?? todayIsoEt(),
-    spxSymbol: get('--spx-symbol') ?? '^GSPC',
-    dateFormat: df as DateFormat,
-    anchor: anchor as Anchor,
     scale,
+    ...parseCommonArgs(get),
   };
 }
 

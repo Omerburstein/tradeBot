@@ -33,96 +33,19 @@
 
 import {
   convertEsToSpx,
-  partsInZone,
+  fetchYahoo1mByDay,
   pad2,
-  MARKET_TZ,
+  DEFAULT_SPX_SYMBOL,
   RTH_OPEN_MIN,
-  RTH_CLOSE_MIN,
   type EsBar,
+  type Yahoo1mBar,
 } from './lib/es-spx.js';
 
-const ES_SYMBOL = 'ES=F';
-const SPX_SYMBOL = '^GSPC';
+const ES_SYMBOL = 'ES=F'; // Yahoo's continuous front-month future (test-only)
 const MAX_DIFF_PT = 1.0; // gate: median body error must stay under this
 const MIN_RTH_BARS = 200; // a full RTH session is ~390 1-min bars; require a solid day
 const OUTLIER_BASIS_PT = 5; // reject bars whose ES−SPX basis is >this from the day median (bad prints)
 const OPEN_LAG_MIN = 15; // exclude the opening cash-open-lag window from the gate
-
-interface MinuteBar {
-  dateKey: string; // ET YYYY-MM-DD
-  minOfDay: number; // ET minutes since midnight
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number | null;
-}
-
-/** Fetch recent 1-min RTH bars for a Yahoo symbol, grouped by ET trading day. */
-async function fetch1mByDay(symbol: string): Promise<Map<string, MinuteBar[]>> {
-  // 1-min granularity is only available for a recent window; 5d is plenty to
-  // find the latest complete trading day for both symbols.
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?range=5d&interval=1m`;
-  const res = await fetch(url, {
-    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-  });
-  if (!res.ok) {
-    throw new Error(`Yahoo 1m fetch failed: HTTP ${res.status} for ${symbol}`);
-  }
-  const json = (await res.json()) as {
-    chart?: {
-      result?: Array<{
-        timestamp?: number[];
-        indicators?: {
-          quote?: Array<{
-            open?: (number | null)[];
-            high?: (number | null)[];
-            low?: (number | null)[];
-            close?: (number | null)[];
-            volume?: (number | null)[];
-          }>;
-        };
-      }>;
-      error?: unknown;
-    };
-  };
-  const result = json.chart?.result?.[0];
-  const ts = result?.timestamp;
-  const q = result?.indicators?.quote?.[0];
-  if (!ts || !q?.open || !q?.high || !q?.low || !q?.close) {
-    throw new Error(
-      `Unexpected Yahoo 1m response for "${symbol}" (error: ${JSON.stringify(json.chart?.error)}).`,
-    );
-  }
-
-  const byDay = new Map<string, MinuteBar[]>();
-  for (let i = 0; i < ts.length; i += 1) {
-    const o = q.open[i];
-    const h = q.high[i];
-    const l = q.low[i];
-    const c = q.close[i];
-    if (o == null || h == null || l == null || c == null) continue;
-    const et = partsInZone(ts[i]! * 1000, MARKET_TZ);
-    const minOfDay = et.h * 60 + et.mi;
-    if (minOfDay < RTH_OPEN_MIN || minOfDay > RTH_CLOSE_MIN) continue;
-    const dateKey = `${et.y}-${pad2(et.mo)}-${pad2(et.d)}`;
-    const arr = byDay.get(dateKey) ?? [];
-    arr.push({
-      dateKey,
-      minOfDay,
-      open: o,
-      high: h,
-      low: l,
-      close: c,
-      volume: q.volume?.[i] ?? null,
-    });
-    byDay.set(dateKey, arr);
-  }
-  for (const arr of byDay.values()) arr.sort((a, b) => a.minOfDay - b.minOfDay);
-  return byDay;
-}
 
 function median(values: number[]): number {
   const s = [...values].sort((a, b) => a - b);
@@ -138,8 +61,8 @@ function percentile(values: number[], p: number): number {
 async function main(): Promise<void> {
   console.error('Downloading latest 1-min ES + SPX bars from Yahoo…');
   const [esByDay, spxByDay] = await Promise.all([
-    fetch1mByDay(ES_SYMBOL),
-    fetch1mByDay(SPX_SYMBOL),
+    fetchYahoo1mByDay(ES_SYMBOL),
+    fetchYahoo1mByDay(DEFAULT_SPX_SYMBOL),
   ]);
 
   // Latest ET day with a solid RTH session in BOTH series.
@@ -166,7 +89,7 @@ async function main(): Promise<void> {
   for (const b of spxByDay.get(day)!) spxByMin.set(b.minOfDay, b.close);
 
   interface Aligned {
-    bar: MinuteBar;
+    bar: Yahoo1mBar;
     spxClose: number;
     basis: number;
   }

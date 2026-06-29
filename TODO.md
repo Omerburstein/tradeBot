@@ -73,3 +73,20 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   to a robust statistic — the MEDIAN body error after rejecting outlier prints
   and the opening cash-lag window (≈0.49 pt on a normal day). The single largest
   raw difference across all minutes is always printed for monitoring.
+
+- [x] **7. Add a way to get live SPX and ES data for the process.**
+  Provide a live data source for both SPX (index) and ES (futures) that the
+  process can consume in real time, alongside the existing historical CSV
+  ingest. Should feed the same `spot_prices` (SPX) and `es_prices` (ES) tables
+  so the live series sits alongside the backfilled/historical data and the algo
+  can read current prices during an active session.
+  *Done:* `scripts/live-prices.ts` (`npm run live -- --loop 60`). Polls Yahoo's
+  1-min chart feed for `ES=F` → `es_prices` (OHLCV) and `^GSPC` → `spot_prices`
+  (close as `spot`). Unlike the CSV ingest it does NO ES→SPX conversion: live we
+  have both real feeds, and `^GSPC` IS the cash index, so SPX is written directly
+  (0 pt error). `--loop <sec>` polls forever (incremental cursor, resets at each
+  ET day rollover, survives transient Yahoo blips); omit for one-shot. `--dry-run`
+  prints new-bar counts without touching the DB. Inserts are RTH-gated + idempotent
+  upserts in the DB layer. The 1-min Yahoo fetcher was hoisted into the shared
+  `scripts/lib/es-spx.ts` (`fetchYahoo1mByDay`) so the live script and the #6
+  accuracy test share one source of truth.
