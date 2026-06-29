@@ -12,7 +12,10 @@
     "test:integration": "node --env-file=.env --env-file=.env.tick --import=tsx/esm scraper/tests/integration.test.ts",
     "periscope-probe": "node --env-file=.env scraper/tools/periscope-probe.mjs",
     "backtest": "node --env-file=.env --import=tsx/esm algorithms/backtest.ts",
-    "tune": "node --env-file=.env --import=tsx/esm algorithms/tuner.ts"
+    "tune": "node --env-file=.env --import=tsx/esm algorithms/tuner.ts",
+    "ingest": "node --env-file=.env --import=tsx/esm scripts/ingest-prices.ts",
+    "es-to-spx": "node --import=tsx/esm scripts/es-to-spx.ts",
+    "test:es-spx": "node --import=tsx/esm scripts/test-es-spx-conversion.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",

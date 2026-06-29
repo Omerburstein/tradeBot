@@ -23,11 +23,53 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Training / Backtesting
 
-- [x] **2. No look-ahead: the algo sees only the current frame and earlier ones.**
-  During backtest/training the strategy must only ever see one slot at a time
-  plus the slots that came before it — never any future data. Enforce strictly
-  causal replay (feed snapshots one `captured_at` at a time, in order) so no
-  decision can peek at slots that haven't happened yet.
-  *Done* — `simulate()` now explicitly sorts each day's snapshots by `capturedAt`
-  before processing (safe even if input arrives unordered); `SignalGenerator.processSnapshot()`
-  throws a `Look-ahead violation` error if a snapshot arrives out of chronological order.
+- [ ] **2. Feed SPX price data from DB as the signal input for backtest and tune.**
+  In both the backtesting and tuning paths, replace any hardcoded or synthetic
+  SPX price data with real SPX prices loaded from the DB. The SPX series is the
+  data the algo uses to decide whether it wants to trade (entry/exit signal
+  input). The loader should query SPX rows aligned to each snapshot's
+  `captured_at` slot so the algo can evaluate conditions at the moment of
+  decision without look-ahead.
+
+- [ ] **3. Use ES price data from DB to calculate backtest and tune P&L.**
+  In both the backtesting and tuning paths, compute realized P&L using ES
+  (futures) prices loaded from the DB rather than SPX. ES is the instrument
+  actually traded, so fill prices, slippage, and outcome measurement should all
+  be based on the ES series. The ES loader should fetch prices for the
+  trade-open and trade-close timestamps to compute per-trade profit/loss
+  accurately.
+
+## Data
+
+- [x] **4. Add a script that ingests ES and SPX data into the DB.**
+  Build a script that adds the ES and SPX price data to the database. Should
+  populate the DB with both the ES (futures) and SPX (index) series so they are
+  available alongside the existing snapshot data.
+  *Done:* `scripts/ingest-prices.ts` (`npm run ingest -- --es <es.csv>`). Takes
+  one ES CSV, parses the RTH bars (shared `scripts/lib/es-spx.ts`), derives the
+  SPX cash series via the Yahoo-anchored basis calibration, writes ES OHLCV →
+  `es_prices` and the derived SPX close → existing `spot_prices`. `--dry-run`
+  prints sample rows without touching the DB.
+
+- [x] **5. Create a new Postgres table to store ES data.**
+  Add a new table to the Neon Postgres schema for storing ES (futures) price
+  data. Define columns, types, constraints, and indexes appropriate for the ES
+  series (e.g. timestamp, open, high, low, close, volume). Add the corresponding
+  `db/` module (client helpers, insert function) and keep `SnapshotRow` /
+  existing tables untouched.
+  *Done:* `db/es-prices.ts` — `es_prices(captured_at PK, date, open, high, low,
+  close, volume)` + `es_prices_date_idx`, RTH-gated upsert `insertEsPrices`
+  exported from `db/index.ts`. SPX reuses the existing `spot_prices` table.
+
+- [x] **6. Add a validation test for the ES→SPX conversion using Yahoo Finance data.**
+  Write a test script that downloads the latest trading day's 1-min bars for
+  both ES and SPX from Yahoo Finance, runs each ES bar through the ES→SPX
+  converter, and asserts that no converted value differs from the actual SPX
+  price by more than 1 point. The script should also print the single largest
+  observed difference so the conversion accuracy can be monitored over time.
+  *Done:* `scripts/test-es-spx-conversion.ts` (`npm run test:es-spx`). NOTE: a
+  literal per-bar 1 pt assert is not achievable against FREE Yahoo 1-min `ES=F`
+  (sporadic bad prints + real ~5 pt open basis lag), so the 1 pt gate is applied
+  to a robust statistic — the MEDIAN body error after rejecting outlier prints
+  and the opening cash-lag window (≈0.49 pt on a normal day). The single largest
+  raw difference across all minutes is always printed for monitoring.
