@@ -30,8 +30,21 @@ export const MARKET_TZ = 'America/New_York';
 export const RTH_OPEN_MIN = 9 * 60 + 30; // 09:30 ET
 export const RTH_CLOSE_MIN = 16 * 60; // 16:00 ET
 
-export type DateFormat = 'iso' | 'us' | 'eu' | 'auto';
-export type Anchor = 'close' | 'openclose';
+/** First trading day of the dataset window (the day after the Dec 2025 expiry). */
+export const DEFAULT_START = '2025-12-29';
+/** Yahoo ticker for the S&P 500 cash index (== CBOE:SPX). */
+export const DEFAULT_SPX_SYMBOL = '^GSPC';
+
+/** Yahoo chart endpoint + a desktop UA (Yahoo rejects the default fetch UA). */
+export const YAHOO_CHART_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+export const YAHOO_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
+
+// Valid CLI enum values doubling as the source of the corresponding union types,
+// so a new option only has to be added in one place.
+export const DATE_FORMATS = ['iso', 'us', 'eu', 'auto'] as const;
+export type DateFormat = (typeof DATE_FORMATS)[number];
+export const ANCHORS = ['close', 'openclose'] as const;
+export type Anchor = (typeof ANCHORS)[number];
 
 // ---------------------------------------------------------------------------
 // Timezone helpers (explicit-offset technique the scraper uses; never relies on
@@ -357,6 +370,8 @@ export interface SpxDaily {
   close: number;
 }
 
+const SECONDS_PER_DAY = 86400;
+
 export async function fetchSpxDaily(
   symbol: string,
   start: string,
@@ -364,14 +379,12 @@ export async function fetchSpxDaily(
 ): Promise<Map<string, SpxDaily>> {
   // Pad the window by a day on each side so boundary trading days are included
   // regardless of tz; we filter by ET date when mapping anyway.
-  const p1 = Math.floor(Date.parse(`${start}T00:00:00Z`) / 1000) - 86400;
-  const p2 = Math.floor(Date.parse(`${end}T00:00:00Z`) / 1000) + 2 * 86400;
+  const p1 = Math.floor(Date.parse(`${start}T00:00:00Z`) / 1000) - SECONDS_PER_DAY;
+  const p2 = Math.floor(Date.parse(`${end}T00:00:00Z`) / 1000) + 2 * SECONDS_PER_DAY;
   const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
+    `${YAHOO_CHART_BASE}${encodeURIComponent(symbol)}` +
     `?period1=${p1}&period2=${p2}&interval=1d`;
-  const res = await fetch(url, {
-    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-  });
+  const res = await fetch(url, { headers: { 'user-agent': YAHOO_UA } });
   if (!res.ok) {
     throw new Error(`Yahoo fetch failed: HTTP ${res.status} for ${url}`);
   }
@@ -406,6 +419,93 @@ export async function fetchSpxDaily(
 }
 
 // ---------------------------------------------------------------------------
+// Live 1-min bars (Yahoo chart API). Same endpoint as the daily fetch but at
+// 1-min granularity, available only for a recent rolling window. Used by both
+// the accuracy test (`ES=F` vs `^GSPC`) and the live ingest (`scripts/live-
+// prices.ts`), so the fetch/parse lives here as the single source of truth.
+// ---------------------------------------------------------------------------
+
+export interface Yahoo1mBar {
+  dateKey: string; // ET YYYY-MM-DD
+  minOfDay: number; // ET minutes since midnight
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number | null;
+}
+
+/**
+ * Fetch recent 1-min RTH bars for a Yahoo symbol, grouped & sorted by ET trading
+ * day. `range` is Yahoo's lookback window (e.g. '1d' for just the live session,
+ * '5d' to find the latest complete day). Off-RTH minutes are dropped so both the
+ * cash index (RTH-only) and the future align on the same 09:30–16:00 ET grid.
+ */
+export async function fetchYahoo1mByDay(
+  symbol: string,
+  range = '5d',
+): Promise<Map<string, Yahoo1mBar[]>> {
+  const url =
+    `${YAHOO_CHART_BASE}${encodeURIComponent(symbol)}` +
+    `?range=${encodeURIComponent(range)}&interval=1m`;
+  const res = await fetch(url, { headers: { 'user-agent': YAHOO_UA } });
+  if (!res.ok) {
+    throw new Error(`Yahoo 1m fetch failed: HTTP ${res.status} for ${symbol}`);
+  }
+  const json = (await res.json()) as {
+    chart?: {
+      result?: Array<{
+        timestamp?: number[];
+        indicators?: {
+          quote?: Array<{
+            open?: (number | null)[];
+            high?: (number | null)[];
+            low?: (number | null)[];
+            close?: (number | null)[];
+            volume?: (number | null)[];
+          }>;
+        };
+      }>;
+      error?: unknown;
+    };
+  };
+  const result = json.chart?.result?.[0];
+  const ts = result?.timestamp;
+  const q = result?.indicators?.quote?.[0];
+  if (!ts || !q?.open || !q?.high || !q?.low || !q?.close) {
+    throw new Error(
+      `Unexpected Yahoo 1m response for "${symbol}" (error: ${JSON.stringify(json.chart?.error)}).`,
+    );
+  }
+
+  const byDay = new Map<string, Yahoo1mBar[]>();
+  for (let i = 0; i < ts.length; i += 1) {
+    const o = q.open[i];
+    const h = q.high[i];
+    const l = q.low[i];
+    const c = q.close[i];
+    if (o == null || h == null || l == null || c == null) continue;
+    const et = partsInZone(ts[i]! * 1000, MARKET_TZ);
+    const minOfDay = et.h * 60 + et.mi;
+    if (minOfDay < RTH_OPEN_MIN || minOfDay > RTH_CLOSE_MIN) continue;
+    const dateKey = `${et.y}-${pad2(et.mo)}-${pad2(et.d)}`;
+    const arr = byDay.get(dateKey) ?? [];
+    arr.push({
+      dateKey,
+      minOfDay,
+      open: o,
+      high: h,
+      low: l,
+      close: c,
+      volume: q.volume?.[i] ?? null,
+    });
+    byDay.set(dateKey, arr);
+  }
+  for (const arr of byDay.values()) arr.sort((a, b) => a.minOfDay - b.minOfDay);
+  return byDay;
+}
+
+// ---------------------------------------------------------------------------
 // Conversion
 // ---------------------------------------------------------------------------
 
@@ -432,6 +532,12 @@ export interface ConvertResult {
   thinDays: number;
   warnings: string[];
 }
+
+// Thin-liquidity guard: a day is flagged when its calibration anchors are
+// untrustworthy — too few bars, or the first/last bar sits too far from the
+// 09:30/16:00 bell (a back-month contract can barely trade).
+const MIN_RTH_BARS_FOR_ANCHOR = 40;
+const ANCHOR_EDGE_TOLERANCE_MIN = 15;
 
 /**
  * Convert grouped ES bars to SPX bars by calibrating the per-day basis against
@@ -469,11 +575,11 @@ export function convertEsToSpx(
     const basisOpen = esOpen - truth.open;
     const basisClose = esClose - truth.close;
 
-    // Thin-liquidity guard: if the day's first bar is well after 09:30 or its
-    // last bar well before 16:00, the open/close anchors are unreliable (the
-    // contract barely traded). Flag it — the basis spread will usually expose it
-    // too, but a back-month contract can sit frozen all session.
-    if (dayBars.length < 40 || openMin > RTH_OPEN_MIN + 15 || closeMin < RTH_CLOSE_MIN - 15) {
+    if (
+      dayBars.length < MIN_RTH_BARS_FOR_ANCHOR ||
+      openMin > RTH_OPEN_MIN + ANCHOR_EDGE_TOLERANCE_MIN ||
+      closeMin < RTH_CLOSE_MIN - ANCHOR_EDGE_TOLERANCE_MIN
+    ) {
       thinDays += 1;
       warnings.push(
         `WARN ${day}: thin RTH coverage (${dayBars.length} bars, ` +
