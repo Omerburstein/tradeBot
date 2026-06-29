@@ -285,6 +285,10 @@ export class SignalGenerator {
   private executeSignal(signal: Signal, snapshot: Snapshot): void {
     const { config } = this;
 
+    // ES is the traded instrument and is the basis for fills/P&L (TODO #3);
+    // fall back to SPX spot only when no ES bar was ingested for the slot.
+    const esPrice = snapshot.es ?? snapshot.spot;
+
     if (signal.action === 'enter_long' || signal.action === 'enter_short') {
       const direction = signal.action === 'enter_long' ? 'long' as const : 'short' as const;
       const contracts = computePositionSize(config, signal.score.composite);
@@ -293,6 +297,7 @@ export class SignalGenerator {
         this.state,
         direction,
         snapshot.spot,
+        esPrice,
         snapshot.capturedAt,
         contracts,
         config.risk.slippagePerSide,
@@ -304,35 +309,44 @@ export class SignalGenerator {
           order: direction === 'long' ? 'BUY' : 'SELL', // open
           side: direction,
           time: snapshot.capturedAt,
-          fillPrice: round2(this.state.entryPrice!),
+          fillPrice: round2(this.state.entryFill!), // ES fill (P&L basis)
+          spot: round2(this.state.entryPrice!), // SPX decision price
           contracts,
           confidence: signal.confidence,
           composite: round2(signal.score.composite),
           reason: signal.reason,
         },
-        `ENTRY ${direction.toUpperCase()} ${contracts}x @ ${this.state.entryPrice!.toFixed(2)} — ${signal.reason}`,
+        `ENTRY ${direction.toUpperCase()} ${contracts}x @ ES ${this.state.entryFill!.toFixed(2)} — ${signal.reason}`,
       );
     } else if (signal.action === 'exit' && this.state.position !== 'flat') {
-      const { newState, realizedPnl } = recordExit(
+      // Capture the pre-exit state for the trade record (recordExit flattens it).
+      const direction = this.state.position as 'long' | 'short';
+      const entryPrice = this.state.entryPrice!;
+      const entryFill = this.state.entryFill!;
+      const contracts = this.state.contracts;
+
+      const { newState, realizedPnl, exitFill } = recordExit(
         this.state,
-        snapshot.spot,
+        esPrice,
         config.risk.slippagePerSide,
         config.risk.pointValue,
       );
 
       // Stop/target levels (SPX) implied by the entry fill — for the trade log.
-      const dir = this.state.position === 'long' ? 1 : -1;
-      const stopPrice = this.state.entryPrice! - dir * config.risk.stopLossPoints;
-      const targetPrice = this.state.entryPrice! + dir * takeProfitTargetPoints(config);
+      const dir = direction === 'long' ? 1 : -1;
+      const stopPrice = entryPrice - dir * config.risk.stopLossPoints;
+      const targetPrice = entryPrice + dir * takeProfitTargetPoints(config);
 
       // Record completed trade
       this.trades.push({
-        direction: this.state.position as 'long' | 'short',
+        direction,
         entryTime: this.state.entryTime!,
-        entryPrice: this.state.entryPrice!,
+        entryPrice,
         exitTime: snapshot.capturedAt,
         exitPrice: snapshot.spot,
-        contracts: this.state.contracts,
+        entryFill,
+        exitFill,
+        contracts,
         stopPrice,
         targetPrice,
         pnl: realizedPnl,
@@ -342,16 +356,17 @@ export class SignalGenerator {
       this.logger?.info(
         {
           event: 'EXIT',
-          order: this.state.position === 'long' ? 'SELL' : 'BUY', // close
-          side: this.state.position,
+          order: direction === 'long' ? 'SELL' : 'BUY', // close
+          side: direction,
           time: snapshot.capturedAt,
-          entryPrice: round2(this.state.entryPrice!),
-          exitPrice: round2(snapshot.spot),
-          contracts: this.state.contracts,
+          entryFill: round2(entryFill), // ES (P&L basis)
+          exitFill: round2(exitFill), // ES (P&L basis)
+          spot: round2(snapshot.spot), // SPX decision price
+          contracts,
           pnl: round2(realizedPnl),
           reason: signal.reason,
         },
-        `EXIT  ${(this.state.position as string).toUpperCase()} ${this.state.contracts}x @ ${snapshot.spot.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
+        `EXIT  ${direction.toUpperCase()} ${contracts}x @ ES ${exitFill.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
       );
 
       this.state = newState;

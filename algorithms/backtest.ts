@@ -292,9 +292,12 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
   console.log(`\n=== ${title} ===`);
   for (const t of trades) {
     const dir = t.direction.padEnd(5);
+    // SPX entry/exit drive the signal + stop/target; the ES fills (es=…) are
+    // what realized P&L is computed from (TODO #3).
     console.log(
       `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  ${t.contracts}x  ` +
-        `entry=${t.entryPrice.toFixed(2)} exit=${t.exitPrice.toFixed(2)} ` +
+        `spx=${t.entryPrice.toFixed(2)}→${t.exitPrice.toFixed(2)} ` +
+        `es=${t.entryFill.toFixed(2)}→${t.exitFill.toFixed(2)} ` +
         `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)}  ` +
         `${fmtUsd(t.pnl).padStart(11)}  ${t.reason}`,
     );
