@@ -136,6 +136,8 @@ export interface TuneResult {
   testResult: BacktestResult;
   leaderboard: TuneCandidate[];
   evaluated: number;
+  /** The search space that was swept — used to report the winning tuned params. */
+  space: Record<string, ParamRange>;
 }
 
 export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
@@ -200,6 +202,7 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
     testResult,
     leaderboard,
     evaluated: candidates.length,
+    space,
   };
 }
 
@@ -357,7 +360,20 @@ if (isMain) {
       console.log(`\nIn-sample  (train): ${fmt(res.trainResult)}`);
       console.log(`Out-sample (test):  ${fmt(res.testResult)}`);
 
-      console.log('\n=== BEST CONFIG ===');
+      // The winning values for just the knobs that were swept — the headline
+      // answer to "what params won". (The full config follows below.)
+      console.log('\n=== BEST CONFIG — TUNED PARAMS ===');
+      const paths = Object.keys(res.space).sort();
+      const pad = Math.max(...paths.map((p) => p.length));
+      for (const path of paths) {
+        const value = getPath(res.best, path);
+        const isWeight = (WEIGHT_KEYS as readonly string[]).includes(path);
+        console.log(
+          `  ${path.padEnd(pad)} = ${value.toFixed(4)}${isWeight ? ' (normalized)' : ''}`,
+        );
+      }
+
+      console.log('\n=== BEST CONFIG (full) ===');
       console.log(JSON.stringify(res.best, null, 2));
 
       console.log('\n=== LEADERBOARD (train objective) ===');
