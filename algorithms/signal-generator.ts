@@ -59,7 +59,12 @@ export class SignalGenerator {
   private cone: ConeTracker | null = null;
   private state: TradeState;
   private scoreHistory: ScoreComponents[] = [];
+  /** Last snapshot of any kind — for the chronological look-ahead guard. */
   private previousSnapshot: Snapshot | null = null;
+  /** Last snapshot carrying fresh Greeks — the dGamma/dPositions baseline. */
+  private previousGreekSnapshot: Snapshot | null = null;
+  /** Most recent Greek score, reused on intermediate price ticks. */
+  private lastScore: ScoreComponents | null = null;
   private trades: TradeRecord[] = [];
   private logger?: pino.Logger;
 
@@ -78,7 +83,14 @@ export class SignalGenerator {
   /**
    * Process a new snapshot and return a signal.
    *
-   * Call this once per 10-minute snapshot, in chronological order.
+   * Called once per decision — every 5 minutes — in chronological order. Real
+   * Greek snapshots arrive every 10 minutes; the data-loader inserts an
+   * intermediate price tick (`greeksStale`) at each 5-minute mark so entry/exit
+   * is re-decided on the current stock price twice as often. On a price tick the
+   * Greeks are unchanged, so the latest Greek score is reused (and the z-score
+   * history is not advanced) while the cone/stop/target/entry checks below all
+   * run against the tick's current spot.
+   *
    * Throws if a snapshot arrives out of order (look-ahead guard).
    */
   processSnapshot(snapshot: Snapshot): Signal {
@@ -94,14 +106,19 @@ export class SignalGenerator {
 
     const { config } = this;
 
-    // 1. Compute score
-    const score = computeScore(
-      snapshot,
-      this.previousSnapshot,
-      this.scoreHistory,
-      config,
-    );
-    this.scoreHistory.push(score);
+    // 1. Score. Fresh Greeks → recompute (vs the previous Greek snapshot) and
+    // advance the z-score history. A price tick reuses the latest Greek score:
+    // the Greeks haven't changed, so re-deriving a delta against an identical
+    // strike set would only inject zero-deltas that distort the lookback.
+    let score: ScoreComponents;
+    if (!snapshot.greeksStale || this.lastScore === null) {
+      score = computeScore(snapshot, this.previousGreekSnapshot, this.scoreHistory, config);
+      this.scoreHistory.push(score);
+      this.previousGreekSnapshot = snapshot;
+      this.lastScore = score;
+    } else {
+      score = this.lastScore;
+    }
 
     // 2. Update cone (built once from this day's stored cone endpoints)
     this.cone ??= new ConeTracker(snapshot.cone ?? null);
@@ -316,7 +333,7 @@ export class SignalGenerator {
           composite: round2(signal.score.composite),
           reason: signal.reason,
         },
-        `ENTRY ${direction.toUpperCase()} ${contracts}x @ ES ${this.state.entryFill!.toFixed(2)} — ${signal.reason}`,
+        `ENTRY ${direction.toUpperCase()} ${contracts} ES contract${contracts === 1 ? '' : 's'} @ ES ${this.state.entryFill!.toFixed(2)} — ${signal.reason}`,
       );
     } else if (signal.action === 'exit' && this.state.position !== 'flat') {
       // Capture the pre-exit state for the trade record (recordExit flattens it).
@@ -366,7 +383,7 @@ export class SignalGenerator {
           pnl: round2(realizedPnl),
           reason: signal.reason,
         },
-        `EXIT  ${direction.toUpperCase()} ${contracts}x @ ES ${exitFill.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
+        `EXIT  ${direction.toUpperCase()} ${contracts} ES contract${contracts === 1 ? '' : 's'} @ ES ${exitFill.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
       );
 
       this.state = newState;

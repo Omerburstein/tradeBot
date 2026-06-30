@@ -47,6 +47,15 @@ export interface Snapshot {
    * it. `null` when no cone was captured for the day. See {@link ConeEndpoints}.
    */
   cone?: ConeEndpoints | null;
+  /**
+   * True for an intermediate *price tick* the data-loader inserts between the
+   * 10-minute Greek slots so the algo can re-decide entry/exit every 5 minutes
+   * on the CURRENT stock price. Greeks (`strikes`) are unchanged from the slot
+   * that precedes the tick — only `spot`/`es` are refreshed — so the signal
+   * generator reuses the latest Greek score instead of recomputing it (and does
+   * NOT advance the z-score history). Absent/`false` = a real Greek snapshot.
+   */
+  greeksStale?: boolean;
 }
 
 // ── Scoring ──
@@ -276,7 +285,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     maxDailyLoss: 0.02,
     maxTradesPerDay: 6,
     slippagePerSide: 0.50,
-    pointValue: 50, // /ES mini
+    pointValue: 50, // $50 P&L per 1.0 ES point, per contract (/ES e-mini)
     noNewTradesAfterCT: '14:40',
     forcedExitByCT: '14:50',
   },
