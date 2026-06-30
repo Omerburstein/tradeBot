@@ -116,8 +116,15 @@ export function computeScore(
     }
   }
 
-  // Z-score normalization using rolling lookback, hard-clamped to ±zClamp so
+  // Z-score normalization using a rolling lookback, hard-clamped to ±zClamp so
   // a single anomalous snapshot can't blow the score out to z=10.
+  //
+  // SAME-DAY INVARIANT: `history` is the SignalGenerator's per-day scoreHistory,
+  // and a fresh generator is created for every trading day (see backtest.ts).
+  // The mean/std are therefore always computed from the SAME day's snapshots —
+  // never from prior days' "historical" data. The slice below is a trailing
+  // window WITHIN that day; since history starts empty each day it can never
+  // reach back across a day boundary. Do not feed a cross-day history here.
   const lookback = history.slice(-config.zScoreLookback);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
   const gexZ = clamp(zScore(gexRaw, lookback.map((h) => h.gexRaw)));

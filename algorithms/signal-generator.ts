@@ -58,6 +58,13 @@ export class SignalGenerator {
   /** Built lazily from the first snapshot's stored cone endpoints. */
   private cone: ConeTracker | null = null;
   private state: TradeState;
+  /**
+   * Per-day score history backing the z-score normalization. Starts empty for
+   * each day because a new SignalGenerator is created per trading day (see
+   * simulate() in backtest.ts) — so the z-score mean/std are always derived
+   * from the SAME day's snapshots, never from prior days' historical data.
+   * Never share a generator across days or this invariant breaks.
+   */
   private scoreHistory: ScoreComponents[] = [];
   /** Last snapshot of any kind — for the chronological look-ahead guard. */
   private previousSnapshot: Snapshot | null = null;
