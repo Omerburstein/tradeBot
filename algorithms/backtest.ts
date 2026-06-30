@@ -295,13 +295,16 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
   console.log('  (qty = /ES contracts bought; 1.0 ES pt = $50 per contract)');
   for (const t of trades) {
     const dir = t.direction.padEnd(5);
+    // GEX-relative take-profit distance (SPX pts) implied at entry — the value
+    // the entry gate screened against (minGexTakeProfitPoints).
+    const gexTp = Math.abs(t.targetPrice - t.entryPrice);
     // SPX entry/exit drive the signal + stop/target; the ES fills (es=…) are
     // what realized P&L is computed from (TODO #3).
     console.log(
       `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  qty=${t.contracts} ES  ` +
         `spx=${t.entryPrice.toFixed(2)}→${t.exitPrice.toFixed(2)} ` +
         `es=${t.entryFill.toFixed(2)}→${t.exitFill.toFixed(2)} ` +
-        `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)} ` +
+        `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)} gexTp=${gexTp.toFixed(1)}pts ` +
         `z=${t.compositeAtEntry.toFixed(2)}→${t.compositeAtExit.toFixed(2)}  ` +
         `${fmtUsd(t.pnl).padStart(11)}  ${t.reason}`,
     );

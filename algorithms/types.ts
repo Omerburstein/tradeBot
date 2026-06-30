@@ -290,7 +290,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     stopLossPoints: 10,
     riskRewardRatio: 3, // fallback only (no cone): take-profit at 30 pts
     gexTpFraction: 1.0, // target full ATM straddle distance
-    minGexTakeProfitPoints: 20, // skip trades whose GEX TP < 20 pts
+    minGexTakeProfitPoints: 15, // skip trades whose GEX TP < 15 pts
     trailingStopActivation: 5,
     trailingStopDistance: 7,
     maxDailyLoss: 0.02,

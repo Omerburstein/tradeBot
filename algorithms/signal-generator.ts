@@ -184,7 +184,7 @@ export class SignalGenerator {
       return this.makeSignal('hold', score, cone, snapshot, 'low', `daily limit: ${dailyLimits.reason}`);
     }
 
-    // GEX-derived TP gate: skip entries when the cone-implied target < 20 pts.
+    // GEX-derived TP gate: skip entries when the cone-implied target < 15 pts.
     // The TP is the ATM straddle (cone half-width) × gexTpFraction; falls back
     // to stopLossPoints × riskRewardRatio on days without cone data.
     if (!meetsGexMinTakeProfit(config, snapshot.cone)) {
