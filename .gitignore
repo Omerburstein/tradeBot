@@ -15,6 +15,9 @@ enviroment_vras.txt
 docs/tmp/
 docs/temp/
 
+# Generated test-case graphs (regenerate with `npm run test-cases`)
+docs/test-cases/*.svg
+
 # Claude Code transient worktree state
 .claude/worktrees/
 

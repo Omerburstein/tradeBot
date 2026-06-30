@@ -13,6 +13,7 @@
     "periscope-probe": "node --env-file=.env scraper/tools/periscope-probe.mjs",
     "backtest": "node --env-file=.env --import=tsx/esm algorithms/backtest.ts",
     "tune": "node --env-file=.env --import=tsx/esm algorithms/tuner.ts",
+    "test-cases": "node --env-file=.env --import=tsx/esm algorithms/test-cases.ts",
     "ingest": "node --env-file=.env --import=tsx/esm scripts/ingest-prices.ts",
     "live": "node --env-file=.env --import=tsx/esm scripts/live-prices.ts",
     "es-to-spx": "node --import=tsx/esm scripts/es-to-spx.ts",

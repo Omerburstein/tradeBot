@@ -41,6 +41,29 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   moment the exit fired, making it easier to see how much the signal decayed
   between the two.
 
+- [ ] **10. Restrict entries to cone breakouts confirmed by gamma direction; exit on cone re-entry, TP, or SL.**
+  Only enter a trade when SPX has broken outside the expected-move cone AND the
+  net gamma exposure is pointing in the same direction as the breakout (positive
+  gamma for upside break, negative gamma for downside break). Exit the trade on
+  whichever comes first: (a) SPX re-enters the cone, (b) the take-profit target
+  is hit, or (c) the stop-loss is hit.
+
+- [ ] **9. Write documentation explaining the contributors to the composite z-score.**
+  Add a written explanation (inline comments in `score-engine.ts` and/or a
+  `docs/` file) describing what each of the four z-score contributors represents,
+  why it was chosen, how it is computed, and how the weights combine them into
+  the composite signal. Should be clear enough that someone unfamiliar with the
+  codebase can understand what the composite is measuring and why each factor
+  matters.
+
+- [ ] **8. Audit timezone consistency and ensure the algo reads the correct GEX slot.**
+  Verify that all timestamps across the algo pipeline (GEX snapshots, ES prices,
+  SPX prices, positions) are in the same timezone (ET/UTC-normalised) and that
+  comparisons never mix zones. Additionally, confirm that when the algo is at
+  decision time T it reads the GEX snapshot whose slot covers [T, T+10min) — for
+  example, at 13:10 ET it should use the snapshot captured at the END of the
+  13:10–13:20 slot (captured_at = 13:20 ET), not the prior slot or a look-ahead.
+
 - [ ] **5. Gate algo decisions on full data availability (GEX, positions, ES, SPX); log and summarize gaps.**
   The algo must only make entry/exit decisions when all four data sources are
   present for the current slot: GEX (Greeks / gamma-exposure snapshots),
@@ -52,6 +75,19 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   so the completeness requirements are documented in one place.
 
 ## Training / Backtesting
+
+- [x] **11. Add a test-cases file with explained tune decisions and per-case graphs.**
+  Create a test cases file the tuner can run against, where for each case the
+  tune output explains WHY a trade was taken or skipped (which factors/
+  thresholds drove the decision) and plots a graph per example showing the
+  relevant params (e.g. composite z-score, GEX, cone, entry/exit levels) over
+  time. Add a first test case for 2026-06-10, 11:00–15:00.
+  *Done:* `algorithms/test-cases.ts` (`npm run test-cases`) replays each case
+  through the SignalGenerator, prints a per-slot explained timeline (factors +
+  thresholds + GEX-TP gate behind every entry/exit/missed trigger), and writes a
+  dependency-free dual-axis SVG (composite z + gexZ vs spot + cone + entry/exit
+  markers) to `docs/test-cases/<id>.svg`. First case `2026-06-10-midday`. See
+  `docs/test-cases/README.md`.
 
 - [ ] **2. Feed SPX price data from DB as the signal input for backtest and tune.**
   In both the backtesting and tuning paths, replace any hardcoded or synthetic
