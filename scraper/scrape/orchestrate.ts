@@ -355,11 +355,22 @@ export async function scrapeBackfillRange(
  * that resolves a [start, end] range to a list and delegates here. Use this
  * directly to backfill a sparse set of dates (e.g. only the gaps) without
  * re-scraping days that already have data.
+ *
+ * `opts.freshContextEachDay` scrapes each date in its OWN browser context
+ * (delegating to `scrapeBackfill`) instead of sharing one session. A shared
+ * session pins the Single-mode Expiry selection in page localStorage, which
+ * survives a page reload; once pinned to date D, `walkDateToTarget` to an
+ * earlier date can't get that date listed in the (now D-anchored) Expiry
+ * dropdown, so it fails (the alternating success/failure pattern across a
+ * long run). A fresh context starts at Expiry="All" — the proven-reliable
+ * single-date path. Costs one browser launch (~10s) per day; use it to
+ * retry days that failed a shared-session pass.
  */
 export async function scrapeBackfillDates(
   dates: string[],
   startHhmm: string,
   endHhmm: string,
+  opts: { freshContextEachDay?: boolean } = {},
 ): Promise<{
   totalRowsInserted: number;
   daysScanned: number;
@@ -368,6 +379,42 @@ export async function scrapeBackfillDates(
 }> {
   const startNorm = normalizeHhmm(startHhmm);
   const endNorm = normalizeHhmm(endHhmm);
+
+  if (opts.freshContextEachDay) {
+    let totalRowsInserted = 0;
+    let daysScanned = 0;
+    const daysFailed: string[] = [];
+    logger.info(
+      { totalDays: dates.length, startHhmm: startNorm, endHhmm: endNorm },
+      'backfill dates: starting (fresh context per day)',
+    );
+    for (const [idx, date] of dates.entries()) {
+      const dayStarted = Date.now();
+      const progress = `${idx + 1}/${dates.length}`;
+      logger.info({ date, progress }, 'backfill dates: starting day');
+      try {
+        // scrapeBackfill owns its own browser context → clean Expiry="All".
+        const summary = await scrapeBackfill(date, startNorm, endNorm);
+        totalRowsInserted += summary.snapshotsInserted;
+        daysScanned += 1;
+        logger.info(
+          { date, progress, ...summary, totalRowsInserted, ms: Date.now() - dayStarted },
+          'backfill dates: day complete',
+        );
+      } catch (err) {
+        daysFailed.push(date);
+        logger.error(
+          { date, progress, err: err instanceof Error ? err.message : String(err), ms: Date.now() - dayStarted },
+          'backfill dates: day failed — continuing to next',
+        );
+      }
+    }
+    logger.info(
+      { totalRowsInserted, daysScanned, daysFailed, totalDays: dates.length },
+      'backfill dates: complete',
+    );
+    return { totalRowsInserted, daysScanned, daysFailed, totalDays: dates.length };
+  }
 
   return await withBrowser(async (_browser, page) => {
     const caps = attachApiCaptures(page);

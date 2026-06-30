@@ -142,8 +142,30 @@ export async function setExpirySingle(
 
   if ((await target.count()) === 0) {
     const dialogHtml = await dialog.innerHTML().catch(() => '');
+    // Diagnostics: where is the chart actually positioned, and what dates does
+    // the dropdown actually list? Distinguishes a stranded chart frame (label
+    // != target ⇒ walkDateToTarget didn't land) from a virtualized/short list
+    // (target genuinely absent from the rendered rows).
+    const chartLabel = await page
+      .locator('[data-testid="date-picker-button"] span[role="button"]')
+      .first()
+      .textContent()
+      .catch(() => '');
+    const listedDates = await dialog
+      .locator('span, div, td, li')
+      .filter({ hasText: /^\d{4}-\d{2}-\d{2}\s*\(/ })
+      .allTextContents()
+      .catch(() => [] as string[]);
+    const uniqDates = [...new Set(listedDates.map((t) => t.trim()))];
     logger.warn(
-      { targetYmd, dialogHtmlLen: dialogHtml.length },
+      {
+        targetYmd,
+        dialogHtmlLen: dialogHtml.length,
+        chartLabel: (chartLabel ?? '').trim(),
+        listedCount: uniqDates.length,
+        listedFirst: uniqDates.slice(0, 4),
+        listedLast: uniqDates.slice(-4),
+      },
       'setExpirySingle: target date not found in dialog',
     );
     await page.keyboard.press('Escape');

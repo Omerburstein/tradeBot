@@ -504,12 +504,19 @@ if (backfillDates.length > 0) {
     { count: backfillDates.length, first: backfillDates[0], last: backfillDates[backfillDates.length - 1], backfillStart, backfillEnd },
     'BACKFILL_DATES set — backfilling an explicit list of days then exiting',
   );
+  // Default ON for the explicit-list path: it's the retry path for days that
+  // failed a shared-session range pass. A fresh browser context per day starts
+  // at Expiry="All" and avoids the localStorage expiry-pin that strands the
+  // dropdown on the wrong frame. Set BACKFILL_FRESH_CONTEXT=false to disable.
+  const freshContextEachDay =
+    (process.env.BACKFILL_FRESH_CONTEXT ?? 'true').trim().toLowerCase() !== 'false';
   const startedAt = Date.now();
   try {
     const summary = await scrapeBackfillDates(
       backfillDates,
       backfillStart,
       backfillEnd,
+      { freshContextEachDay },
     );
     logger.info(
       { ...summary, totalMs: Date.now() - startedAt },
