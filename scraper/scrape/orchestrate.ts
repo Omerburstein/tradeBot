@@ -340,17 +340,40 @@ export async function scrapeBackfillRange(
   daysFailed: string[];
   totalDays: number;
 }> {
+  const dates = tradingDaysBetween(startDate, endDate);
+  logger.info(
+    { startDate, endDate, totalDays: dates.length },
+    'backfill range: resolved trading days',
+  );
+  return await scrapeBackfillDates(dates, startHhmm, endHhmm);
+}
+
+/**
+ * Scrape an explicit list of trading days (already weekend/holiday-filtered
+ * by the caller). Same per-day path, browser lifecycle, and durable per-day
+ * inserts as the range backfill — `scrapeBackfillRange` is a thin wrapper
+ * that resolves a [start, end] range to a list and delegates here. Use this
+ * directly to backfill a sparse set of dates (e.g. only the gaps) without
+ * re-scraping days that already have data.
+ */
+export async function scrapeBackfillDates(
+  dates: string[],
+  startHhmm: string,
+  endHhmm: string,
+): Promise<{
+  totalRowsInserted: number;
+  daysScanned: number;
+  daysFailed: string[];
+  totalDays: number;
+}> {
   const startNorm = normalizeHhmm(startHhmm);
   const endNorm = normalizeHhmm(endHhmm);
-  const dates = tradingDaysBetween(startDate, endDate);
 
   return await withBrowser(async (_browser, page) => {
     const caps = attachApiCaptures(page);
 
     logger.info(
       {
-        startDate,
-        endDate,
         totalDays: dates.length,
         startHhmm: startNorm,
         endHhmm: endNorm,
@@ -358,10 +381,7 @@ export async function scrapeBackfillRange(
       'backfill range: starting',
     );
     if (dates.length === 0) {
-      logger.warn(
-        { startDate, endDate },
-        'backfill range: no trading days in range',
-      );
+      logger.warn({}, 'backfill range: no trading days to scrape');
       return {
         totalRowsInserted: 0,
         daysScanned: 0,
