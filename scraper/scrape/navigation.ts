@@ -365,18 +365,37 @@ export async function walkDateViaCalendar(
   const targetYear = Number.parseInt(targetYmd.slice(0, 4), 10);
   const targetMonth = Number.parseInt(targetYmd.slice(5, 7), 10); // 1-12
   const targetDay = Number.parseInt(targetYmd.slice(8, 10), 10);
+  const targetMonths = targetYear * 12 + targetMonth;
 
-  // Step 1: open the calendar
   const datePill = page.locator('[data-testid="date-picker-button"]').first();
-  await datePill.click({ timeout: 5_000 });
-  await page.waitForTimeout(800);
-
-  // Step 2-3: walk months until the header matches target. The header
-  // is unique inside the popup — match it by regex on text.
   const monthHeader = page.locator('text=/^[A-Z][a-z]+ 20[0-9]{2}$/').first();
   const prevMonth = page.getByLabel('Previous month').first();
   const nextMonth = page.getByLabel('Next month').first();
-  for (let attempt = 0; attempt < 36; attempt += 1) {
+  const labelLoc = page
+    .locator('[data-testid="date-picker-button"] span[role="button"]')
+    .first();
+
+  // Retry the whole open→navigate→pick up to 3×. The month HEADER updates
+  // faster than the day GRID, so re-reading the header each click (the old
+  // approach) could stop the walk one month early — the header showed the
+  // target while the grid still rendered the next month, and clicking "26"
+  // then selected the WRONG month's 26th (observed: target Feb 26 → landed
+  // Mar 26 under load). Instead: read the header ONCE, compute the exact
+  // month delta, click that many times with a settle between each, then let
+  // the grid settle before clicking the day. The post-click pill is ground
+  // truth; on mismatch we re-open and retry.
+  for (let nav = 0; nav < 3; nav += 1) {
+    if (nav > 0) {
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(700);
+    }
+
+    // Step 1: open the calendar.
+    await datePill.click({ timeout: 5_000 });
+    await page.waitForTimeout(800);
+
+    // Step 2: read the header once, compute the month delta, click that many
+    // times in one direction. No mid-walk header re-read → no header/grid race.
     const headerText = ((await monthHeader.textContent()) ?? '').trim();
     const m = /^([A-Z][a-z]+) (20[0-9]{2})$/.exec(headerText);
     if (m == null) {
@@ -384,47 +403,50 @@ export async function walkDateViaCalendar(
         `walkDateViaCalendar: unparseable month header "${headerText}"`,
       );
     }
-    const curMonth = MONTH_NAME_TO_NUM[m[1]!] ?? 0;
-    const curYear = Number.parseInt(m[2]!, 10);
-    if (curYear === targetYear && curMonth === targetMonth) {
-      break;
+    const curMonths =
+      Number.parseInt(m[2]!, 10) * 12 + (MONTH_NAME_TO_NUM[m[1]!] ?? 0);
+    const delta = curMonths - targetMonths; // >0 ⇒ go back (prev)
+    const stepBtn = delta > 0 ? prevMonth : nextMonth;
+    for (let i = 0; i < Math.abs(delta); i += 1) {
+      await stepBtn.click({ timeout: 3_000 });
+      await page.waitForTimeout(450);
     }
-    const curMonths = curYear * 12 + curMonth;
-    const targetMonths = targetYear * 12 + targetMonth;
-    if (curMonths > targetMonths) {
-      await prevMonth.click({ timeout: 3_000 });
-    } else {
-      await nextMonth.click({ timeout: 3_000 });
+    // Let the grid finish rendering the final month before reading day cells.
+    await page.waitForTimeout(700);
+
+    // Step 3: click the day cell. Filter to enabled cells only — disabled
+    // cells (non-trading days, dates outside UW's retention window) are
+    // marked with the `disabled` attribute.
+    const dayCell = page
+      .locator(
+        `button:not([disabled]):has(span.font-medium:text-is("${targetDay}"))`,
+      )
+      .first();
+    if ((await dayCell.count()) === 0) {
+      logger.warn(
+        { targetYmd, attempt: nav },
+        'walkDateViaCalendar: target day cell not present — retrying',
+      );
+      continue;
     }
-    await page.waitForTimeout(300);
-  }
+    await dayCell.click({ timeout: 5_000 });
+    await page.waitForTimeout(800);
 
-  // Step 4: click the day cell. Filter to enabled cells only — disabled
-  // cells (non-trading days, dates outside UW's retention window) are
-  // marked with the `disabled` attribute.
-  const dayCell = page
-    .locator(
-      `button:not([disabled]):has(span.font-medium:text-is("${targetDay}"))`,
-    )
-    .first();
-  await dayCell.click({ timeout: 5_000 });
-  await page.waitForTimeout(800);
-
-  // Step 5: confirm the date pill now reflects the target (the popup
-  // should auto-close on day-click; if it didn't, the assertion still
-  // works because the pill text reflects the new selection).
-  const labelLoc = page
-    .locator('[data-testid="date-picker-button"] span[role="button"]')
-    .first();
-  const finalLabel = ((await labelLoc.textContent()) ?? '').trim();
-  const finalYmd = parseDateLabel(finalLabel, targetYear);
-  if (finalYmd !== targetYmd) {
-    // Try to dismiss the popup before throwing so subsequent clicks
-    // aren't shadowed.
-    await page.keyboard.press('Escape').catch(() => {});
-    throw new Error(
-      `walkDateViaCalendar: pill shows "${finalLabel}" (parsed=${finalYmd ?? 'null'}) after click — wanted ${targetYmd}`,
+    // Step 4: confirm the date pill now reflects the target (ground truth).
+    const finalLabel = ((await labelLoc.textContent()) ?? '').trim();
+    const finalYmd = parseDateLabel(finalLabel, targetYear);
+    if (finalYmd === targetYmd) {
+      logger.debug({ targetYmd, attempt: nav }, 'walkDateViaCalendar: matched');
+      return;
+    }
+    logger.warn(
+      { targetYmd, finalLabel, finalYmd, attempt: nav },
+      'walkDateViaCalendar: landed on wrong date — retrying',
     );
   }
-  logger.debug({ targetYmd }, 'walkDateViaCalendar: matched');
+
+  await page.keyboard.press('Escape').catch(() => {});
+  throw new Error(
+    `walkDateViaCalendar: failed to reach ${targetYmd} after 3 attempts`,
+  );
 }
