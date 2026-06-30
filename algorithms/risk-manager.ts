@@ -3,7 +3,7 @@
  * daily limits, and time-based exit gates.
  */
 
-import type { AlgoConfig, Direction, TradeState } from './types.js';
+import type { AlgoConfig, ConeEndpoints, Direction, TradeState } from './types.js';
 
 /**
  * Compute position size in contracts based on risk parameters and
@@ -71,47 +71,62 @@ export function checkStopLoss(
 }
 
 /**
- * The fixed take-profit distance in SPX points: stopLossPoints × riskRewardRatio.
- * Single source of truth for both the exit check and the min-TP entry gate.
+ * GEX-relative take-profit target in SPX points.
+ *
+ * When the day's cone endpoints are available the target is derived from the
+ * ATM straddle (cone half-width = coneUpper − spxOpen) scaled by
+ * `config.risk.gexTpFraction`. On days without cone data the function falls
+ * back to the fixed stopLossPoints × riskRewardRatio target.
+ *
+ * Single source of truth used by both the entry gate and the exit check.
  */
-export function takeProfitTargetPoints(config: AlgoConfig): number {
+export function gexTakeProfitPoints(
+  config: AlgoConfig,
+  cone: ConeEndpoints | null | undefined,
+): number {
+  if (cone != null) {
+    return (cone.coneUpper - cone.spxOpen) * config.risk.gexTpFraction;
+  }
   return config.risk.stopLossPoints * config.risk.riskRewardRatio;
 }
 
 /**
- * Whether a trade's take-profit target clears the configured minimum (default
- * 10 pts). Entries below the floor are skipped — the edge is too thin to cover
- * round-trip cost/slippage. See {@link RiskParams.minTakeProfitPoints}.
+ * Whether the GEX-implied take-profit clears the configured minimum.
+ * When the cone-derived TP falls below `minGexTakeProfitPoints` the trade is
+ * skipped — the expected move is too small to justify entry costs.
  */
-export function meetsMinTakeProfit(config: AlgoConfig): boolean {
-  return takeProfitTargetPoints(config) >= config.risk.minTakeProfitPoints;
+export function meetsGexMinTakeProfit(
+  config: AlgoConfig,
+  cone: ConeEndpoints | null | undefined,
+): boolean {
+  return gexTakeProfitPoints(config, cone) >= config.risk.minGexTakeProfitPoints;
 }
 
 /**
- * Check whether the fixed profit target has been reached.
+ * Check whether the GEX-relative profit target has been reached.
  *
- * The target sits at stopLossPoints × riskRewardRatio from entry, enforcing
- * the configured risk:reward (e.g. 1:3). Slippage is not applied here — it's
- * accounted for at the actual exit fill in recordExit.
+ * The target is derived from `gexTakeProfitPoints` (ATM straddle when cone is
+ * available, fixed R:R fallback otherwise). Slippage is not applied here — it
+ * is accounted for at the actual exit fill in recordExit.
  */
 export function checkTakeProfit(
   state: TradeState,
   currentSpot: number,
   config: AlgoConfig,
+  cone: ConeEndpoints | null | undefined,
 ): { hit: boolean; reason: string } {
   if (state.position === 'flat' || state.entryPrice === null) {
     return { hit: false, reason: '' };
   }
 
-  const { risk } = config;
   const direction = state.position === 'long' ? 1 : -1;
   const pnlPoints = (currentSpot - state.entryPrice) * direction;
-  const targetPoints = takeProfitTargetPoints(config);
+  const targetPoints = gexTakeProfitPoints(config, cone);
 
   if (pnlPoints >= targetPoints) {
     return {
       hit: true,
-      reason: `+${pnlPoints.toFixed(1)} pts ≥ ${targetPoints.toFixed(1)} target (1:${risk.riskRewardRatio} R:R)`,
+      reason: `+${pnlPoints.toFixed(1)} pts ≥ ${targetPoints.toFixed(1)} GEX target`,
     };
   }
 

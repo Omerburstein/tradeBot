@@ -150,17 +150,25 @@ export interface RiskParams {
   /** Hard stop-loss in SPX points from entry. */
   stopLossPoints: number;
   /**
-   * Reward-to-risk ratio for the fixed profit target. The take-profit sits at
-   * stopLossPoints × riskRewardRatio from entry, so riskRewardRatio = 3 gives
-   * a 1:3 risk:reward (risk 1 point to make 3).
+   * Reward-to-risk ratio used as the fallback take-profit when no cone data is
+   * available. The fallback target = stopLossPoints × riskRewardRatio.
+   * When a cone is available, gexTpFraction replaces this as the TP basis.
    */
   riskRewardRatio: number;
   /**
-   * Minimum take-profit distance (SPX points) required to take a trade. Entries
-   * whose target (stopLossPoints × riskRewardRatio) falls below this floor are
-   * rejected — the edge is too small to be worth the round-trip cost/slippage.
+   * Fraction of the cone half-width (ATM straddle = coneUpper − spxOpen) to
+   * use as the GEX-relative take-profit target. Default 1.0 = aim for the full
+   * ATM straddle distance. Falls back to stopLossPoints × riskRewardRatio when
+   * no cone data is captured for the day.
    */
-  minTakeProfitPoints: number;
+  gexTpFraction: number;
+  /**
+   * Minimum GEX-derived take-profit (SPX points) required to enter a trade.
+   * When the cone-implied TP (ATM straddle × gexTpFraction) is below this
+   * floor the trade is skipped entirely — the expected move is too small to
+   * justify round-trip cost and slippage.
+   */
+  minGexTakeProfitPoints: number;
   /** Profit threshold (SPX pts) to activate trailing stop. */
   trailingStopActivation: number;
   /** Distance (SPX pts) the trailing stop trails behind HWM. */
@@ -278,8 +286,9 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     accountEquity: 50_000,
     maxRiskPerTrade: 0.01,
     stopLossPoints: 10,
-    riskRewardRatio: 3, // 1:3 risk:reward → take-profit at 30 pts
-    minTakeProfitPoints: 10, // skip trades whose TP target is under 10 pts
+    riskRewardRatio: 3, // fallback only (no cone): take-profit at 30 pts
+    gexTpFraction: 1.0, // target full ATM straddle distance
+    minGexTakeProfitPoints: 20, // skip trades whose GEX TP < 20 pts
     trailingStopActivation: 5,
     trailingStopDistance: 7,
     maxDailyLoss: 0.02,

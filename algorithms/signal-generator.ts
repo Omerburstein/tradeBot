@@ -31,10 +31,10 @@ import {
   checkTimeGates,
   computePositionSize,
   createFlatState,
-  meetsMinTakeProfit,
+  gexTakeProfitPoints,
+  meetsGexMinTakeProfit,
   recordEntry,
   recordExit,
-  takeProfitTargetPoints,
   updateTradeMetrics,
 } from './risk-manager.js';
 import { computeScore } from './score-engine.js';
@@ -184,11 +184,13 @@ export class SignalGenerator {
       return this.makeSignal('hold', score, cone, snapshot, 'low', `daily limit: ${dailyLimits.reason}`);
     }
 
-    // Minimum take-profit gate: skip entries whose target is too small to be
-    // worth the round-trip (TODO #5 — floor of risk.minTakeProfitPoints).
-    if (!meetsMinTakeProfit(config)) {
+    // GEX-derived TP gate: skip entries when the cone-implied target < 20 pts.
+    // The TP is the ATM straddle (cone half-width) × gexTpFraction; falls back
+    // to stopLossPoints × riskRewardRatio on days without cone data.
+    if (!meetsGexMinTakeProfit(config, snapshot.cone)) {
+      const tp = gexTakeProfitPoints(config, snapshot.cone);
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `take-profit target ${takeProfitTargetPoints(config).toFixed(1)} pts < ${config.risk.minTakeProfitPoints} pt minimum`);
+        `GEX TP ${tp.toFixed(1)} pts < ${config.risk.minGexTakeProfitPoints} pt minimum — expected move too small`);
     }
 
     return this.checkEntries(score, cone, snapshot);
@@ -210,8 +212,8 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
     }
 
-    // Take-profit check: fixed target enforcing the configured risk:reward
-    const tpCheck = checkTakeProfit(this.state, snapshot.spot, config);
+    // Take-profit check: GEX-relative target (ATM straddle × gexTpFraction)
+    const tpCheck = checkTakeProfit(this.state, snapshot.spot, config, snapshot.cone);
     if (tpCheck.hit) {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
     }
@@ -352,7 +354,7 @@ export class SignalGenerator {
       // Stop/target levels (SPX) implied by the entry fill — for the trade log.
       const dir = direction === 'long' ? 1 : -1;
       const stopPrice = entryPrice - dir * config.risk.stopLossPoints;
-      const targetPrice = entryPrice + dir * takeProfitTargetPoints(config);
+      const targetPrice = entryPrice + dir * gexTakeProfitPoints(config, snapshot.cone);
 
       // Record completed trade
       this.trades.push({
