@@ -10,6 +10,7 @@ export { scrapeAllPanels, scrapeMarketTideAndPrice } from './panels.js';
 export {
   scrapeBackfill,
   scrapeBackfillRange,
+  scrapeBackfillDates,
   scrapeWalkBack,
   discoverEndpoints,
 } from './orchestrate.js';

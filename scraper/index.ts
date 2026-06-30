@@ -88,7 +88,7 @@ const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow, APP_ENV, IS_STAGING } =
   await import('./core/config.js');
 const { expectedWindowEnd, parseSlotEnd, isPersistableSlot } = await import('./core/dates.js');
 const { insertSnapshots, insertSpotPrice, insertPositions } = await import('../db/index.js');
-const { scrapeAllPanels, scrapeMarketTideAndPrice, scrapeBackfill, scrapeBackfillRange } =
+const { scrapeAllPanels, scrapeMarketTideAndPrice, scrapeBackfill, scrapeBackfillRange, scrapeBackfillDates } =
   await import('./scrape/index.js');
 const { loadWebhookConfig, postPlaybookWebhook } = await import('./core/webhook.js');
 
@@ -491,8 +491,39 @@ const backfillStart = (process.env.BACKFILL_START ?? '').trim() || '09:20';
 const backfillEnd = (process.env.BACKFILL_END ?? '').trim() || '15:50';
 const backfillDateStart = (process.env.BACKFILL_DATE_START ?? '').trim();
 const backfillDateEnd = (process.env.BACKFILL_DATE_END ?? '').trim();
+// Explicit comma/space-separated list of YYYY-MM-DD trading days to backfill.
+// Unlike the range path this scrapes ONLY the listed days — used to fill
+// sparse coverage gaps without re-scraping days that already have data.
+const backfillDates = (process.env.BACKFILL_DATES ?? '')
+  .split(/[\s,]+/)
+  .map((d) => d.trim())
+  .filter((d) => d !== '');
 
-if (backfillDateStart !== '' && backfillDateEnd !== '') {
+if (backfillDates.length > 0) {
+  logger.info(
+    { count: backfillDates.length, first: backfillDates[0], last: backfillDates[backfillDates.length - 1], backfillStart, backfillEnd },
+    'BACKFILL_DATES set — backfilling an explicit list of days then exiting',
+  );
+  const startedAt = Date.now();
+  try {
+    const summary = await scrapeBackfillDates(
+      backfillDates,
+      backfillStart,
+      backfillEnd,
+    );
+    logger.info(
+      { ...summary, totalMs: Date.now() - startedAt },
+      'backfill dates complete',
+    );
+  } catch (err) {
+    Sentry.captureException(err);
+    logger.error(
+      { err, ms: Date.now() - startedAt },
+      'backfill dates failed at top level',
+    );
+  }
+  await gracefulExit(0);
+} else if (backfillDateStart !== '' && backfillDateEnd !== '') {
   logger.info(
     {
       backfillDateStart,
