@@ -207,6 +207,7 @@ export function createFlatState(): TradeState {
     entryPrice: null,
     entryFill: null,
     entryTime: null,
+    entryComposite: null,
     contracts: 0,
     unrealizedPnl: 0,
     dailyPnl: 0,
@@ -230,6 +231,7 @@ export function recordEntry(
   entryTime: string,
   contracts: number,
   slippagePerSide: number,
+  entryComposite: number,
 ): TradeState {
   // Apply slippage: long entry at higher price, short at lower
   const slip = direction === 'long' ? slippagePerSide : -slippagePerSide;
@@ -240,6 +242,7 @@ export function recordEntry(
     entryPrice: spotPrice + slip,
     entryFill: esPrice + slip,
     entryTime,
+    entryComposite,
     contracts,
     unrealizedPnl: 0,
     highWaterMark: 0,
@@ -280,6 +283,7 @@ export function recordExit(
     entryPrice: null,
     entryFill: null,
     entryTime: null,
+    entryComposite: null,
     contracts: 0,
     unrealizedPnl: 0,
     dailyPnl: state.dailyPnl + realizedPnl,

@@ -320,6 +320,7 @@ export class SignalGenerator {
         snapshot.capturedAt,
         contracts,
         config.risk.slippagePerSide,
+        signal.score.composite,
       );
 
       this.logger?.info(
@@ -343,6 +344,8 @@ export class SignalGenerator {
       const entryPrice = this.state.entryPrice!;
       const entryFill = this.state.entryFill!;
       const contracts = this.state.contracts;
+      const compositeAtEntry = this.state.entryComposite!;
+      const compositeAtExit = signal.score.composite;
 
       const { newState, realizedPnl, exitFill } = recordExit(
         this.state,
@@ -369,6 +372,8 @@ export class SignalGenerator {
         stopPrice,
         targetPrice,
         pnl: realizedPnl,
+        compositeAtEntry: round2(compositeAtEntry),
+        compositeAtExit: round2(compositeAtExit),
         reason: signal.reason,
       });
 
@@ -383,9 +388,11 @@ export class SignalGenerator {
           spot: round2(snapshot.spot), // SPX decision price
           contracts,
           pnl: round2(realizedPnl),
+          compositeAtEntry: round2(compositeAtEntry),
+          composite: round2(compositeAtExit),
           reason: signal.reason,
         },
-        `EXIT  ${direction.toUpperCase()} ${contracts} ES contract${contracts === 1 ? '' : 's'} @ ES ${exitFill.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
+        `EXIT  ${direction.toUpperCase()} ${contracts} ES contract${contracts === 1 ? '' : 's'} @ ES ${exitFill.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} z=${compositeAtEntry.toFixed(2)}→${compositeAtExit.toFixed(2)} — ${signal.reason}`,
       );
 
       this.state = newState;

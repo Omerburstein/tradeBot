@@ -34,7 +34,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   `entryZ` and `exitZ` as factors in the tuner so they are optimised together
   during training.
 
-- [ ] **7. Record and print the composite z-score at exit as well as at entry.**
+- [x] **7. Record and print the composite z-score at exit as well as at entry.**
   Currently the composite score is only logged as a structured field on the
   ENTRY event. Capture it on the EXIT event too (both in the log and on
   `TradeRecord`) so the trade log shows the composite at entry AND at the

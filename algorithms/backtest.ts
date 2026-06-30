@@ -301,7 +301,8 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
       `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  qty=${t.contracts} ES  ` +
         `spx=${t.entryPrice.toFixed(2)}→${t.exitPrice.toFixed(2)} ` +
         `es=${t.entryFill.toFixed(2)}→${t.exitFill.toFixed(2)} ` +
-        `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)}  ` +
+        `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)} ` +
+        `z=${t.compositeAtEntry.toFixed(2)}→${t.compositeAtExit.toFixed(2)}  ` +
         `${fmtUsd(t.pnl).padStart(11)}  ${t.reason}`,
     );
   }

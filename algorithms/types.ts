@@ -130,6 +130,8 @@ export interface TradeState {
    */
   entryFill: number | null;
   entryTime: string | null;
+  /** Composite z-score at entry — carried to the exit for the trade record. */
+  entryComposite: number | null;
   contracts: number;
   unrealizedPnl: number;
   dailyPnl: number;
@@ -346,6 +348,10 @@ export interface TradeRecord {
   targetPrice: number;
   /** Realized P&L (USD), computed from the ES fills (TODO #3). */
   pnl: number;
+  /** Composite z-score at entry. */
+  compositeAtEntry: number;
+  /** Composite z-score at the moment the exit fired. */
+  compositeAtExit: number;
   reason: string;
 }
 
