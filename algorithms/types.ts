@@ -138,6 +138,14 @@ export interface TradeState {
   dailyTradeCount: number;
   /** Highest favorable excursion since entry (for trailing stop). */
   highWaterMark: number;
+  /**
+   * GEX take-profit distance (SPX points) frozen at entry: the distance from
+   * the entry-snapshot spot to that snapshot's gamma center of mass. The gamma
+   * center is recomputed every slot, so the target is fixed here at entry and
+   * the exit check reads this stored value instead of recomputing. `null` while
+   * flat. See gexTakeProfitPoints / checkTakeProfit in risk-manager.ts.
+   */
+  gexTpPoints: number | null;
 }
 
 // ── Risk ──
@@ -152,23 +160,18 @@ export interface RiskParams {
   /** Hard stop-loss in SPX points from entry. */
   stopLossPoints: number;
   /**
-   * Reward-to-risk ratio used as the fallback take-profit when no cone data is
-   * available. The fallback target = stopLossPoints × riskRewardRatio.
-   * When a cone is available, gexTpFraction replaces this as the TP basis.
+   * Reward-to-risk ratio used as the fallback take-profit when the entry
+   * snapshot carries no gamma in the window. The fallback target =
+   * stopLossPoints × riskRewardRatio. The primary TP basis is the gamma
+   * center of mass (see gexTakeProfitPoints in risk-manager.ts).
    */
   riskRewardRatio: number;
   /**
-   * Fraction of the cone half-width (ATM straddle = coneUpper − spxOpen) to
-   * use as the GEX-relative take-profit target. Default 1.0 = aim for the full
-   * ATM straddle distance. Falls back to stopLossPoints × riskRewardRatio when
-   * no cone data is captured for the day.
-   */
-  gexTpFraction: number;
-  /**
    * Minimum GEX-derived take-profit (SPX points) required to enter a trade.
-   * When the cone-implied TP (ATM straddle × gexTpFraction) is below this
-   * floor the trade is skipped entirely — the expected move is too small to
-   * justify round-trip cost and slippage.
+   * The GEX TP is the distance from spot to the gamma center of mass
+   * (Σ(|gamma|·strike)/Σ(|gamma|)). When that distance is below this floor the
+   * trade is skipped entirely — the expected move is too small to justify
+   * round-trip cost and slippage.
    */
   minGexTakeProfitPoints: number;
   /** Profit threshold (SPX pts) to activate trailing stop. */
@@ -289,8 +292,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     maxRiskPerTrade: 0.01,
     stopLossPoints: 10,
     riskRewardRatio: 3, // fallback only (no cone): take-profit at 30 pts
-    gexTpFraction: 1.0, // target full ATM straddle distance
-    minGexTakeProfitPoints: 15, // skip trades whose GEX TP < 15 pts
+    minGexTakeProfitPoints: 15, // skip trades whose GEX TP (gamma-center distance) < 15 pts
     trailingStopActivation: 5,
     trailingStopDistance: 7,
     maxDailyLoss: 0.02,

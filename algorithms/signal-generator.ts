@@ -191,13 +191,14 @@ export class SignalGenerator {
       return this.makeSignal('hold', score, cone, snapshot, 'low', `daily limit: ${dailyLimits.reason}`);
     }
 
-    // GEX-derived TP gate: skip entries when the cone-implied target < 15 pts.
-    // The TP is the ATM straddle (cone half-width) × gexTpFraction; falls back
-    // to stopLossPoints × riskRewardRatio on days without cone data.
-    if (!meetsGexMinTakeProfit(config, snapshot.cone)) {
-      const tp = gexTakeProfitPoints(config, snapshot.cone);
+    // GEX-derived TP gate: skip entries when the gamma-center distance < 15 pts.
+    // The TP is the distance from spot to the gamma center of mass
+    // (Σ(|gamma|·strike)/Σ(|gamma|)); falls back to stopLossPoints ×
+    // riskRewardRatio when the snapshot carries no gamma in the window.
+    if (!meetsGexMinTakeProfit(config, snapshot)) {
+      const tp = gexTakeProfitPoints(config, snapshot);
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `GEX TP ${tp.toFixed(1)} pts < ${config.risk.minGexTakeProfitPoints} pt minimum — expected move too small`);
+        `GEX TP ${tp.toFixed(1)} pts < ${config.risk.minGexTakeProfitPoints} pt minimum — gamma center too close`);
     }
 
     return this.checkEntries(score, cone, snapshot);
@@ -219,8 +220,8 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
     }
 
-    // Take-profit check: GEX-relative target (ATM straddle × gexTpFraction)
-    const tpCheck = checkTakeProfit(this.state, snapshot.spot, config, snapshot.cone);
+    // Take-profit check: GEX-relative target (gamma-center distance frozen at entry)
+    const tpCheck = checkTakeProfit(this.state, snapshot.spot);
     if (tpCheck.hit) {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
     }
@@ -319,6 +320,8 @@ export class SignalGenerator {
       const direction = signal.action === 'enter_long' ? 'long' as const : 'short' as const;
       const contracts = computePositionSize(config, signal.score.composite);
 
+      // Freeze the GEX take-profit (gamma-center distance) on the entry
+      // snapshot so the exit target doesn't drift as gamma/spot move intraday.
       this.state = recordEntry(
         this.state,
         direction,
@@ -328,6 +331,7 @@ export class SignalGenerator {
         contracts,
         config.risk.slippagePerSide,
         signal.score.composite,
+        gexTakeProfitPoints(config, snapshot),
       );
 
       this.logger?.info(
@@ -353,6 +357,8 @@ export class SignalGenerator {
       const contracts = this.state.contracts;
       const compositeAtEntry = this.state.entryComposite!;
       const compositeAtExit = signal.score.composite;
+      // GEX take-profit distance frozen at entry (recordExit clears it).
+      const gexTpPoints = this.state.gexTpPoints ?? 0;
 
       const { newState, realizedPnl, exitFill } = recordExit(
         this.state,
@@ -364,7 +370,7 @@ export class SignalGenerator {
       // Stop/target levels (SPX) implied by the entry fill — for the trade log.
       const dir = direction === 'long' ? 1 : -1;
       const stopPrice = entryPrice - dir * config.risk.stopLossPoints;
-      const targetPrice = entryPrice + dir * gexTakeProfitPoints(config, snapshot.cone);
+      const targetPrice = entryPrice + dir * gexTpPoints;
 
       // Record completed trade
       this.trades.push({

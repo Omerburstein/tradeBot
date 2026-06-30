@@ -3,7 +3,7 @@
  * daily limits, and time-based exit gates.
  */
 
-import type { AlgoConfig, ConeEndpoints, Direction, TradeState } from './types.js';
+import type { AlgoConfig, Direction, Snapshot, StrikeData, TradeState } from './types.js';
 
 /**
  * Compute position size in contracts based on risk parameters and
@@ -71,57 +71,79 @@ export function checkStopLoss(
 }
 
 /**
- * GEX-relative take-profit target in SPX points.
+ * Gamma center of mass: the |gamma|-weighted average strike,
+ * Σ(|gamma|·strike) / Σ(|gamma|).
  *
- * When the day's cone endpoints are available the target is derived from the
- * ATM straddle (cone half-width = coneUpper − spxOpen) scaled by
- * `config.risk.gexTpFraction`. On days without cone data the function falls
- * back to the fixed stopLossPoints × riskRewardRatio target.
- *
- * Single source of truth used by both the entry gate and the exit check.
+ * Strikes are weighted by ABSOLUTE gamma (consistent with the score engine,
+ * which treats gamma as a magnitude) so opposite-sign gamma can't cancel the
+ * denominator toward zero and fling the average far from spot. Only strikes
+ * inside the ±strikeWindow band around spot are counted. Returns null when
+ * there is no gamma in the window.
  */
-export function gexTakeProfitPoints(
-  config: AlgoConfig,
-  cone: ConeEndpoints | null | undefined,
-): number {
-  if (cone != null) {
-    return (cone.coneUpper - cone.spxOpen) * config.risk.gexTpFraction;
+export function gammaCenterStrike(
+  strikes: StrikeData[],
+  spot: number,
+  strikeWindow: number,
+): number | null {
+  let weightedSum = 0;
+  let weightSum = 0;
+  for (const s of strikes) {
+    if (Math.abs(s.strike - spot) > strikeWindow) continue;
+    const w = Math.abs(s.gamma);
+    weightedSum += w * s.strike;
+    weightSum += w;
+  }
+  if (weightSum <= 0) return null;
+  return weightedSum / weightSum;
+}
+
+/**
+ * GEX take-profit target in SPX points: the distance from the snapshot's spot
+ * to its gamma center of mass (Σ(|gamma|·strike)/Σ(|gamma|)). Price is expected
+ * to gravitate toward the gamma center, so that distance is the profit target.
+ * Falls back to the fixed stopLossPoints × riskRewardRatio target when the
+ * snapshot carries no gamma in the window.
+ *
+ * Evaluated on the ENTRY snapshot and frozen into TradeState.gexTpPoints; the
+ * exit check reads the stored value so the target doesn't drift as gamma/spot
+ * move intraday. Single source of truth for both the entry gate and the stored
+ * exit target.
+ */
+export function gexTakeProfitPoints(config: AlgoConfig, snapshot: Snapshot): number {
+  const center = gammaCenterStrike(snapshot.strikes, snapshot.spot, config.strikeWindow);
+  if (center != null) {
+    return Math.abs(center - snapshot.spot);
   }
   return config.risk.stopLossPoints * config.risk.riskRewardRatio;
 }
 
 /**
  * Whether the GEX-implied take-profit clears the configured minimum.
- * When the cone-derived TP falls below `minGexTakeProfitPoints` the trade is
- * skipped — the expected move is too small to justify entry costs.
+ * When the gamma-center distance falls below `minGexTakeProfitPoints` the trade
+ * is skipped — the expected move is too small to justify entry costs.
  */
-export function meetsGexMinTakeProfit(
-  config: AlgoConfig,
-  cone: ConeEndpoints | null | undefined,
-): boolean {
-  return gexTakeProfitPoints(config, cone) >= config.risk.minGexTakeProfitPoints;
+export function meetsGexMinTakeProfit(config: AlgoConfig, snapshot: Snapshot): boolean {
+  return gexTakeProfitPoints(config, snapshot) >= config.risk.minGexTakeProfitPoints;
 }
 
 /**
  * Check whether the GEX-relative profit target has been reached.
  *
- * The target is derived from `gexTakeProfitPoints` (ATM straddle when cone is
- * available, fixed R:R fallback otherwise). Slippage is not applied here — it
- * is accounted for at the actual exit fill in recordExit.
+ * The target distance was frozen at entry (TradeState.gexTpPoints = distance
+ * from the entry spot to that snapshot's gamma center of mass). Slippage is not
+ * applied here — it is accounted for at the actual exit fill in recordExit.
  */
 export function checkTakeProfit(
   state: TradeState,
   currentSpot: number,
-  config: AlgoConfig,
-  cone: ConeEndpoints | null | undefined,
 ): { hit: boolean; reason: string } {
-  if (state.position === 'flat' || state.entryPrice === null) {
+  if (state.position === 'flat' || state.entryPrice === null || state.gexTpPoints === null) {
     return { hit: false, reason: '' };
   }
 
   const direction = state.position === 'long' ? 1 : -1;
   const pnlPoints = (currentSpot - state.entryPrice) * direction;
-  const targetPoints = gexTakeProfitPoints(config, cone);
+  const targetPoints = state.gexTpPoints;
 
   if (pnlPoints >= targetPoints) {
     return {
@@ -213,6 +235,7 @@ export function createFlatState(): TradeState {
     dailyPnl: 0,
     dailyTradeCount: 0,
     highWaterMark: 0,
+    gexTpPoints: null,
   };
 }
 
@@ -232,6 +255,7 @@ export function recordEntry(
   contracts: number,
   slippagePerSide: number,
   entryComposite: number,
+  gexTpPoints: number,
 ): TradeState {
   // Apply slippage: long entry at higher price, short at lower
   const slip = direction === 'long' ? slippagePerSide : -slippagePerSide;
@@ -246,6 +270,7 @@ export function recordEntry(
     contracts,
     unrealizedPnl: 0,
     highWaterMark: 0,
+    gexTpPoints,
   };
 }
 
@@ -289,6 +314,7 @@ export function recordExit(
     dailyPnl: state.dailyPnl + realizedPnl,
     dailyTradeCount: state.dailyTradeCount + 1,
     highWaterMark: 0,
+    gexTpPoints: null,
   };
 
   return { newState, realizedPnl, exitFill };
