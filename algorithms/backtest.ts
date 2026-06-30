@@ -290,12 +290,15 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
     return;
   }
   console.log(`\n=== ${title} ===`);
+  // qty = number of /ES contracts bought that trade; each 1.0 ES pt = $50 per
+  // contract, so realized pnl = (es exit − es entry) × $50 × qty.
+  console.log('  (qty = /ES contracts bought; 1.0 ES pt = $50 per contract)');
   for (const t of trades) {
     const dir = t.direction.padEnd(5);
     // SPX entry/exit drive the signal + stop/target; the ES fills (es=…) are
     // what realized P&L is computed from (TODO #3).
     console.log(
-      `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  ${t.contracts}x  ` +
+      `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  qty=${t.contracts} ES  ` +
         `spx=${t.entryPrice.toFixed(2)}→${t.exitPrice.toFixed(2)} ` +
         `es=${t.entryFill.toFixed(2)}→${t.exitFill.toFixed(2)} ` +
         `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)}  ` +

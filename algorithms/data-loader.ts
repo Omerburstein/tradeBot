@@ -2,13 +2,36 @@
  * Data loader: fetches periscope_snapshots from Neon Postgres and
  * pivots per-panel rows into unified Snapshot objects for the algo.
  *
- * Also provides a spot-price loader (from the spot_prices table added
- * by the pipeline extension) and a fallback that extracts spot from
- * the gamma panel's header if the dedicated table doesn't exist yet.
+ * 0DTE ONLY: every query is restricted to snapshots whose ET capture
+ * session equals the expiry (true 0DTE). The scraper also stores
+ * forward-expiry (1DTE+) captures — e.g. the 2026-02-12 expiry captured
+ * on 2026-02-11 — whose `captured_at` instants live on a different day
+ * than their `expiry`. Mixing those in silently mis-joined them against
+ * the wrong day's prices, so they are filtered out here.
+ *
+ * Spot/ES come from the dedicated spot_prices / es_prices tables, joined
+ * on the exact `captured_at` instant. A snapshot with no matching price
+ * row is skipped with a loud warning — never back-filled from strikes.
  */
 
 import { getDb } from '../db/index.js';
 import type { ConeEndpoints, Snapshot, StrikeData } from './types.js';
+
+/**
+ * Cadence (minutes) of the Greek panels the scraper captures — one snapshot per
+ * 10-minute slot. Used as the upper bound for how far a slot's Greeks may be
+ * carried forward when densifying, so a missing slot never extrapolates Greeks
+ * more than one slot ahead.
+ */
+const GREEK_SLOT_MINUTES = 10;
+
+/**
+ * How often the algo re-decides entry/exit. The Greeks only refresh every
+ * {@link GREEK_SLOT_MINUTES}, but spot/ES prices exist at 1-minute granularity
+ * (live Yahoo feed → spot_prices/es_prices), so we insert an intermediate
+ * price tick at this spacing inside each slot. 5 → decide every 5 minutes.
+ */
+const DECISION_INTERVAL_MINUTES = 5;
 
 /**
  * Load snapshots for a single trading day, joining gamma/charm/vanna
@@ -28,11 +51,15 @@ export async function loadDay(
   // expiry is a DATE column; cast it to text so the Neon driver returns a
   // clean "YYYY-MM-DD" string rather than a JS Date (whose String() form is
   // host-timezone-dependent and breaks re-casts on non-UTC machines).
+  // 0DTE only: the ET capture session must equal the expiry, so a snapshot's
+  // captured_at instant lands on the same trading day as its prices. This drops
+  // forward-expiry (1DTE+) captures whose captured_at is an earlier session.
   const rows = await sql(
     `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at,
             expiry::text AS expiry, panel, strike, value, timeframe
      FROM periscope_snapshots
      WHERE expiry = $1
+       AND (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
        AND panel IN ('gamma', 'charm', 'vanna', 'positions')
      ORDER BY captured_at, strike`,
     [date],
@@ -76,11 +103,18 @@ export async function loadDay(
 
   // Step 4: Build Snapshot objects
   const snapshots: Snapshot[] = [];
+  let unmatched = 0;
 
   for (const [capturedAt, group] of byTime) {
-    // Get spot price: prefer dedicated table, fall back to estimation
-    const spot = spotRows.get(capturedAt) ?? estimateSpotFromStrikes(group.strikes);
-    if (spot === null) continue; // Can't build snapshot without spot
+    // Spot comes strictly from the dedicated spot_prices table, joined on the
+    // exact captured_at instant. A snapshot with no matching price row is a real
+    // data gap — skip it and count it (warned below). Never fabricate spot from
+    // strikes: that silently masked a >100pt join bug across half the dataset.
+    const spot = spotRows.get(capturedAt);
+    if (spot === undefined) {
+      unmatched += 1;
+      continue;
+    }
 
     // Filter strikes to within strikeWindow of spot
     const strikes: StrikeData[] = [];
@@ -105,9 +139,82 @@ export async function loadDay(
     });
   }
 
-  return snapshots.sort(
+  if (unmatched > 0) {
+    console.warn(
+      `[data-loader] ${date}: skipped ${unmatched}/${byTime.size} snapshot(s) with no ` +
+        `matching spot_prices row — is spot_prices populated for this session?`,
+    );
+  }
+
+  snapshots.sort(
     (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
   );
+
+  // Densify to a 5-minute decision cadence using the live 1-minute price feed.
+  return densifyDecisions(snapshots, spotRows, esRows, DECISION_INTERVAL_MINUTES);
+}
+
+/** Render a UTC epoch (ms) as the `YYYY-MM-DDTHH:MM:SSZ` key the price maps use
+ *  (matches loadDay/loadSpotPrices' to_char format — no milliseconds). */
+function priceKey(epochMs: number): string {
+  return new Date(epochMs).toISOString().slice(0, 19) + 'Z';
+}
+
+/**
+ * Expand 10-minute Greek snapshots into a finer decision cadence so the algo can
+ * re-evaluate entry/exit on the CURRENT stock price every `intervalMin` minutes
+ * (instead of only once per Greek slot).
+ *
+ * For each slot, an intermediate *price tick* is inserted at every `intervalMin`
+ * offset up to the next snapshot (capped at one {@link GREEK_SLOT_MINUTES} slot
+ * so a missing slot never extrapolates Greeks far ahead). A tick reuses the
+ * preceding slot's Greeks (`strikes`/`cone`/`timeframe`) but takes the spot/ES
+ * price at the tick instant — and only when a real price bar exists there (price
+ * is never fabricated, matching the spot-join policy above). Ticks are flagged
+ * `greeksStale` so the signal generator reuses the latest Greek score rather
+ * than recomputing it. With no 1-minute feed for a day, no ticks are added and
+ * the day decides at the original 10-minute cadence.
+ *
+ * @param snapshots  Real Greek snapshots for one day, sorted ascending.
+ */
+function densifyDecisions(
+  snapshots: Snapshot[],
+  spotMap: Map<string, number>,
+  esMap: Map<string, number>,
+  intervalMin: number,
+): Snapshot[] {
+  if (intervalMin <= 0 || snapshots.length === 0) return snapshots;
+
+  const stepMs = intervalMin * 60_000;
+  const slotMs = GREEK_SLOT_MINUTES * 60_000;
+  const out: Snapshot[] = [];
+
+  for (let i = 0; i < snapshots.length; i++) {
+    const snap = snapshots[i]!;
+    out.push(snap);
+
+    const baseMs = new Date(snap.capturedAt).getTime();
+    const nextMs =
+      i + 1 < snapshots.length ? new Date(snapshots[i + 1]!.capturedAt).getTime() : Infinity;
+    // Carry this slot's Greeks forward at most one slot, and never past the next
+    // real snapshot.
+    const boundMs = Math.min(nextMs, baseMs + slotMs);
+
+    for (let t = baseMs + stepMs; t < boundMs; t += stepMs) {
+      const key = priceKey(t);
+      const spot = spotMap.get(key);
+      if (spot === undefined) continue; // no real price bar — never fabricate spot
+      out.push({
+        ...snap,
+        capturedAt: key,
+        spot,
+        es: esMap.get(key) ?? null,
+        greeksStale: true,
+      });
+    }
+  }
+
+  return out;
 }
 
 /**
@@ -200,29 +307,6 @@ export async function loadCone(date: string): Promise<ConeEndpoints | null> {
 }
 
 /**
- * Fallback spot estimation: use the median strike that has gamma data.
- * This is a rough approximation — the ATM strike (highest absolute gamma)
- * is typically near spot. Returns null if no strikes have data.
- */
-function estimateSpotFromStrikes(
-  strikes: Map<number, Partial<StrikeData>>,
-): number | null {
-  // The strike with the highest absolute gamma is typically closest to spot
-  let maxAbsGamma = 0;
-  let spotEstimate: number | null = null;
-
-  for (const sd of strikes.values()) {
-    const absGamma = Math.abs(sd.gamma ?? 0);
-    if (absGamma > maxAbsGamma) {
-      maxAbsGamma = absGamma;
-      spotEstimate = sd.strike!;
-    }
-  }
-
-  return spotEstimate;
-}
-
-/**
  * Load snapshots for a date range (for backtesting).
  * Returns a flat array sorted by captured_at across all days.
  */
@@ -242,6 +326,7 @@ export async function loadDateRange(
      FROM periscope_snapshots
      WHERE expiry >= $1 AND expiry <= $2
        AND panel = 'gamma'
+       AND (captured_at AT TIME ZONE 'America/New_York')::date = expiry
      ORDER BY expiry`,
     [startDate, endDate],
   );
@@ -265,6 +350,7 @@ export async function getAvailableDates(): Promise<string[]> {
     `SELECT DISTINCT expiry::text AS expiry
      FROM periscope_snapshots
      WHERE panel = 'gamma'
+       AND (captured_at AT TIME ZONE 'America/New_York')::date = expiry
      ORDER BY expiry`,
   );
   return rows.map((r) => String(r.expiry));
