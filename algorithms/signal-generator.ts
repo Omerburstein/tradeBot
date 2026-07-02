@@ -19,11 +19,12 @@
  *   - Cone returned: price falls back inside the cone after a breakout (failed breakout)
  *   - Reversal: composite flips past ±1.0 in opposing direction
  *   - Stop-loss: hard or trailing stop hit
- *   - Time gate: forced exit before 0DTE decay chaos (14:50 CT)
+ *   - Time gate: forced exit before 0DTE decay chaos (15:50 ET)
  */
 
 import type pino from 'pino';
 import { ConeTracker } from './cone.js';
+import { assessCoverage, coverageGap, type DataGap } from './data-coverage.js';
 import {
   checkDailyLimits,
   checkStopLoss,
@@ -37,11 +38,12 @@ import {
   recordExit,
   updateTradeMetrics,
 } from './risk-manager.js';
-import { computeScore } from './score-engine.js';
+import { computeScore, factorContributions } from './score-engine.js';
 import type {
   AlgoConfig,
   ConeInfo,
   Confidence,
+  FactorContributions,
   ScoreComponents,
   Signal,
   Snapshot,
@@ -74,6 +76,12 @@ export class SignalGenerator {
   private lastScore: ScoreComponents | null = null;
   private trades: TradeRecord[] = [];
   private logger?: pino.Logger;
+  /**
+   * Slots skipped because a required data source was missing (TODO #6). Each is
+   * also emitted at error level as it happens; this collects them so a run can
+   * summarize its coverage gaps at the end (see getDataGaps()).
+   */
+  private dataGaps: DataGap[] = [];
 
   /**
    * @param config  Algorithm configuration.
@@ -112,6 +120,26 @@ export class SignalGenerator {
     }
 
     const { config } = this;
+
+    // 0. Data-completeness gate (TODO #6). A decision requires all four sources
+    // (SPX, ES, GEX, positions) for THIS slot. If any is missing, emit a
+    // structured error and hold — never score, enter, exit, or advance the
+    // z-score baseline on partial data. The slot is recorded so the run can
+    // summarize its coverage gaps.
+    const coverage = assessCoverage(snapshot);
+    if (!coverage.complete) {
+      const gap = coverageGap(snapshot, coverage);
+      this.dataGaps.push(gap);
+      this.logger?.error(
+        { event: 'DATA_GAP', ...gap },
+        `skipping decision at ${snapshot.capturedAt}: incomplete slot — missing ${gap.missing.join(', ')}`,
+      );
+      // Keep the ordering guard monotonic, but leave the Greek/score baseline
+      // untouched so an incomplete slot never pollutes the z-score history.
+      this.previousSnapshot = snapshot;
+      return this.makeSignal('hold', EMPTY_SCORE, NEUTRAL_CONE, snapshot, 'low',
+        `data gap: missing ${gap.missing.join(', ')}`);
+    }
 
     // 1. Score. Fresh Greeks → recompute (vs the previous Greek snapshot) and
     // advance the z-score history. A price tick reuses the latest Greek score:
@@ -159,6 +187,11 @@ export class SignalGenerator {
   /** Get accumulated score history. */
   getScoreHistory(): ScoreComponents[] {
     return [...this.scoreHistory];
+  }
+
+  /** Slots this generator skipped for incomplete data (TODO #6). */
+  getDataGaps(): DataGap[] {
+    return [...this.dataGaps];
   }
 
   private generateSignal(
@@ -330,7 +363,7 @@ export class SignalGenerator {
         snapshot.capturedAt,
         contracts,
         config.risk.slippagePerSide,
-        signal.score.composite,
+        signal.score,
         gexTakeProfitPoints(config, snapshot),
       );
 
@@ -344,7 +377,8 @@ export class SignalGenerator {
           spot: round2(this.state.entryPrice!), // SPX decision price
           contracts,
           confidence: signal.confidence,
-          composite: round2(signal.score.composite),
+          // Each factor's weighted contribution to the composite (sums to it).
+          contributions: roundContributions(factorContributions(signal.score, config)),
           reason: signal.reason,
         },
         `ENTRY ${direction.toUpperCase()} ${contracts} ES contract${contracts === 1 ? '' : 's'} @ ES ${this.state.entryFill!.toFixed(2)} — ${signal.reason}`,
@@ -355,8 +389,11 @@ export class SignalGenerator {
       const entryPrice = this.state.entryPrice!;
       const entryFill = this.state.entryFill!;
       const contracts = this.state.contracts;
-      const compositeAtEntry = this.state.entryComposite!;
-      const compositeAtExit = signal.score.composite;
+      // Each factor's weighted contribution to the composite, at entry and now.
+      const contributionsAtEntry = roundContributions(
+        factorContributions(this.state.entryScore!, config),
+      );
+      const contributionsAtExit = roundContributions(factorContributions(signal.score, config));
       // GEX take-profit distance frozen at entry (recordExit clears it).
       const gexTpPoints = this.state.gexTpPoints ?? 0;
 
@@ -385,8 +422,8 @@ export class SignalGenerator {
         stopPrice,
         targetPrice,
         pnl: realizedPnl,
-        compositeAtEntry: round2(compositeAtEntry),
-        compositeAtExit: round2(compositeAtExit),
+        contributionsAtEntry,
+        contributionsAtExit,
         reason: signal.reason,
       });
 
@@ -401,11 +438,11 @@ export class SignalGenerator {
           spot: round2(snapshot.spot), // SPX decision price
           contracts,
           pnl: round2(realizedPnl),
-          compositeAtEntry: round2(compositeAtEntry),
-          composite: round2(compositeAtExit),
+          contributionsAtEntry,
+          contributionsAtExit,
           reason: signal.reason,
         },
-        `EXIT  ${direction.toUpperCase()} ${contracts} ES contract${contracts === 1 ? '' : 's'} @ ES ${exitFill.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} z=${compositeAtEntry.toFixed(2)}→${compositeAtExit.toFixed(2)} — ${signal.reason}`,
+        `EXIT  ${direction.toUpperCase()} ${contracts} ES contract${contracts === 1 ? '' : 's'} @ ES ${exitFill.toFixed(2)} pnl=$${realizedPnl.toFixed(2)} — ${signal.reason}`,
       );
 
       this.state = newState;
@@ -435,7 +472,39 @@ export class SignalGenerator {
   }
 }
 
+/**
+ * Placeholder score/cone for a `hold` returned on an incomplete slot (TODO #6).
+ * The slot is never scored (no data), so these are all-zero / neutral and are
+ * NOT pushed into the z-score history — they exist only to shape the returned
+ * Signal. Callers that skipped a decision must not read these as a real reading.
+ */
+const EMPTY_SCORE: ScoreComponents = {
+  gexRaw: 0, gexZ: 0,
+  dGammaRaw: 0, dGammaZ: 0,
+  positionsRaw: 0, positionsZ: 0,
+  dPositionsRaw: 0, dPositionsZ: 0,
+  composite: 0,
+};
+
+const NEUTRAL_CONE: ConeInfo = {
+  upper: NaN,
+  lower: NaN,
+  state: 'inside',
+  previousState: null,
+  crossed: null,
+};
+
 /** Round to 2 decimals for tidy log fields. */
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/** Round each factor contribution to 2 decimals for tidy log/trade-record fields. */
+function roundContributions(c: FactorContributions): FactorContributions {
+  return {
+    gex: round2(c.gex),
+    dGamma: round2(c.dGamma),
+    positions: round2(c.positions),
+    dPositions: round2(c.dPositions),
+  };
 }
