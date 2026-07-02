@@ -3,7 +3,14 @@
  * daily limits, and time-based exit gates.
  */
 
-import type { AlgoConfig, Direction, Snapshot, StrikeData, TradeState } from './types.js';
+import type {
+  AlgoConfig,
+  Direction,
+  ScoreComponents,
+  Snapshot,
+  StrikeData,
+  TradeState,
+} from './types.js';
 
 /**
  * Compute position size in contracts based on risk parameters and
@@ -183,7 +190,11 @@ export function checkDailyLimits(
 }
 
 /**
- * Check time-based exit gates using CT wall-clock time.
+ * Check time-based exit gates using ET wall-clock time.
+ *
+ * ET (America/New_York) is the single wall-clock zone across the whole pipeline
+ * — the captured_at instant is UTC and is converted to ET here, matching the
+ * ET-labelled `noNewTradesAfterET` / `forcedExitByET` config values. No CT.
  *
  * Returns whether we should block new entries or force-exit positions.
  */
@@ -191,13 +202,13 @@ export function checkTimeGates(
   capturedAtUtc: string,
   config: AlgoConfig,
 ): { blockNewEntries: boolean; forceExit: boolean } {
-  const ctMinutes = getCtMinutesSinceMidnight(capturedAtUtc);
-  const noEntryMinutes = parseHhmm(config.risk.noNewTradesAfterCT);
-  const forceExitMinutes = parseHhmm(config.risk.forcedExitByCT);
+  const etMinutes = getEtMinutesSinceMidnight(capturedAtUtc);
+  const noEntryMinutes = parseHhmm(config.risk.noNewTradesAfterET);
+  const forceExitMinutes = parseHhmm(config.risk.forcedExitByET);
 
   return {
-    blockNewEntries: ctMinutes >= noEntryMinutes,
-    forceExit: ctMinutes >= forceExitMinutes,
+    blockNewEntries: etMinutes >= noEntryMinutes,
+    forceExit: etMinutes >= forceExitMinutes,
   };
 }
 
@@ -229,7 +240,7 @@ export function createFlatState(): TradeState {
     entryPrice: null,
     entryFill: null,
     entryTime: null,
-    entryComposite: null,
+    entryScore: null,
     contracts: 0,
     unrealizedPnl: 0,
     dailyPnl: 0,
@@ -254,7 +265,7 @@ export function recordEntry(
   entryTime: string,
   contracts: number,
   slippagePerSide: number,
-  entryComposite: number,
+  entryScore: ScoreComponents,
   gexTpPoints: number,
 ): TradeState {
   // Apply slippage: long entry at higher price, short at lower
@@ -266,7 +277,7 @@ export function recordEntry(
     entryPrice: spotPrice + slip,
     entryFill: esPrice + slip,
     entryTime,
-    entryComposite,
+    entryScore,
     contracts,
     unrealizedPnl: 0,
     highWaterMark: 0,
@@ -308,7 +319,7 @@ export function recordExit(
     entryPrice: null,
     entryFill: null,
     entryTime: null,
-    entryComposite: null,
+    entryScore: null,
     contracts: 0,
     unrealizedPnl: 0,
     dailyPnl: state.dailyPnl + realizedPnl,
@@ -322,10 +333,10 @@ export function recordExit(
 
 // ── Helpers ──
 
-function getCtMinutesSinceMidnight(utcIso: string): number {
+function getEtMinutesSinceMidnight(utcIso: string): number {
   const d = new Date(utcIso);
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
+    timeZone: 'America/New_York',
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23',

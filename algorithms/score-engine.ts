@@ -21,9 +21,37 @@
  * Gamma carries the most weight. Charm and vanna are intentionally excluded
  * from the composite score; the signal is built from gamma and net
  * market-maker positions and their respective rates of change.
+ *
+ * For a from-scratch explanation of what each of the four contributors means,
+ * why it was chosen, how it is computed, and how the weights combine into the
+ * composite, see docs/composite-score.md.
  */
 
-import type { AlgoConfig, ScoreComponents, Snapshot, StrikeData } from './types.js';
+import type {
+  AlgoConfig,
+  FactorContributions,
+  ScoreComponents,
+  Snapshot,
+  StrikeData,
+} from './types.js';
+
+/**
+ * Break a composite score into each factor's weighted contribution
+ * (weight × z-score). The four parts sum to {@link ScoreComponents.composite},
+ * so this is the single source of truth for "how much did each var drive the
+ * decision" — used by the trade log / entry/exit logs.
+ */
+export function factorContributions(
+  score: ScoreComponents,
+  config: AlgoConfig,
+): FactorContributions {
+  return {
+    gex: config.wGex * score.gexZ,
+    dGamma: config.wDGamma * score.dGammaZ,
+    positions: config.wPositions * score.positionsZ,
+    dPositions: config.wDPositions * score.dPositionsZ,
+  };
+}
 
 /**
  * Compute the composite directional score for a single snapshot.

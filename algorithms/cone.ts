@@ -15,7 +15,7 @@
 
 import type { ConeEndpoints, ConeInfo, ConeState } from './types.js';
 
-/** RTH session length in minutes (09:30–16:00 ET = 08:30–15:00 CT). */
+/** RTH session length in minutes (09:30–16:00 ET). */
 const RTH_MINUTES = 390;
 
 /**
@@ -111,16 +111,17 @@ export class ConeTracker {
   }
 
   /**
-   * Compute minutes until RTH close (15:00 CT) from a UTC timestamp.
+   * Compute minutes until RTH close (16:00 ET) from a UTC timestamp.
    *
-   * Uses Intl.DateTimeFormat for DST-aware CT conversion (same approach
-   * as the scraper's dates.ts to avoid the container-TZ regression).
+   * ET (America/New_York) is the pipeline's single wall-clock zone. Uses
+   * Intl.DateTimeFormat for DST-aware conversion (same approach as the
+   * scraper's dates.ts to avoid the container-TZ regression).
    */
   private minutesUntilClose(capturedAtUtc: string): number {
     const d = new Date(capturedAtUtc);
 
     const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Chicago',
+      timeZone: 'America/New_York',
       hour: '2-digit',
       minute: '2-digit',
       hourCycle: 'h23',
@@ -129,13 +130,13 @@ export class ConeTracker {
     const get = (t: string) =>
       Number.parseInt(parts.find((p) => p.type === t)?.value ?? '0', 10);
 
-    const ctHour = get('hour');
-    const ctMinute = get('minute');
-    const ctMinutesSinceMidnight = ctHour * 60 + ctMinute;
+    const etHour = get('hour');
+    const etMinute = get('minute');
+    const etMinutesSinceMidnight = etHour * 60 + etMinute;
 
-    // RTH close = 15:00 CT = 900 minutes since midnight
-    const closeMinutes = 15 * 60;
-    const remaining = closeMinutes - ctMinutesSinceMidnight;
+    // RTH close = 16:00 ET = 960 minutes since midnight
+    const closeMinutes = 16 * 60;
+    const remaining = closeMinutes - etMinutesSinceMidnight;
 
     return Math.max(remaining, 0);
   }

@@ -16,6 +16,7 @@ import type {
   AlgoConfig,
   BacktestResult,
   EquitySettings,
+  FactorContributions,
   Snapshot,
   TradeRecord,
 } from './types.js';
@@ -290,25 +291,45 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
     return;
   }
   console.log(`\n=== ${title} ===`);
-  // qty = number of /ES contracts bought that trade; each 1.0 ES pt = $50 per
-  // contract, so realized pnl = (es exit − es entry) × $50 × qty.
-  console.log('  (qty = /ES contracts bought; 1.0 ES pt = $50 per contract)');
+  // qty = number of /ES contracts bought that trade (omitted = 1); each 1.0 ES
+  // pt = $50 per contract, so realized pnl = (es exit − es entry) × $50 × qty.
+  // gex/dGam/pos/dPos = each factor's weighted contribution to the composite
+  // (entry→exit), the four parts that sum to the directional score.
+  console.log(
+    '  (qty = /ES contracts bought, omitted = 1; 1.0 ES pt = $50 per contract; ' +
+      'gex/dGam/pos/dPos = each factor\'s weighted z contribution, entry→exit)',
+  );
   for (const t of trades) {
     const dir = t.direction.padEnd(5);
     // GEX-relative take-profit distance (SPX pts) implied at entry — the value
     // the entry gate screened against (minGexTakeProfitPoints).
     const gexTp = Math.abs(t.targetPrice - t.entryPrice);
+    // Omit the qty field entirely for a single contract (the common case).
+    const qty = t.contracts === 1 ? '' : `qty=${t.contracts} ES  `;
     // SPX entry/exit drive the signal + stop/target; the ES fills (es=…) are
     // what realized P&L is computed from (TODO #3).
     console.log(
-      `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  qty=${t.contracts} ES  ` +
+      `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  ${qty}` +
         `spx=${t.entryPrice.toFixed(2)}→${t.exitPrice.toFixed(2)} ` +
         `es=${t.entryFill.toFixed(2)}→${t.exitFill.toFixed(2)} ` +
         `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)} gexTp=${gexTp.toFixed(1)}pts ` +
-        `z=${t.compositeAtEntry.toFixed(2)}→${t.compositeAtExit.toFixed(2)}  ` +
+        `${fmtContributions(t.contributionsAtEntry, t.contributionsAtExit)}  ` +
         `${fmtUsd(t.pnl).padStart(11)}  ${t.reason}`,
     );
   }
+}
+
+/**
+ * Format the four factor contributions as `gex=e→x dGam=e→x pos=e→x dPos=e→x`
+ * (entry→exit), replacing the single composite z so the breakdown that drove
+ * each decision is visible. The four values sum to the composite at each side.
+ */
+function fmtContributions(entry: FactorContributions, exit: FactorContributions): string {
+  const f = (a: number, b: number) => `${a.toFixed(2)}→${b.toFixed(2)}`;
+  return (
+    `gex=${f(entry.gex, exit.gex)} dGam=${f(entry.dGamma, exit.dGamma)} ` +
+    `pos=${f(entry.positions, exit.positions)} dPos=${f(entry.dPositions, exit.dPositions)}`
+  );
 }
 
 /**

@@ -9,6 +9,20 @@ import type { Panel } from '../scraper/core/types.js';
 
 // ── Data Model ──
 
+/**
+ * The four data sources every entry/exit decision requires (TODO #6). A slot
+ * is only actionable when all four are present; otherwise the algo emits a
+ * structured error and skips the decision rather than trading on partial data.
+ *   - `spx`       — SPX spot price (signal/decision price), from `spot_prices`.
+ *   - `es`        — ES front-month future (P&L basis), from `es_prices`.
+ *   - `gex`       — gamma-exposure Greeks, from `periscope_snapshots` (gamma panel).
+ *   - `positions` — net MM contracts per strike, from the `positions` table.
+ */
+export type DataSource = 'spx' | 'es' | 'gex' | 'positions';
+
+/** Per-source presence flags for one slot/tick — see {@link DataSource}. */
+export type SourcePresence = Record<DataSource, boolean>;
+
 /** Greek values at a single strike for one snapshot. */
 export interface StrikeData {
   strike: number;
@@ -56,6 +70,16 @@ export interface Snapshot {
    * NOT advance the z-score history). Absent/`false` = a real Greek snapshot.
    */
   greeksStale?: boolean;
+  /**
+   * Which of the four required {@link DataSource}s were actually present when the
+   * data loader assembled this slot/tick (TODO #6). Stamped by the loader from
+   * what it joined: `gex`/`positions` reflect the Greek slot (and carry forward
+   * onto intermediate price ticks), while `spx`/`es` reflect the tick instant.
+   * The completeness gate in the signal generator reads this to decide whether
+   * the slot is actionable. Absent = derive presence from the fields directly
+   * (see `assessCoverage` in data-coverage.ts).
+   */
+  present?: SourcePresence;
 }
 
 // ── Scoring ──
@@ -72,6 +96,23 @@ export interface ScoreComponents {
   dPositionsRaw: number;
   dPositionsZ: number;
   composite: number;
+}
+
+/**
+ * Each factor's weighted contribution to the composite (weight × z-score), so
+ * the composite can be broken down into the four parts that produced it:
+ * `composite = gex + dGamma + positions + dPositions`. Built by
+ * `factorContributions` in score-engine.ts.
+ */
+export interface FactorContributions {
+  /** wGex × gexZ. */
+  gex: number;
+  /** wDGamma × dGammaZ. */
+  dGamma: number;
+  /** wPositions × positionsZ. */
+  positions: number;
+  /** wDPositions × dPositionsZ. */
+  dPositions: number;
 }
 
 // ── Cone ──
@@ -130,8 +171,9 @@ export interface TradeState {
    */
   entryFill: number | null;
   entryTime: string | null;
-  /** Composite z-score at entry — carried to the exit for the trade record. */
-  entryComposite: number | null;
+  /** Full score at entry — carried to the exit so the trade record can report
+   *  each factor's contribution at entry. `null` while flat. */
+  entryScore: ScoreComponents | null;
   contracts: number;
   unrealizedPnl: number;
   dailyPnl: number;
@@ -186,10 +228,10 @@ export interface RiskParams {
   slippagePerSide: number;
   /** SPX point value in USD (e.g. $50 for /ES, $100 for SPX options). */
   pointValue: number;
-  /** CT time after which no new entries allowed (HH:MM). */
-  noNewTradesAfterCT: string;
-  /** CT time by which all positions must be flat (HH:MM). */
-  forcedExitByCT: string;
+  /** ET time after which no new entries allowed (HH:MM). */
+  noNewTradesAfterET: string;
+  /** ET time by which all positions must be flat (HH:MM). */
+  forcedExitByET: string;
 }
 
 // ── Configuration ──
@@ -299,8 +341,8 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     maxTradesPerDay: 6,
     slippagePerSide: 0.50,
     pointValue: 50, // $50 P&L per 1.0 ES point, per contract (/ES e-mini)
-    noNewTradesAfterCT: '14:40',
-    forcedExitByCT: '14:50',
+    noNewTradesAfterET: '15:40', // was 14:40 CT — same instant, ET-normalized
+    forcedExitByET: '15:50', // was 14:50 CT — 10 min before the 16:00 ET close
   },
 };
 
@@ -350,10 +392,10 @@ export interface TradeRecord {
   targetPrice: number;
   /** Realized P&L (USD), computed from the ES fills (TODO #3). */
   pnl: number;
-  /** Composite z-score at entry. */
-  compositeAtEntry: number;
-  /** Composite z-score at the moment the exit fired. */
-  compositeAtExit: number;
+  /** Each factor's weighted contribution to the composite at entry. */
+  contributionsAtEntry: FactorContributions;
+  /** Each factor's weighted contribution to the composite at the exit. */
+  contributionsAtExit: FactorContributions;
   reason: string;
 }
 

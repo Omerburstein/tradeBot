@@ -206,13 +206,10 @@ to be asked each time. The standard end-of-task flow is:
 1. `npx tsc --noEmit` (the correctness gate — must pass first)
 2. `git add -A && git commit` with a clear message (end with the
    `Co-Authored-By: Claude ...` trailer)
-3. `git push origin HEAD:Adapt-scraper-to-own-usage`
+3. `git push origin HEAD:main`
 
 Notes:
-- The working branch is `Adapt-scraper-to-own-usage`. The local checkout
-  is confusingly named `remotes/origin/Adapt-scraper-to-own-usage`, so
-  **push with the explicit refspec** `HEAD:Adapt-scraper-to-own-usage`
-  (a bare `git push` may fail / target the wrong ref).
+- The working branch is `main` — commit and push straight to it.
 - A `pre-push` hook runs `tsc --noEmit` + `npm run test:unit`. **Never
   bypass it** (`--no-verify`) — if it fails, fix the underlying issue.
 - Do not commit transient artifacts: `docs/temp/` (scrape/debug dumps)
