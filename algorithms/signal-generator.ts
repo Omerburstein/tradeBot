@@ -266,12 +266,12 @@ export class SignalGenerator {
 
     // Signal fade: directional score dropped below exit threshold
     if (directionalScore < config.exitFadeThreshold) {
-      return this.makeSignal('exit', score, cone, snapshot, 'medium', `signal fade: composite=${score.composite.toFixed(2)}`);
+      return this.makeSignal('exit', score, cone, snapshot, 'medium', `signal fade: z-factor=${score.composite.toFixed(2)}`);
     }
 
     // Reversal: score flipped in opposing direction
     if (directionalScore < -config.reversalThreshold) {
-      return this.makeSignal('exit', score, cone, snapshot, 'high', `reversal: composite=${score.composite.toFixed(2)}`);
+      return this.makeSignal('exit', score, cone, snapshot, 'high', `reversal: z-factor=${score.composite.toFixed(2)}`);
     }
 
     return this.makeSignal('hold', score, cone, snapshot, 'low', 'position held');
@@ -293,20 +293,20 @@ export class SignalGenerator {
       if (score.composite > config.entryThreshold && score.dGammaZ > 0) {
         const confidence = this.assessConfidence(score, true);
         return this.makeSignal('enter_long', score, cone, snapshot, confidence,
-          `long entry: cone pass up + bullish Greeks (z=${z})`);
+          `long entry: cone pass up + bullish Greeks (z-factor=${z})`);
       }
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `cone pass up ignored: Greeks not bullish enough (z=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
+        `cone pass up ignored: Greeks not bullish enough (z-factor=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
     }
 
     if (cone.crossed === 'down') {
       if (score.composite < -config.entryThreshold && score.dGammaZ < 0) {
         const confidence = this.assessConfidence(score, true);
         return this.makeSignal('enter_short', score, cone, snapshot, confidence,
-          `short entry: cone pass down + bearish Greeks (z=${z})`);
+          `short entry: cone pass down + bearish Greeks (z-factor=${z})`);
       }
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `cone pass down ignored: Greeks not bearish enough (z=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
+        `cone pass down ignored: Greeks not bearish enough (z-factor=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
     }
 
     // ── STRONG INSIDE-CONE ENTRIES (no pass) ──
@@ -314,16 +314,16 @@ export class SignalGenerator {
       if (score.composite > config.strongEntryThreshold && score.dGammaZ > 0) {
         const confidence = this.assessConfidence(score, false);
         return this.makeSignal('enter_long', score, cone, snapshot, confidence,
-          `long entry: strong inside-cone signal (z=${z})`);
+          `long entry: strong inside-cone signal (z-factor=${z})`);
       }
       if (score.composite < -config.strongEntryThreshold && score.dGammaZ < 0) {
         const confidence = this.assessConfidence(score, false);
         return this.makeSignal('enter_short', score, cone, snapshot, confidence,
-          `short entry: strong inside-cone signal (z=${z})`);
+          `short entry: strong inside-cone signal (z-factor=${z})`);
       }
     }
 
-    return this.makeSignal('hold', score, cone, snapshot, 'low', `no entry signal (z=${z})`);
+    return this.makeSignal('hold', score, cone, snapshot, 'low', `no entry signal (z-factor=${z})`);
   }
 
   private assessConfidence(score: ScoreComponents, coneTrigger: boolean): Confidence {
