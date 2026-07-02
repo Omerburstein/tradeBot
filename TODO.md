@@ -21,12 +21,21 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   per slot and down-weight (most faithful) vs. score the two expiries separately
   and blend composites.
 
-- [x] **4. Make take-profit GEX-relative instead of a fixed 30 pts; skip trades when GEX-derived TP < 20.**
-  Replace the hardcoded 30-point take-profit with a target derived from the
-  current GEX level. If the GEX-implied take-profit comes out below 20 points,
-  skip the trade entirely rather than entering at an unfavourable target.
+- [x] **9. Change `LOOKAHEAD_GREEKS_FROM_SLOT_START` default to `true`.**
+  Flip the default value of `LOOKAHEAD_GREEKS_FROM_SLOT_START` from `false`
+  to `true` so the setting is on out of the box without requiring an explicit
+  env override.
+  *Done:* `data-loader.ts` now reads the flag as `(env ?? 'true') !== 'false'`,
+  so applying each Greek slot from its START is on by default and `=false` is the
+  explicit opt-out (verified: on with no env set, off under `=false`). Comments in
+  `data-loader.ts` and the timing section of `docs/timezone-audit.md` updated to
+  reflect that this is the **causal** timing: UW publishes each frame's Greeks at
+  the frame START, and the slot END is only UW's label/timestamp — so applying
+  from the START is live-realistic, NOT a look-ahead. Removed the incorrect
+  `not live-realistic` warning that a prior draft added (it misread UW's end-label
+  as end-publication). The env var keeps its historical `LOOKAHEAD_…` name.
 
-- [ ] **6. Add separate entry/exit z-score thresholds and include both as tunable parameters.**
+- [ ] **2. Add separate entry/exit z-score thresholds and include both as tunable parameters.**
   The algo's exit condition should require a z-score strictly below the entry
   z-score threshold (not the same value). Add a distinct `exitZ` parameter
   alongside the existing entry z-score, so the trade exits when signal z drops
@@ -34,37 +43,44 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   `entryZ` and `exitZ` as factors in the tuner so they are optimised together
   during training.
 
-- [x] **7. Record and print the composite z-score at exit as well as at entry.**
-  Currently the composite score is only logged as a structured field on the
-  ENTRY event. Capture it on the EXIT event too (both in the log and on
-  `TradeRecord`) so the trade log shows the composite at entry AND at the
-  moment the exit fired, making it easier to see how much the signal decayed
-  between the two.
-
-- [ ] **10. Restrict entries to cone breakouts confirmed by gamma direction; exit on cone re-entry, TP, or SL.**
+- [ ] **3. Restrict entries to cone breakouts confirmed by gamma direction; exit on cone re-entry, TP, or SL.**
   Only enter a trade when SPX has broken outside the expected-move cone AND the
   net gamma exposure is pointing in the same direction as the breakout (positive
   gamma for upside break, negative gamma for downside break). Exit the trade on
   whichever comes first: (a) SPX re-enters the cone, (b) the take-profit target
   is hit, or (c) the stop-loss is hit.
 
-- [ ] **9. Write documentation explaining the contributors to the composite z-score.**
+- [x] **4. Write documentation explaining the contributors to the composite z-score.**
   Add a written explanation (inline comments in `score-engine.ts` and/or a
   `docs/` file) describing what each of the four z-score contributors represents,
   why it was chosen, how it is computed, and how the weights combine them into
   the composite signal. Should be clear enough that someone unfamiliar with the
   codebase can understand what the composite is measuring and why each factor
   matters.
+  *Done:* `docs/composite-score.md` — a from-scratch walkthrough of the composite
+  (sign/direction convention, the shared per-strike building blocks — distance
+  weight, gamma gate, non-linear shaping — each of the four contributors' meaning/
+  rationale/formula, the same-day rolling z-score normalization + clamp, how the
+  weights combine, how it's consumed by the entry/exit gates, and a default-params
+  table). `score-engine.ts` header now points to it.
 
-- [ ] **8. Audit timezone consistency and ensure the algo reads the correct GEX slot.**
+- [x] **5. Audit timezone consistency and ensure the algo reads the correct GEX slot.**
   Verify that all timestamps across the algo pipeline (GEX snapshots, ES prices,
   SPX prices, positions) are in the same timezone (ET/UTC-normalised) and that
   comparisons never mix zones. Additionally, confirm that when the algo is at
   decision time T it reads the GEX snapshot whose slot covers [T, T+10min) — for
   example, at 13:10 ET it should use the snapshot captured at the END of the
   13:10–13:20 slot (captured_at = 13:20 ET), not the prior slot or a look-ahead.
+  *Done:* full audit in `docs/timezone-audit.md`. Storage (UTC TIMESTAMPTZ) +
+  loader joins (exact UTC-ISO captured_at; cone/day by ET date) were already
+  correct; slot alignment confirmed (algo uses the most-recently-closed slot at
+  its end instant, look-ahead-guarded). Fixed the two CT holdovers — the
+  `checkTimeGates` gate and the cone's `minutesUntilClose` — to ET
+  (behaviour-preserving, same instants); config fields renamed
+  `noNewTradesAfterCT`/`forcedExitByCT` → `…ET` (15:40 / 15:50). Pipeline now
+  speaks only UTC (storage) + ET (wall-clock).
 
-- [ ] **5. Gate algo decisions on full data availability (GEX, positions, ES, SPX); log and summarize gaps.**
+- [x] **6. Gate algo decisions on full data availability (GEX, positions, ES, SPX); log and summarize gaps.**
   The algo must only make entry/exit decisions when all four data sources are
   present for the current slot: GEX (Greeks / gamma-exposure snapshots),
   positions data, ES price, and SPX price. If any one of them is missing,
@@ -73,23 +89,25 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   query output) that captures the specs — which tables/columns are required per
   slot, what counts as "present", and which slots currently lack full coverage —
   so the completeness requirements are documented in one place.
+  *Done:* `algorithms/data-coverage.ts` is the single source of truth for the
+  four required sources + the "present" rule per source; `assessCoverage` is
+  enforced as step 0 of `SignalGenerator.processSnapshot` — an incomplete slot
+  emits a structured `DATA_GAP` error (level 50) and holds, never scoring,
+  trading, or advancing the z-score baseline (gaps collected via `getDataGaps`).
+  The loader now stamps per-source `present` flags on every slot/tick and — a
+  prerequisite for a meaningful positions gate — loads net MM positions from the
+  real `positions` table (call_qty+put_qty); they were silently always 0 before
+  because the loader queried a non-existent `positions` panel on
+  `periscope_snapshots`. `algorithms/coverage-report.ts` (`npm run coverage`)
+  queries the DB and (re)generates `docs/data-coverage.md` with the spec table +
+  current per-day gaps. Current state: 740/779 June gamma slots fully covered;
+  only 2026-06-29 lacks ES (ingest lag).
+  *Note:* wiring real positions into the score changes composite/backtest
+  numbers (positions carry ~30% of the default weight) — retune as needed.
 
 ## Training / Backtesting
 
-- [x] **11. Add a test-cases file with explained tune decisions and per-case graphs.**
-  Create a test cases file the tuner can run against, where for each case the
-  tune output explains WHY a trade was taken or skipped (which factors/
-  thresholds drove the decision) and plots a graph per example showing the
-  relevant params (e.g. composite z-score, GEX, cone, entry/exit levels) over
-  time. Add a first test case for 2026-06-10, 11:00–15:00.
-  *Done:* `algorithms/test-cases.ts` (`npm run test-cases`) replays each case
-  through the SignalGenerator, prints a per-slot explained timeline (factors +
-  thresholds + GEX-TP gate behind every entry/exit/missed trigger), and writes a
-  dependency-free dual-axis SVG (composite z + gexZ vs spot + cone + entry/exit
-  markers) to `docs/test-cases/<id>.svg`. First case `2026-06-10-midday`. See
-  `docs/test-cases/README.md`.
-
-- [ ] **2. Feed SPX price data from DB as the signal input for backtest and tune.**
+- [ ] **7. Feed SPX price data from DB as the signal input for backtest and tune.**
   In both the backtesting and tuning paths, replace any hardcoded or synthetic
   SPX price data with real SPX prices loaded from the DB. The SPX series is the
   data the algo uses to decide whether it wants to trade (entry/exit signal
@@ -99,8 +117,12 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Data
 
-- [x] **3. Check which dates are missing GEX and positions data (2025-12-29 → today).**
-  Audit the DB for coverage gaps between 2025-12-29 and today: find which trading
-  days have no GEX (Greeks / gamma-exposure snapshots) and/or no positions data.
-  Produce the list of missing dates for each series so the gaps can be
-  identified and backfilled.
+## Scraper
+
+- [ ] **8. Change the scraper to capture data every minute (page layout changed — review it first).**
+  Change the scraper so it takes the data every one minute instead of the
+  current 10-minute cadence. IMPORTANT: the Unusual Whales Periscope page has
+  changed — before making any changes, go over the current page thoroughly
+  (selectors, panel layout, timeframe widget, API responses) to make sure you
+  know exactly how it looks now, so the capture/parse logic is updated against
+  the real current structure rather than the old assumptions.

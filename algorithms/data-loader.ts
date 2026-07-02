@@ -34,6 +34,20 @@ const GREEK_SLOT_MINUTES = 10;
 const DECISION_INTERVAL_MINUTES = 5;
 
 /**
+ * Apply each 10-min Greek slot from its slot START (default ON — TODO #9). UW
+ * publishes a frame's Greeks at the START of the frame; the frame END is only the
+ * label/timestamp UW stamps the window with (the `[11:40,11:50]` frame is
+ * timestamped 11:50 even though its data is the 11:40 reading). So applying the
+ * slot's Greeks from its START is the causal, live-realistic timing — the data
+ * existed at that instant.
+ *
+ * Set `LOOKAHEAD_GREEKS_FROM_SLOT_START=false` to instead key each slot to its END
+ * label (the raw UW timestamp). The env var keeps its historical name.
+ */
+const LOOKAHEAD_GREEKS_FROM_SLOT_START =
+  (process.env.LOOKAHEAD_GREEKS_FROM_SLOT_START ?? 'true').trim().toLowerCase() !== 'false';
+
+/**
  * Load snapshots for a single trading day, joining gamma/charm/vanna
  * rows at each captured_at into unified Snapshot objects.
  *
@@ -60,23 +74,28 @@ export async function loadDay(
      FROM periscope_snapshots
      WHERE expiry = $1
        AND (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
-       AND panel IN ('gamma', 'charm', 'vanna', 'positions')
+       AND panel IN ('gamma', 'charm', 'vanna')
      ORDER BY captured_at, strike`,
     [date],
   );
 
   if (rows.length === 0) return [];
 
-  // Step 2: Try to get spot (SPX) + ES prices from their tables, plus the day's cone.
-  // SPX drives the signal; ES is the traded instrument used for P&L (TODO #3).
+  // Step 2: Try to get spot (SPX) + ES prices from their tables, plus positions
+  // and the day's cone. SPX drives the signal; ES is the traded instrument used
+  // for P&L (TODO #3); positions (net MM contracts) is one of the four sources
+  // the completeness gate requires (TODO #6). Note positions live in their OWN
+  // table (call_qty/put_qty), NOT as a periscope_snapshots panel — the query
+  // above only pulls the three Greek panels.
   const spotRows = await loadSpotPrices(date);
   const esRows = await loadEsPrices(date);
+  const { net: positionRows, slots: positionSlots } = await loadPositions(date);
   const cone = await loadCone(date);
 
   // Step 3: Group rows by captured_at
   const byTime = new Map<string, { timeframe: string; expiry: string; strikes: Map<number, Partial<StrikeData>> }>();
 
-  type GreekPanel = 'gamma' | 'charm' | 'vanna' | 'positions';
+  type GreekPanel = 'gamma' | 'charm' | 'vanna';
 
   for (const row of rows) {
     const capturedAt = String(row.captured_at);
@@ -99,6 +118,19 @@ export async function loadDay(
 
     const panel = String(row.panel) as GreekPanel;
     sd[panel] = Number(row.value);
+  }
+
+  // Overlay net MM positions (from the positions table) onto the Greek strikes,
+  // joined on the exact captured_at + strike. Strikes that appear only in the
+  // positions table (no gamma/charm/vanna) are ignored — the algo scores the
+  // Greek strikes and positions only add a directional weight to those.
+  for (const [capturedAt, group] of byTime) {
+    const perStrike = positionRows.get(capturedAt);
+    if (!perStrike) continue;
+    for (const sd of group.strikes.values()) {
+      const net = perStrike.get(sd.strike!);
+      if (net !== undefined) sd.positions = net;
+    }
   }
 
   // Step 4: Build Snapshot objects
@@ -128,14 +160,27 @@ export async function loadDay(
     const hasGamma = strikes.some((s) => s.gamma !== 0);
     if (!hasGamma) continue;
 
+    const es = esRows.get(capturedAt) ?? null;
+
     snapshots.push({
       capturedAt,
       expiry: group.expiry,
       timeframe: group.timeframe,
       spot,
-      es: esRows.get(capturedAt) ?? null,
+      es,
       strikes: strikes.sort((a, b) => a.strike - b.strike),
       cone,
+      // Per-source presence for the completeness gate (TODO #6). spx is always
+      // true here (a snapshot only exists with a matching spot row); gex is true
+      // (hasGamma above); es/positions vary by what was joined. positions
+      // presence is "a positions row existed for this slot" (positionSlots),
+      // independent of whether any net landed on an in-window strike.
+      present: {
+        spx: true,
+        es: es != null,
+        gex: true,
+        positions: positionSlots.has(capturedAt),
+      },
     });
   }
 
@@ -150,8 +195,15 @@ export async function loadDay(
     (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
   );
 
+  // Re-stamp each slot to its START (where UW publishes the frame) before
+  // densifying so the Greeks are applied from the start of their window
+  // (default ON — see flag).
+  const decisionSnapshots = LOOKAHEAD_GREEKS_FROM_SLOT_START
+    ? shiftGreeksToSlotStart(snapshots, spotRows, esRows)
+    : snapshots;
+
   // Densify to a 5-minute decision cadence using the live 1-minute price feed.
-  return densifyDecisions(snapshots, spotRows, esRows, DECISION_INTERVAL_MINUTES);
+  return densifyDecisions(decisionSnapshots, spotRows, esRows, DECISION_INTERVAL_MINUTES);
 }
 
 /** Render a UTC epoch (ms) as the `YYYY-MM-DDTHH:MM:SSZ` key the price maps use
@@ -204,16 +256,78 @@ function densifyDecisions(
       const key = priceKey(t);
       const spot = spotMap.get(key);
       if (spot === undefined) continue; // no real price bar — never fabricate spot
+      const es = esMap.get(key) ?? null;
       out.push({
         ...snap,
         capturedAt: key,
         spot,
-        es: esMap.get(key) ?? null,
+        es,
         greeksStale: true,
+        // gex/positions carry from the parent Greek slot (Greeks are reused on a
+        // tick); spx/es reflect this tick instant. Keeps the completeness gate
+        // (TODO #6) honest on ticks — a tick with no ES bar is still incomplete.
+        present: {
+          spx: true,
+          es: es != null,
+          gex: snap.present?.gex ?? true,
+          positions: snap.present?.positions ?? false,
+        },
       });
     }
   }
 
+  return out;
+}
+
+/**
+ * Re-stamp each real Greek snapshot from its slot END label to its slot START (one
+ * {@link GREEK_SLOT_MINUTES} slot earlier) and re-price spot/ES at that instant,
+ * so densifyDecisions then carries the slot's Greeks across [start, end). UW
+ * publishes each frame at its START, so this is the causal timing; the END is just
+ * the label UW timestamps the window with. Default ON (TODO #9); set
+ * `LOOKAHEAD_GREEKS_FROM_SLOT_START=false` to key slots to the END label instead.
+ *
+ * Only the price sources (spx/es) are re-evaluated at the shifted instant; the
+ * Greeks, positions and cone (all keyed to the original slot) ride along
+ * unchanged, so `present.gex`/`present.positions` are preserved. A slot whose
+ * start instant has no spot bar is dropped (never fabricate a price).
+ */
+function shiftGreeksToSlotStart(
+  snapshots: Snapshot[],
+  spotMap: Map<string, number>,
+  esMap: Map<string, number>,
+): Snapshot[] {
+  const shiftMs = GREEK_SLOT_MINUTES * 60_000;
+  const out: Snapshot[] = [];
+  let dropped = 0;
+  for (const snap of snapshots) {
+    const startKey = priceKey(new Date(snap.capturedAt).getTime() - shiftMs);
+    const spot = spotMap.get(startKey);
+    if (spot === undefined) {
+      dropped += 1;
+      continue; // no price bar at the slot-start instant — never fabricate
+    }
+    const es = esMap.get(startKey) ?? null;
+    out.push({
+      ...snap,
+      capturedAt: startKey,
+      spot,
+      es,
+      present: {
+        spx: true,
+        es: es != null,
+        gex: snap.present?.gex ?? true,
+        positions: snap.present?.positions ?? false,
+      },
+    });
+  }
+  out.sort((a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime());
+  if (dropped > 0) {
+    console.warn(
+      `[data-loader] applied ${out.length} Greek slot(s) from their START instant; ` +
+        `${dropped} dropped (no slot-start price bar).`,
+    );
+  }
   return out;
 }
 
@@ -273,6 +387,52 @@ async function loadEsPrices(date: string): Promise<Map<string, number>> {
   }
 
   return map;
+}
+
+/**
+ * Load net MM positions for a day from the dedicated `positions` table (keyed
+ * by captured_at + expiry + strike, with call_qty/put_qty). Net contracts per
+ * strike = call_qty + put_qty, matching {@link StrikeData.positions}.
+ *
+ * 0DTE only — same expiry + ET-session predicate as loadDay, so positions join
+ * the Greek strikes on the exact captured_at instant. Returns both the per-slot
+ * per-strike net map AND the set of slots that carried ANY positions row (the
+ * "positions present" signal for the completeness gate, TODO #6). Returns empty
+ * structures if the table doesn't exist yet.
+ */
+async function loadPositions(
+  date: string,
+): Promise<{ net: Map<string, Map<number, number>>; slots: Set<string> }> {
+  const sql = getDb();
+  const net = new Map<string, Map<number, number>>();
+  const slots = new Set<string>();
+
+  try {
+    const rows = await sql(
+      // Same captured_at rendering as loadDay so the join keys match exactly.
+      `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at,
+              strike, call_qty, put_qty
+       FROM positions
+       WHERE expiry = $1
+         AND (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+       ORDER BY captured_at, strike`,
+      [date],
+    );
+    for (const row of rows) {
+      const capturedAt = String(row.captured_at);
+      slots.add(capturedAt);
+      let perStrike = net.get(capturedAt);
+      if (!perStrike) {
+        perStrike = new Map();
+        net.set(capturedAt, perStrike);
+      }
+      perStrike.set(Number(row.strike), Number(row.call_qty) + Number(row.put_qty));
+    }
+  } catch {
+    // positions table may not exist yet — positions simply unavailable.
+  }
+
+  return { net, slots };
 }
 
 /**
