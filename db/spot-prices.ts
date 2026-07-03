@@ -24,6 +24,27 @@ const CREATE_SPOT_PRICES_TABLE =
   `PRIMARY KEY (captured_at, date)` +
   `)`;
 
+/**
+ * Delete every spot row whose ET trading day falls in [startDate, endDate]
+ * (inclusive, YYYY-MM-DD). Used by a full-replace re-ingest (e.g. swapping a
+ * derived SPX proxy for the exact I:SPX index) so stale timestamps that the new
+ * source doesn't cover can't linger. Returns the number of rows removed.
+ */
+export async function deleteSpotPricesInRange(
+  startDate: string,
+  endDate: string,
+): Promise<number> {
+  const sql = getDb();
+  await sql(CREATE_SPOT_PRICES_TABLE, []);
+  const out = await sql(
+    `DELETE FROM spot_prices WHERE date >= $1 AND date <= $2 RETURNING 1`,
+    [startDate, endDate],
+  );
+  const count = Array.isArray(out) ? out.length : 0;
+  logger.info({ startDate, endDate, deleted: count }, 'deleteSpotPricesInRange: done');
+  return count;
+}
+
 export async function insertSpotPrice(
   capturedAt: string,
   expiry: string,
