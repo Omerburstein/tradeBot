@@ -436,18 +436,16 @@ export interface Yahoo1mBar {
 }
 
 /**
- * Fetch recent 1-min RTH bars for a Yahoo symbol, grouped & sorted by ET trading
- * day. `range` is Yahoo's lookback window (e.g. '1d' for just the live session,
- * '5d' to find the latest complete day). Off-RTH minutes are dropped so both the
- * cash index (RTH-only) and the future align on the same 09:30–16:00 ET grid.
+ * Fetch + parse a Yahoo 1-min chart URL into RTH bars grouped & sorted by ET
+ * trading day. Off-RTH minutes are dropped so both the cash index (RTH-only) and
+ * the future align on the same 09:30–16:00 ET grid. Shared by the range-based
+ * (`fetchYahoo1mByDay`) and period-based (`fetchYahoo1mByPeriod`) fetchers so the
+ * request/parse lives in exactly one place.
  */
-export async function fetchYahoo1mByDay(
+async function fetchYahoo1m(
+  url: string,
   symbol: string,
-  range = '5d',
 ): Promise<Map<string, Yahoo1mBar[]>> {
-  const url =
-    `${YAHOO_CHART_BASE}${encodeURIComponent(symbol)}` +
-    `?range=${encodeURIComponent(range)}&interval=1m`;
   const res = await fetch(url, { headers: { 'user-agent': YAHOO_UA } });
   if (!res.ok) {
     throw new Error(`Yahoo 1m fetch failed: HTTP ${res.status} for ${symbol}`);
@@ -503,6 +501,39 @@ export async function fetchYahoo1mByDay(
   }
   for (const arr of byDay.values()) arr.sort((a, b) => a.minOfDay - b.minOfDay);
   return byDay;
+}
+
+/**
+ * Fetch recent 1-min RTH bars for a Yahoo symbol, grouped & sorted by ET trading
+ * day. `range` is Yahoo's lookback window (e.g. '1d' for just the live session,
+ * '5d' to find the latest complete day).
+ */
+export async function fetchYahoo1mByDay(
+  symbol: string,
+  range = '5d',
+): Promise<Map<string, Yahoo1mBar[]>> {
+  const url =
+    `${YAHOO_CHART_BASE}${encodeURIComponent(symbol)}` +
+    `?range=${encodeURIComponent(range)}&interval=1m`;
+  return fetchYahoo1m(url, symbol);
+}
+
+/**
+ * Fetch 1-min RTH bars for a Yahoo symbol over an explicit [period1, period2]
+ * window (UNIX seconds), grouped & sorted by ET trading day. Unlike the `range`
+ * form, this reaches arbitrary past days — but Yahoo caps 1-min data at the last
+ * ~30 days AND rejects any single request spanning more than 8 days (HTTP 422),
+ * so callers must chunk longer windows. Used by the historical price backfill.
+ */
+export async function fetchYahoo1mByPeriod(
+  symbol: string,
+  period1Sec: number,
+  period2Sec: number,
+): Promise<Map<string, Yahoo1mBar[]>> {
+  const url =
+    `${YAHOO_CHART_BASE}${encodeURIComponent(symbol)}` +
+    `?period1=${period1Sec}&period2=${period2Sec}&interval=1m`;
+  return fetchYahoo1m(url, symbol);
 }
 
 // ---------------------------------------------------------------------------

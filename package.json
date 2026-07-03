@@ -16,6 +16,7 @@
     "test-cases": "node --env-file=.env --import=tsx/esm algorithms/test-cases.ts",
     "coverage": "node --env-file=.env --import=tsx/esm algorithms/coverage-report.ts",
     "ingest": "node --env-file=.env --import=tsx/esm scripts/ingest-prices.ts",
+    "backfill-prices": "node --env-file=.env --import=tsx/esm scripts/backfill-prices.ts",
     "live": "node --env-file=.env --import=tsx/esm scripts/live-prices.ts",
     "es-to-spx": "node --import=tsx/esm scripts/es-to-spx.ts",
     "test:es-spx": "node --import=tsx/esm scripts/test-es-spx-conversion.ts"
