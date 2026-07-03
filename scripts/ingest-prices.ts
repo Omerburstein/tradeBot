@@ -38,6 +38,9 @@ import { makeFlagGetter, parseCommonArgs, type CommonArgs } from './lib/cli.js';
 interface Args extends CommonArgs {
   es: string;
   dryRun: boolean;
+  scale: number;
+  writeEs: boolean;
+  writeSpot: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -45,12 +48,18 @@ function parseArgs(argv: string[]): Args {
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(
       [
-        'ingest-prices — load ES + derived SPX bars into Postgres.',
+        'ingest-prices — load ES (or SPY) + derived SPX bars into Postgres.',
         '',
         'Usage: node --env-file=.env --import=tsx/esm scripts/ingest-prices.ts \\',
         '         --es <path.csv> [--tz America/New_York] [--start 2025-12-29] \\',
         '         [--end YYYY-MM-DD] [--spx-symbol ^GSPC] [--dateformat auto] \\',
-        '         [--anchor close] [--dry-run]',
+        '         [--anchor close] [--scale 1] [--es-only|--spot-only] [--dry-run]',
+        '',
+        '--scale N     multiply input bars before calibration (default 1 = ES).',
+        '              Pass 10 for a SPY CSV (SPX ≈ SPY×10); implies --spot-only',
+        '              since SPY×10 is NOT the futures series (never written to es_prices).',
+        '--es-only     write only es_prices (skip the derived spot_prices).',
+        '--spot-only   write only spot_prices (skip es_prices).',
       ].join('\n'),
     );
     process.exit(0);
@@ -60,9 +69,34 @@ function parseArgs(argv: string[]): Args {
     console.error('ERROR: --es <path> is required.');
     process.exit(1);
   }
+  const scale = Number.parseFloat(get('--scale') ?? '1');
+  if (!Number.isFinite(scale) || scale <= 0) {
+    console.error(`ERROR: --scale must be a positive number (got "${get('--scale')}")`);
+    process.exit(1);
+  }
+  const esOnly = argv.includes('--es-only');
+  const spotOnly = argv.includes('--spot-only');
+  if (esOnly && spotOnly) {
+    console.error('ERROR: --es-only and --spot-only are mutually exclusive.');
+    process.exit(1);
+  }
+  if (scale !== 1 && esOnly) {
+    console.error(
+      'ERROR: --scale is for a non-ES source (e.g. SPY) whose scaled values are ' +
+        'not the futures series, so it can only write spot_prices — --es-only is invalid with it.',
+    );
+    process.exit(1);
+  }
+  // A scaled (SPY) source never populates es_prices: SPY×10 is a cash-index
+  // proxy, not the traded future. Force spot-only so a stray flag can't mislabel it.
+  const writeEs = scale === 1 && !spotOnly;
+  const writeSpot = !esOnly;
   return {
     es,
     dryRun: argv.includes('--dry-run'),
+    scale,
+    writeEs,
+    writeSpot,
     ...parseCommonArgs(get),
   };
 }
@@ -94,9 +128,24 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // --scale lets a non-ES source (SPY, SPX ≈ SPY×10) reuse the same additive
+  // basis calibration: scale in place so the per-day basis becomes
+  // (SPY_close×10 − SPX_close) and recon = SPY×10 − basis = SPX. Mirrors es-to-spx.
+  if (args.scale !== 1) {
+    for (const arr of byDay.values()) {
+      for (const b of arr) {
+        b.open *= args.scale;
+        b.high *= args.scale;
+        b.low *= args.scale;
+        b.close *= args.scale;
+      }
+    }
+  }
+
   console.error(
     `Parsed ${bars.length} RTH bars across ${days.length} days ` +
-      `(${days[0]} → ${days[days.length - 1]}). Fetching SPX daily…`,
+      `(${days[0]} → ${days[days.length - 1]})` +
+      `${args.scale !== 1 ? `, scaled ×${args.scale}` : ''}. Fetching SPX daily…`,
   );
 
   const spx = await fetchSpxDaily(args.spxSymbol, args.start, args.end);
@@ -120,27 +169,29 @@ async function main(): Promise<void> {
     spot: Number(b.spxClose.toFixed(2)),
   }));
 
+  const targets = [args.writeEs ? 'es_prices' : null, args.writeSpot ? 'spot_prices' : null]
+    .filter(Boolean)
+    .join(' + ');
   console.error(
-    `Converted ${result.bars.length} bars → es_prices (ES OHLCV) + ` +
-      `spot_prices (SPX close), anchor=${args.anchor}.`,
+    `Converted ${result.bars.length} bars → ${targets}, anchor=${args.anchor}.`,
   );
 
   if (args.dryRun) {
     console.error('--dry-run: nothing written. Sample rows:');
-    console.error('  es_prices[0]   :', JSON.stringify(esRows[0]));
-    console.error('  spot_prices[0] :', JSON.stringify(spotRows[0]));
+    if (args.writeEs) console.error('  es_prices[0]   :', JSON.stringify(esRows[0]));
+    if (args.writeSpot) console.error('  spot_prices[0] :', JSON.stringify(spotRows[0]));
     return;
   }
 
   // Imported here (not at top) so --dry-run / --help work without a DATABASE_URL
   // — db/index.js → config.ts validates DATABASE_URL at module load.
   const { insertEsPrices, insertSpotPrices } = await import('../db/index.js');
-  const esWritten = await insertEsPrices(esRows);
-  const spotWritten = await insertSpotPrices(spotRows);
+  const esWritten = args.writeEs ? await insertEsPrices(esRows) : 0;
+  const spotWritten = args.writeSpot ? await insertSpotPrices(spotRows) : 0;
 
   console.error('');
-  console.error(`✓ es_prices:   ${esWritten} rows written`);
-  console.error(`✓ spot_prices: ${spotWritten} rows written (SPX close)`);
+  if (args.writeEs) console.error(`✓ es_prices:   ${esWritten} rows written`);
+  if (args.writeSpot) console.error(`✓ spot_prices: ${spotWritten} rows written (SPX close)`);
   if (parseFailures > 0) {
     console.error(`  (${parseFailures} input rows failed to parse and were skipped.)`);
   }
