@@ -392,6 +392,10 @@ export interface TradeRecord {
   targetPrice: number;
   /** Realized P&L (USD), computed from the ES fills (TODO #3). */
   pnl: number;
+  /** Composite z-factor at entry (== sum of contributionsAtEntry). */
+  zAtEntry: number;
+  /** Composite z-factor at the exit (== sum of contributionsAtExit). */
+  zAtExit: number;
   /** Each factor's weighted contribution to the composite at entry. */
   contributionsAtEntry: FactorContributions;
   /** Each factor's weighted contribution to the composite at the exit. */

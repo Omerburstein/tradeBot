@@ -422,6 +422,9 @@ export class SignalGenerator {
         stopPrice,
         targetPrice,
         pnl: realizedPnl,
+        // Composite z-factor at entry (frozen entry score) and at this exit.
+        zAtEntry: this.state.entryScore!.composite,
+        zAtExit: signal.score.composite,
         contributionsAtEntry,
         contributionsAtExit,
         reason: signal.reason,

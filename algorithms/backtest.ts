@@ -293,11 +293,11 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
   console.log(`\n=== ${title} ===`);
   // qty = number of /ES contracts bought that trade (omitted = 1); each 1.0 ES
   // pt = $50 per contract, so realized pnl = (es exit − es entry) × $50 × qty.
-  // gex/dGam/pos/dPos = each factor's weighted contribution to the composite
-  // (entry→exit), the four parts that sum to the directional score.
+  // z = composite z-factor (entry→exit); gex/dGam/pos/dPos = each factor's
+  // weighted contribution to that z (entry→exit), the four parts that sum to it.
   console.log(
     '  (qty = /ES contracts bought, omitted = 1; 1.0 ES pt = $50 per contract; ' +
-      'gex/dGam/pos/dPos = each factor\'s weighted z contribution, entry→exit)',
+      'z = composite z-factor entry→exit; gex/dGam/pos/dPos = each factor\'s weighted z contribution, entry→exit)',
   );
   for (const t of trades) {
     const dir = t.direction.padEnd(5);
@@ -313,6 +313,7 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
         `spx=${t.entryPrice.toFixed(2)}→${t.exitPrice.toFixed(2)} ` +
         `es=${t.entryFill.toFixed(2)}→${t.exitFill.toFixed(2)} ` +
         `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)} gexTp=${gexTp.toFixed(1)}pts ` +
+        `z=${t.zAtEntry.toFixed(2)}→${t.zAtExit.toFixed(2)} ` +
         `${fmtContributions(t.contributionsAtEntry, t.contributionsAtExit)}  ` +
         `${fmtUsd(t.pnl).padStart(11)}  ${t.reason}`,
     );
