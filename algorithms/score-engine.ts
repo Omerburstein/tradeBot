@@ -12,8 +12,11 @@
  *      non-linearly so an extremely large position print can't dominate. The
  *      positions LEVEL is also taken as an absolute magnitude (no netting);
  *      direction comes from position vs spot (no positive bias — gamma only).
- *   3. dGamma/dt — rate of change of gamma across successive snapshots (signed:
- *      a delta's sign is momentum, so it is NOT taken absolute)
+ *   3. dGamma/dt — rate of change of gamma *magnitude* (|gamma|) across
+ *      successive snapshots, matching the absolute-magnitude GEX level. The
+ *      delta of |gamma| is signed (its sign is momentum — a wall building vs
+ *      bleeding, including a negative-gamma strike shrinking toward zero), then
+ *      pointed by the strike's side of spot.
  *   4. dPositions/dt — rate of change of net MM positions (same gating, signed)
  *   5. Distance weighting — further strikes contribute MORE score
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
@@ -133,7 +136,14 @@ export function computeScore(
     if (previous) {
       const prev = prevByStrike.get(s.strike);
       if (prev) {
-        const deltaGamma = s.gamma - prev.gamma;
+        // Change in gamma *magnitude* (|gamma|), to match the GEX level factor
+        // which treats gamma as an absolute pressure. A wall building (|gamma|
+        // growing) is positive momentum; a wall bleeding off (|gamma| shrinking)
+        // is negative — including a NEGATIVE gamma position shrinking toward
+        // zero, which is a fade of that strike's pressure, so the delta is
+        // negative. The delta's own sign is still momentum (preserved through
+        // signedPow); `sign` then points it by the strike's side of spot.
+        const deltaGamma = Math.abs(s.gamma) - Math.abs(prev.gamma);
         dGammaRaw += signedPow(deltaGamma, config.pDGamma) * sign * dWeight;
 
         if (positionsCounts) {

@@ -105,15 +105,18 @@ gammaBias = positiveGammaBias (1.1) if gamma ≥ 0, else 1.0
 
 ### 3.2 dGamma/dt — gamma momentum  →  `dGammaZ` (weight `wDGamma`, default **0.25**)
 ```
-dGammaRaw += signedPow(gamma − prevGamma, pDGamma) · sign · dWeight
+dGammaRaw += signedPow(|gamma| − |prevGamma|, pDGamma) · sign · dWeight
 ```
 - **Represents:** how the gamma landscape is *shifting* between snapshots —
   gamma building above spot (or draining below) is fresh directional momentum.
 - **Why chosen:** the *level* (GEX) says where the walls are; the *change* says
   which way they are moving, catching turns earlier than the level alone.
-- **How computed:** the per-strike gamma delta vs. the previous **Greek**
-  snapshot (a 5-minute price tick contributes a zero delta by design — Greeks
-  are unchanged), sign-preserved through `pDGamma = 1.1`, directioned and
+- **How computed:** the per-strike change in gamma **magnitude** (`|gamma|`) vs.
+  the previous **Greek** snapshot — matching the absolute-magnitude GEX level, so
+  a wall building is positive momentum and a wall bleeding off (including a
+  *negative* gamma strike shrinking toward zero) is negative. A 5-minute price
+  tick contributes a zero delta by design (Greeks unchanged). The |gamma| delta
+  is sign-preserved through `pDGamma = 1.1`, directioned by `sign` and
   distance-weighted. Requires a previous snapshot; it is 0 on the day's first.
 
 ### 3.3 Net MM positions  →  `positionsZ` (weight `wPositions`, default **0.18**)
