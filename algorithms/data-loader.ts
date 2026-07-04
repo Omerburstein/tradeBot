@@ -34,20 +34,6 @@ const GREEK_SLOT_MINUTES = 10;
 const DECISION_INTERVAL_MINUTES = 5;
 
 /**
- * Apply each 10-min Greek slot from its slot START (default ON — TODO #9). UW
- * publishes a frame's Greeks at the START of the frame; the frame END is only the
- * label/timestamp UW stamps the window with (the `[11:40,11:50]` frame is
- * timestamped 11:50 even though its data is the 11:40 reading). So applying the
- * slot's Greeks from its START is the causal, live-realistic timing — the data
- * existed at that instant.
- *
- * Set `LOOKAHEAD_GREEKS_FROM_SLOT_START=false` to instead key each slot to its END
- * label (the raw UW timestamp). The env var keeps its historical name.
- */
-const LOOKAHEAD_GREEKS_FROM_SLOT_START =
-  (process.env.LOOKAHEAD_GREEKS_FROM_SLOT_START ?? 'true').trim().toLowerCase() !== 'false';
-
-/**
  * Load snapshots for a single trading day, joining gamma/charm/vanna
  * rows at each captured_at into unified Snapshot objects.
  *
@@ -138,11 +124,13 @@ export async function loadDay(
   let unmatched = 0;
 
   for (const [capturedAt, group] of byTime) {
-    // Spot comes strictly from the dedicated spot_prices table, joined on the
-    // exact captured_at instant. A snapshot with no matching price row is a real
-    // data gap — skip it and count it (warned below). Never fabricate spot from
-    // strikes: that silently masked a >100pt join bug across half the dataset.
-    const spot = spotRows.get(capturedAt);
+    // Spot comes strictly from the dedicated spot_prices table, using the candle
+    // that CLOSES at this slot's instant (no look-ahead — see spotAtClose). A
+    // snapshot with no matching price row is a real data gap — skip it and count
+    // it (warned below). Never fabricate spot from strikes: that silently masked
+    // a >100pt join bug across half the dataset.
+    const slotMs = new Date(capturedAt).getTime();
+    const spot = spotAtClose(spotRows, slotMs);
     if (spot === undefined) {
       unmatched += 1;
       continue;
@@ -160,7 +148,7 @@ export async function loadDay(
     const hasGamma = strikes.some((s) => s.gamma !== 0);
     if (!hasGamma) continue;
 
-    const es = esRows.get(capturedAt) ?? null;
+    const es = esAtClose(esRows, slotMs) ?? null;
 
     snapshots.push({
       capturedAt,
@@ -195,21 +183,45 @@ export async function loadDay(
     (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
   );
 
-  // Re-stamp each slot to its START (where UW publishes the frame) before
-  // densifying so the Greeks are applied from the start of their window
-  // (default ON — see flag).
-  const decisionSnapshots = LOOKAHEAD_GREEKS_FROM_SLOT_START
-    ? shiftGreeksToSlotStart(snapshots, spotRows, esRows)
-    : snapshots;
-
   // Densify to a 5-minute decision cadence using the live 1-minute price feed.
-  return densifyDecisions(decisionSnapshots, spotRows, esRows, DECISION_INTERVAL_MINUTES);
+  // Greeks stay keyed to their slot END (captured_at) — the instant UW actually
+  // publishes the frame — so a slot is only applied once it exists (no look-ahead).
+  return densifyDecisions(snapshots, spotRows, esRows, DECISION_INTERVAL_MINUTES);
 }
 
 /** Render a UTC epoch (ms) as the `YYYY-MM-DDTHH:MM:SSZ` key the price maps use
  *  (matches loadDay/loadSpotPrices' to_char format — no milliseconds). */
 function priceKey(epochMs: number): string {
   return new Date(epochMs).toISOString().slice(0, 19) + 'Z';
+}
+
+const MIN_MS = 60_000;
+
+/**
+ * Price for a decision at instant `tMs`, using the candle that CLOSES at `tMs` —
+ * never the still-forming candle that STARTS at `tMs` (that would be look-ahead).
+ *
+ * Bars are stored START-labelled and hold the bar's CLOSE, so the candle closing
+ * at T is the one labelled `T − barDuration`. For a 10:35 decision that means the
+ * 10:34 spot (1-min) bar and the 10:30 ES (5-min) bar — both carry the last price
+ * at 10:35.
+ *
+ * SPX (I:SPX) is uniformly 1-min → look up `T − 1min`. ES is 5-min in the older
+ * data and 1-min in the recent feed; the bar closing at T is labelled `T − 1min`
+ * (1-min) or `T − 5min` (5-min), so try the finer key first, then the 5-min key.
+ * A final `T` fallback covers the rare missing prior bar (e.g. the 09:30 open,
+ * where no earlier candle exists) rather than dropping the decision.
+ */
+function spotAtClose(map: Map<string, number>, tMs: number): number | undefined {
+  return map.get(priceKey(tMs - MIN_MS)) ?? map.get(priceKey(tMs));
+}
+
+function esAtClose(map: Map<string, number>, tMs: number): number | undefined {
+  return (
+    map.get(priceKey(tMs - MIN_MS)) ??
+    map.get(priceKey(tMs - 5 * MIN_MS)) ??
+    map.get(priceKey(tMs))
+  );
 }
 
 /**
@@ -254,9 +266,11 @@ function densifyDecisions(
 
     for (let t = baseMs + stepMs; t < boundMs; t += stepMs) {
       const key = priceKey(t);
-      const spot = spotMap.get(key);
+      // Use the candle CLOSING at this tick instant, not the one opening at it
+      // (no look-ahead — see spotAtClose/esAtClose).
+      const spot = spotAtClose(spotMap, t);
       if (spot === undefined) continue; // no real price bar — never fabricate spot
-      const es = esMap.get(key) ?? null;
+      const es = esAtClose(esMap, t) ?? null;
       out.push({
         ...snap,
         capturedAt: key,
@@ -276,58 +290,6 @@ function densifyDecisions(
     }
   }
 
-  return out;
-}
-
-/**
- * Re-stamp each real Greek snapshot from its slot END label to its slot START (one
- * {@link GREEK_SLOT_MINUTES} slot earlier) and re-price spot/ES at that instant,
- * so densifyDecisions then carries the slot's Greeks across [start, end). UW
- * publishes each frame at its START, so this is the causal timing; the END is just
- * the label UW timestamps the window with. Default ON (TODO #9); set
- * `LOOKAHEAD_GREEKS_FROM_SLOT_START=false` to key slots to the END label instead.
- *
- * Only the price sources (spx/es) are re-evaluated at the shifted instant; the
- * Greeks, positions and cone (all keyed to the original slot) ride along
- * unchanged, so `present.gex`/`present.positions` are preserved. A slot whose
- * start instant has no spot bar is dropped (never fabricate a price).
- */
-function shiftGreeksToSlotStart(
-  snapshots: Snapshot[],
-  spotMap: Map<string, number>,
-  esMap: Map<string, number>,
-): Snapshot[] {
-  const shiftMs = GREEK_SLOT_MINUTES * 60_000;
-  const out: Snapshot[] = [];
-  let dropped = 0;
-  for (const snap of snapshots) {
-    const startKey = priceKey(new Date(snap.capturedAt).getTime() - shiftMs);
-    const spot = spotMap.get(startKey);
-    if (spot === undefined) {
-      dropped += 1;
-      continue; // no price bar at the slot-start instant — never fabricate
-    }
-    const es = esMap.get(startKey) ?? null;
-    out.push({
-      ...snap,
-      capturedAt: startKey,
-      spot,
-      es,
-      present: {
-        spx: true,
-        es: es != null,
-        gex: snap.present?.gex ?? true,
-        positions: snap.present?.positions ?? false,
-      },
-    });
-  }
-  out.sort((a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime());
-  if (dropped > 0) {
-    console.warn(
-      `[data-loader] applied ${out.length} Greek slot(s) from their START instant; ` +
-        `${dropped} dropped (no slot-start price bar).`,
-    );
-  }
   return out;
 }
 
