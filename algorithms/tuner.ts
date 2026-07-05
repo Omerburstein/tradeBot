@@ -80,6 +80,11 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   exitFadeThreshold: { min: 0.0, max: 1.2 },
   reversalThreshold: { min: 0.5, max: 2.0 },
 
+  // Exit style toggle: sampled as 0/1 and coerced to the boolean config field.
+  // 1 = GEX auto-exit on (fade + reversal close the trade); 0 = hold until a
+  // structural exit (cone-return / stop-loss / take-profit / forced time gate).
+  gexAutoExit: { min: 0, max: 1, integer: true },
+
   // Stats.
   zScoreLookback: { min: 8, max: 40, integer: true },
 
@@ -266,6 +271,9 @@ function getPath(obj: AlgoConfig, path: string): number {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let node: any = obj;
   for (const p of parts) node = node[p];
+  // Boolean toggles (e.g. gexAutoExit) round-trip through the numeric search
+  // space as 0/1 so sampling/perturbation stay uniform.
+  if (typeof node === 'boolean') return node ? 1 : 0;
   return node as number;
 }
 
@@ -274,7 +282,9 @@ function setPath(obj: AlgoConfig, path: string, value: number): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let node: any = obj;
   for (let i = 0; i < parts.length - 1; i++) node = node[parts[i]];
-  node[parts[parts.length - 1]] = value;
+  const key = parts[parts.length - 1];
+  // Coerce back to boolean for toggle fields (the field's current type decides).
+  node[key] = typeof node[key] === 'boolean' ? value >= 0.5 : value;
 }
 
 // ── Train/test split ──
@@ -368,8 +378,10 @@ if (isMain) {
       for (const path of paths) {
         const value = getPath(res.best, path);
         const isWeight = (WEIGHT_KEYS as readonly string[]).includes(path);
+        const isToggle = res.space[path]!.integer && res.space[path]!.min === 0 && res.space[path]!.max === 1;
+        const shown = isToggle ? (value >= 0.5 ? '1 (on)' : '0 (off)') : value.toFixed(4);
         console.log(
-          `  ${path.padEnd(pad)} = ${value.toFixed(4)}${isWeight ? ' (normalized)' : ''}`,
+          `  ${path.padEnd(pad)} = ${shown}${isWeight ? ' (normalized)' : ''}`,
         );
       }
 

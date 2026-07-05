@@ -264,14 +264,20 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'medium', 'cone returned: failed breakout, price back inside band');
     }
 
-    // Signal fade: directional score dropped below exit threshold
-    if (directionalScore < config.exitFadeThreshold) {
-      return this.makeSignal('exit', score, cone, snapshot, 'medium', `signal fade: z-factor=${score.composite.toFixed(2)}`);
-    }
+    // GEX-driven auto-exits (signal fade + reversal). Gated by config.gexAutoExit:
+    // when disabled, the position is held through score fades/flips and only a
+    // structural exit above (cone-return / stop-loss / take-profit) or the forced
+    // time gate closes it.
+    if (config.gexAutoExit) {
+      // Signal fade: directional score dropped below exit threshold
+      if (directionalScore < config.exitFadeThreshold) {
+        return this.makeSignal('exit', score, cone, snapshot, 'medium', `signal fade: z-factor=${score.composite.toFixed(2)}`);
+      }
 
-    // Reversal: score flipped in opposing direction
-    if (directionalScore < -config.reversalThreshold) {
-      return this.makeSignal('exit', score, cone, snapshot, 'high', `reversal: z-factor=${score.composite.toFixed(2)}`);
+      // Reversal: score flipped in opposing direction
+      if (directionalScore < -config.reversalThreshold) {
+        return this.makeSignal('exit', score, cone, snapshot, 'high', `reversal: z-factor=${score.composite.toFixed(2)}`);
+      }
     }
 
     return this.makeSignal('hold', score, cone, snapshot, 'low', 'position held');

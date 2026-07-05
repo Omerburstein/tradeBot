@@ -294,6 +294,17 @@ export interface AlgoConfig {
   /** Z-score in opposing direction that triggers an exit. */
   reversalThreshold: number;
 
+  /**
+   * Whether GEX-driven auto-exits are active. When `true` (default) an open
+   * position is closed as soon as the composite z-factor fades below
+   * `exitFadeThreshold` or reverses past `reversalThreshold` — the momentum that
+   * justified the trade is gone. When `false` those two score-driven exits are
+   * disabled and a position is held until it hits a structural exit instead:
+   * cone-return, stop-loss, take-profit, or the forced end-of-day time gate.
+   * The forced time exit and stop-loss/take-profit always apply regardless.
+   */
+  gexAutoExit: boolean;
+
   /** Only consider strikes within this many points of spot. */
   strikeWindow: number;
   /** Number of past ScoreComponents snapshots for z-score lookback. */
@@ -324,6 +335,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   strongEntryThreshold: 2.0,
   exitFadeThreshold: 0.5,
   reversalThreshold: 1.0,
+  gexAutoExit: true,
 
   strikeWindow: 120,
   zScoreLookback: 20,
