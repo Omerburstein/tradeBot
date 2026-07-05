@@ -66,11 +66,13 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `zScoreLookback` | `20` | Number of past snapshots for the z-score baseline |
 
 ### Cone-breakout mode (`DEFAULT_CONFIG.coneBreakout`)
-A distinct entry/exit regime, **off by default**. When `enabled`, it *replaces*
-the default entry and exit rules (see below) — it does not stack on them.
+A distinct entry/exit regime, **on by default** (TODO #3 — cone-only trading).
+When `enabled`, it *replaces* the default entry and exit rules (see below) — it
+does not stack on them. Set `enabled: false` to go back to the default
+score-driven entry/exit logic.
 | Knob | Current | Meaning |
 |------|---------|---------|
-| `enabled` | `false` | Master switch. Off → default rules apply. |
+| `enabled` | `true` | Master switch. On → cone-only breakout rules. Off → default rules. |
 | `exitOnConeReEntry` | `true` | Exit when SPX crosses back inside the cone through the relevant line |
 | `exitOnTp` | `true` | Exit when the GEX take-profit target is hit |
 | `exitOnSl` | `true` | Exit when the hard stop-loss is hit |

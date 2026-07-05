@@ -29,7 +29,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   `entryZ` and `exitZ` as factors in the tuner so they are optimised together
   during training.
 
-- [ ] **3. Restrict entries to cone breakouts confirmed by gamma direction; exit on cone re-entry, TP, or SL.**
+- [x] **3. Restrict entries to cone breakouts confirmed by gamma direction; exit on cone re-entry, TP, or SL.**
   Only enter a trade when SPX has broken outside the expected-move cone AND the
   net gamma exposure is pointing in the same direction as the breakout (positive
   gamma for upside break, negative gamma for downside break). Exit the trade on

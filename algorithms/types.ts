@@ -376,7 +376,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   zScoreLookback: 20,
 
   coneBreakout: {
-    enabled: false, // OFF → default entry/exit rules apply
+    enabled: true, // ON → cone-only: enter only on a gamma-confirmed cone breakout (TODO #3)
     exitOnConeReEntry: true, // exit when price crosses back inside the cone
     exitOnTp: true, // exit when the GEX take-profit is hit
     exitOnSl: true, // exit when the hard stop-loss is hit
