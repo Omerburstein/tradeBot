@@ -7,9 +7,26 @@
  * thresholds, lookback, and (optionally) risk params. Add or remove entries
  * in DEFAULT_SEARCH_SPACE (keyed by dotted path) to control what's swept.
  *
- * Strategy: random search to explore broadly, then a local refinement pass
- * that narrows around the best candidate. Snapshots are loaded from the DB
- * once and replayed in-memory per config (see simulate() in backtest.ts).
+ * Strategy: CMA-ES (Covariance Matrix Adaptation Evolution Strategy) — a
+ * derivative-free optimizer well suited to this black-box, non-convex,
+ * non-differentiable objective (the backtest makes discrete trade decisions,
+ * so there is no usable gradient). Each generation samples a population from a
+ * multivariate Gaussian N(mean, σ²·C), scores each candidate by replaying it
+ * against the in-sample slice, then moves the mean toward a *weighted average
+ * of the best half* and adapts both the step size σ and the full covariance C
+ * so the search cloud stretches along the directions that actually improve the
+ * objective. Because selection is rank-based, infeasible configs (blown
+ * account / too few trades) simply sort last and are never selected — the
+ * -Infinity penalty needs no special handling.
+ *
+ * Multi-start: a genuinely multi-modal landscape can trap any single CMA-ES
+ * run in one basin, so we run several independent restarts (the first seeded at
+ * DEFAULT_CONFIG, the rest at random points) and keep the global best. This is
+ * what makes runs converge consistently instead of landing on whichever local
+ * maximum the initial randomness happened to favor.
+ *
+ * Snapshots are loaded from the DB once and replayed in-memory per config
+ * (see simulate() in backtest.ts).
  *
  * To avoid overfitting, the range is split into an in-sample (train) slice
  * used for optimization and an out-of-sample (test) slice the winner is
@@ -23,8 +40,11 @@
  *   TUNE_START=2025-05-10 TUNE_END=2025-06-15 npm run tune
  *
  * Optional env:
- *   TUNE_ITERS=400          random-search samples (default 300)
- *   TUNE_REFINE=120         local-refinement samples (default 100)
+ *   TUNE_ITERS=400          total evaluation budget across all restarts (default 300 + TUNE_REFINE)
+ *   TUNE_REFINE=120         added to the eval budget (kept for backward compat; default 100)
+ *   TUNE_RESTARTS=3         independent CMA-ES restarts, best kept (default 3)
+ *   TUNE_POP=12             CMA-ES population size λ per generation (default 4 + ⌊3·ln n⌋)
+ *   TUNE_SIGMA=0.3          initial CMA-ES step size in normalized space (default 0.3)
  *   TUNE_OBJECTIVE=totalPnl sharpe | totalPnl | profitFactor (default totalPnl)
  *   TUNE_TRAIN_FRAC=0.7     fraction of days used for training (default 0.7)
  *   TUNE_MIN_TRADES=15      configs with fewer train trades are rejected
@@ -121,8 +141,16 @@ function objectiveValue(r: BacktestResult, name: ObjectiveName): number {
 export interface TuneOptions {
   startDate: string;
   endDate: string;
+  /** Random-search-era name kept for the CLI: base evaluation budget. */
   iterations?: number;
+  /** Added to {@link iterations} for the total evaluation budget (back-compat). */
   refineIterations?: number;
+  /** Independent CMA-ES restarts; the global best across all is returned. */
+  restarts?: number;
+  /** CMA-ES population size λ per generation. Default: 4 + ⌊3·ln n⌋. */
+  popSize?: number;
+  /** Initial CMA-ES step size in normalized [0,1] space. Default 0.3. */
+  sigma0?: number;
   objective?: ObjectiveName;
   trainFraction?: number;
   minTrades?: number;
@@ -150,12 +178,14 @@ export interface TuneResult {
 
 export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
   const objective = opts.objective ?? 'totalPnl';
-  const iterations = opts.iterations ?? 300;
-  const refineIterations = opts.refineIterations ?? 100;
+  // Total evaluation budget: fold the old two-stage env vars into one budget so
+  // TUNE_ITERS / TUNE_REFINE keep controlling total compute.
+  const totalBudget = (opts.iterations ?? 300) + (opts.refineIterations ?? 100);
   const trainFraction = opts.trainFraction ?? 0.7;
   const minTrades = opts.minTrades ?? 15;
   const space = opts.space ?? DEFAULT_SEARCH_SPACE;
   const equity = opts.equity ?? DEFAULT_EQUITY;
+  const sigma0 = opts.sigma0 ?? 0.3;
   const rng = makeRng(opts.seed ?? Date.now());
 
   log.info({ startDate: opts.startDate, endDate: opts.endDate }, 'loading snapshots for tuning');
@@ -171,35 +201,52 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
     'train/test split (by day)',
   );
 
-  const evaluate = (config: AlgoConfig): TuneCandidate => {
-    const result = simulate(train, config, undefined, equity);
-    // Reject configs that blow the account (TODO #9) or barely trade — their
-    // metrics aren't meaningful / the run is a declared failure.
-    const usable = !result.failed && result.trades.length >= minTrades;
-    const score = usable ? objectiveValue(result, objective) : -Infinity;
-    return { config, score, train: result };
-  };
+  // The ordered list of tuned params defines the CMA-ES coordinate vector.
+  const params = Object.entries(space) as Array<[string, ParamRange]>;
+  const n = params.length;
+  const lambda = opts.popSize ?? defaultLambda(n);
+
+  // Size the restart count to the budget: each restart needs at least one full
+  // generation (λ evals), and ideally several. Never exceed budget/λ restarts.
+  const requestedRestarts = Math.max(1, opts.restarts ?? 3);
+  const restarts = Math.max(1, Math.min(requestedRestarts, Math.floor(totalBudget / lambda)));
+  const perRestartBudget = Math.floor(totalBudget / restarts);
+
+  log.info(
+    { params: n, populationLambda: lambda, restarts, perRestartBudget, totalBudget, sigma0 },
+    'CMA-ES configuration',
+  );
 
   const candidates: TuneCandidate[] = [];
 
-  // Stage 1: random search.
-  for (let i = 0; i < iterations; i++) {
-    candidates.push(evaluate(sampleConfig(space, rng)));
+  // One evaluation: decode a normalized vector → config → in-sample backtest.
+  // Rejects (blown account / too few trades) score -Infinity; CMA-ES ranks by
+  // score, so they sort last and are never selected.
+  const evaluate = (x: number[]): number => {
+    const config = decodeConfig(params, x);
+    const result = simulate(train, config, undefined, equity);
+    const usable = !result.failed && result.trades.length >= minTrades;
+    const score = usable ? objectiveValue(result, objective) : -Infinity;
+    candidates.push({ config, score, train: result });
+    return score;
+  };
+
+  const gauss = makeGaussian(rng);
+
+  // Multi-start: restart 0 begins at DEFAULT_CONFIG; the rest at random points.
+  for (let r = 0; r < restarts; r++) {
+    const x0 = r === 0 ? encodeConfig(params, DEFAULT_CONFIG) : Array.from({ length: n }, () => rng());
+    cmaes({ n, x0, sigma0, lambda, maxEvals: perRestartBudget, gauss, evaluate });
   }
 
-  // Stage 2: local refinement around the current best (shrunk neighborhood).
-  let best = bestOf(candidates);
-  for (let i = 0; i < refineIterations; i++) {
-    const neighbor = perturbConfig(best.config, space, rng, 0.15);
-    const cand = evaluate(neighbor);
-    candidates.push(cand);
-    if (cand.score > best.score) best = cand;
+  const finite = candidates.filter((c) => Number.isFinite(c.score));
+  if (finite.length === 0) {
+    log.warn('no usable configs found (all rejected) — widen the search space or relax minTrades');
+    return null;
   }
 
-  const leaderboard = candidates
-    .filter((c) => Number.isFinite(c.score))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 10);
+  const leaderboard = [...finite].sort((a, b) => b.score - a.score).slice(0, 10);
+  const best = leaderboard[0]!;
 
   // Out-of-sample evaluation of the winner.
   const testResult = simulate(test, best.config, undefined, equity);
@@ -214,40 +261,33 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
   };
 }
 
-// ── Config sampling ──
+// ── Config encode / decode (normalized [0,1] vector ↔ AlgoConfig) ──
 
-function sampleConfig(space: Record<string, ParamRange>, rng: () => number): AlgoConfig {
+/**
+ * Decode a normalized CMA-ES vector into a concrete config. Each coordinate is
+ * clamped to [0,1] (box-constraint repair) then mapped onto its param range;
+ * integers are rounded and the factor weights re-normalized to sum to 1.
+ */
+function decodeConfig(params: Array<[string, ParamRange]>, x: number[]): AlgoConfig {
   const config = cloneConfig(DEFAULT_CONFIG);
-  for (const [path, range] of Object.entries(space)) {
-    setPath(config, path, sampleRange(range, rng));
-  }
+  params.forEach(([path, range], i) => {
+    const unit = Math.max(0, Math.min(1, x[i] ?? 0.5));
+    let value = range.min + unit * (range.max - range.min);
+    if (range.integer) value = Math.round(value);
+    setPath(config, path, value);
+  });
   normalizeWeights(config);
   return config;
 }
 
-/** Sample near an existing config: each param jitters within ±frac of its range. */
-function perturbConfig(
-  base: AlgoConfig,
-  space: Record<string, ParamRange>,
-  rng: () => number,
-  frac: number,
-): AlgoConfig {
-  const config = cloneConfig(base);
-  for (const [path, range] of Object.entries(space)) {
-    const span = (range.max - range.min) * frac;
-    const current = getPath(base, path);
-    let next = current + (rng() * 2 - 1) * span;
-    next = Math.max(range.min, Math.min(range.max, next));
-    if (range.integer) next = Math.round(next);
-    setPath(config, path, next);
-  }
-  normalizeWeights(config);
-  return config;
-}
-
-function sampleRange(range: ParamRange, rng: () => number): number {
-  const v = range.min + rng() * (range.max - range.min);
-  return range.integer ? Math.round(v) : v;
+/** Encode a config into the normalized [0,1] vector — the inverse of {@link decodeConfig}. */
+function encodeConfig(params: Array<[string, ParamRange]>, config: AlgoConfig): number[] {
+  return params.map(([path, range]) => {
+    const value = getPath(config, path);
+    const span = range.max - range.min;
+    const unit = span === 0 ? 0.5 : (value - range.min) / span;
+    return Math.max(0, Math.min(1, unit));
+  });
 }
 
 /** Scale the four factor weights so they sum to 1 (keeps thresholds comparable). */
@@ -257,10 +297,6 @@ function normalizeWeights(config: AlgoConfig): void {
   for (const k of WEIGHT_KEYS) {
     config[k] = Math.max(0, config[k]) / sum;
   }
-}
-
-function bestOf(candidates: TuneCandidate[]): TuneCandidate {
-  return candidates.reduce((a, b) => (b.score > a.score ? b : a));
 }
 
 // ── Dotted-path helpers (operate on a deep-cloned config) ──
@@ -317,6 +353,267 @@ function makeRng(seed: number): () => number {
   };
 }
 
+/** Standard-normal sampler (Marsaglia polar) drawing from a uniform rng. */
+function makeGaussian(rng: () => number): () => number {
+  let spare: number | null = null;
+  return () => {
+    if (spare !== null) {
+      const s = spare;
+      spare = null;
+      return s;
+    }
+    let u = 0;
+    let v = 0;
+    let s = 0;
+    do {
+      u = rng() * 2 - 1;
+      v = rng() * 2 - 1;
+      s = u * u + v * v;
+    } while (s >= 1 || s === 0);
+    const mul = Math.sqrt((-2 * Math.log(s)) / s);
+    spare = v * mul;
+    return u * mul;
+  };
+}
+
+// ── CMA-ES core ──
+
+/** Default population size λ = 4 + ⌊3·ln n⌋ (Hansen). */
+function defaultLambda(n: number): number {
+  return 4 + Math.floor(3 * Math.log(n));
+}
+
+interface CmaesOptions {
+  /** Dimension = number of tuned params. */
+  n: number;
+  /** Initial mean in normalized [0,1] space. */
+  x0: number[];
+  /** Initial step size (normalized-space units). */
+  sigma0: number;
+  /** Population size λ. */
+  lambda: number;
+  /** Evaluation budget for this restart. */
+  maxEvals: number;
+  gauss: () => number;
+  /** Maximize this: takes a normalized vector, returns a score (may be -Infinity). */
+  evaluate: (x: number[]) => number;
+}
+
+/**
+ * One CMA-ES run (a single restart). Standard (μ/μ_w, λ) CMA-ES following
+ * Hansen's reference: weighted intermediate recombination, cumulative step-size
+ * adaptation (CSA) via the σ evolution path, and a rank-one + rank-μ covariance
+ * update. Selection is rank-based, so -Infinity scores never get selected.
+ *
+ * Bounds are handled by clipping each sampled coordinate into [0,1] before
+ * evaluation (box-constraint repair) and updating the strategy on the clipped
+ * vector — simple and stable for a search this size.
+ */
+function cmaes(opts: CmaesOptions): void {
+  const { n, gauss, evaluate } = opts;
+  const lambda = opts.lambda;
+  const mu = Math.floor(lambda / 2);
+
+  // Recombination weights (log-decreasing), normalized to sum 1.
+  const wRaw: number[] = [];
+  for (let i = 0; i < mu; i++) wRaw.push(Math.log(mu + 0.5) - Math.log(i + 1));
+  const wSum = wRaw.reduce((a, b) => a + b, 0);
+  const weights = wRaw.map((w) => w / wSum);
+  const mueff = 1 / weights.reduce((a, w) => a + w * w, 0);
+
+  // Strategy-parameter time constants / learning rates (Hansen defaults).
+  const cc = (4 + mueff / n) / (n + 4 + (2 * mueff) / n);
+  const cs = (mueff + 2) / (n + mueff + 5);
+  const c1 = 2 / ((n + 1.3) ** 2 + mueff);
+  const cmu = Math.min(1 - c1, (2 * (mueff - 2 + 1 / mueff)) / ((n + 2) ** 2 + mueff));
+  const damps = 1 + 2 * Math.max(0, Math.sqrt((mueff - 1) / (n + 1)) - 1) + cs;
+  const chiN = Math.sqrt(n) * (1 - 1 / (4 * n) + 1 / (21 * n * n));
+
+  let xmean = opts.x0.slice();
+  let sigma = opts.sigma0;
+  let pc = new Array(n).fill(0);
+  let ps = new Array(n).fill(0);
+  let B = identity(n); // columns are eigenvectors of C
+  let d = new Array(n).fill(1); // sqrt of eigenvalues of C
+  let C = identity(n);
+  let evals = 0;
+  let gen = 0;
+  let evalsSinceEig = 0;
+
+  while (evals + lambda <= opts.maxEvals) {
+    // Sample and evaluate a population of λ candidates.
+    const pop: Array<{ x: number[]; score: number }> = [];
+    for (let k = 0; k < lambda; k++) {
+      const z = Array.from({ length: n }, () => gauss());
+      const dz = z.map((zi, i) => d[i] * zi);
+      const y = matVec(B, dz); // y = B·(d ⊙ z) ~ N(0, C)
+      // Clip into [0,1] (box-constraint repair) so decode stays in-range.
+      const x = xmean.map((m, i) => Math.max(0, Math.min(1, m + sigma * y[i])));
+      const score = evaluate(x);
+      evals++;
+      pop.push({ x, score });
+    }
+
+    // Rank best-first (maximization) and recombine the top μ into a new mean.
+    pop.sort((a, b) => b.score - a.score);
+    const xold = xmean;
+    xmean = new Array(n).fill(0);
+    for (let i = 0; i < mu; i++) {
+      for (let j = 0; j < n; j++) xmean[j] += weights[i] * pop[i].x[j];
+    }
+
+    // Step of the mean, in normalized units.
+    const meanStep = xmean.map((m, i) => (m - xold[i]) / sigma);
+
+    // σ evolution path: ps = (1-cs)·ps + √(cs(2-cs)μeff)·C^(-1/2)·meanStep.
+    const cInvHalfStep = invSqrtMul(B, d, meanStep); // C^(-1/2)·meanStep
+    for (let i = 0; i < n; i++) {
+      ps[i] = (1 - cs) * ps[i] + Math.sqrt(cs * (2 - cs) * mueff) * cInvHalfStep[i];
+    }
+    const psNorm = Math.sqrt(ps.reduce((a, v) => a + v * v, 0));
+
+    // Heaviside stall flag: pause the rank-one path when σ-path is over-long.
+    const hsig =
+      psNorm / Math.sqrt(1 - (1 - cs) ** (2 * (gen + 1))) / chiN < 1.4 + 2 / (n + 1) ? 1 : 0;
+
+    // C evolution path (rank-one direction).
+    for (let i = 0; i < n; i++) {
+      pc[i] = (1 - cc) * pc[i] + hsig * Math.sqrt(cc * (2 - cc) * mueff) * meanStep[i];
+    }
+
+    // Covariance update: blend old C, rank-one (pc·pcᵀ), and rank-μ (Σ wᵢ yᵢyᵢᵀ).
+    const deltaHsig = (1 - hsig) * cc * (2 - cc);
+    const nextC = C.map((row) => row.slice());
+    for (let a = 0; a < n; a++) {
+      for (let b = a; b < n; b++) {
+        let rankMu = 0;
+        for (let i = 0; i < mu; i++) {
+          const ya = (pop[i].x[a] - xold[a]) / sigma;
+          const yb = (pop[i].x[b] - xold[b]) / sigma;
+          rankMu += weights[i] * ya * yb;
+        }
+        const value =
+          (1 - c1 - cmu) * C[a][b] +
+          c1 * (pc[a] * pc[b] + deltaHsig * C[a][b]) +
+          cmu * rankMu;
+        nextC[a][b] = value;
+        nextC[b][a] = value; // keep C symmetric
+      }
+    }
+    C = nextC;
+
+    // Step-size update (CSA).
+    sigma *= Math.exp((cs / damps) * (psNorm / chiN - 1));
+    if (!Number.isFinite(sigma) || sigma > 1e3) sigma = 1e3;
+    if (sigma < 1e-12) sigma = 1e-12;
+
+    gen++;
+    evalsSinceEig += lambda;
+
+    // Re-decompose C periodically to refresh the sampling basis (B, d).
+    if (evalsSinceEig > lambda / (c1 + cmu) / n / 10) {
+      evalsSinceEig = 0;
+      const { values, vectors } = jacobiEigen(C);
+      B = vectors;
+      d = values.map((v) => Math.sqrt(Math.max(v, 1e-20)));
+    }
+  }
+}
+
+// ── Small dense linear algebra (n ≈ 18, so clarity over speed) ──
+
+function identity(n: number): number[][] {
+  const m: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    m.push(new Array(n).fill(0));
+    m[i][i] = 1;
+  }
+  return m;
+}
+
+/** Matrix·vector: (M·v)[i] = Σ_j M[i][j]·v[j]. */
+function matVec(m: number[][], v: number[]): number[] {
+  const n = v.length;
+  const out = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let j = 0; j < n; j++) s += m[i][j] * v[j];
+    out[i] = s;
+  }
+  return out;
+}
+
+/**
+ * Apply C^(-1/2) to a vector, given C's eigenvectors B (columns) and d = √eig:
+ * C^(-1/2)·v = B · diag(1/d) · Bᵀ · v.
+ */
+function invSqrtMul(B: number[][], d: number[], v: number[]): number[] {
+  const n = v.length;
+  // t = Bᵀ·v
+  const t = new Array(n).fill(0);
+  for (let j = 0; j < n; j++) {
+    let s = 0;
+    for (let i = 0; i < n; i++) s += B[i][j] * v[i];
+    t[j] = s / d[j];
+  }
+  // result = B·t
+  return matVec(B, t);
+}
+
+/**
+ * Symmetric eigenvalue decomposition via the cyclic Jacobi algorithm. Returns
+ * eigenvalues and an eigenvector matrix whose COLUMNS are the eigenvectors.
+ * Ample for the small (n ≈ 18) covariance matrices here.
+ */
+function jacobiEigen(input: number[][]): { values: number[]; vectors: number[][] } {
+  const n = input.length;
+  const a = input.map((row) => row.slice());
+  const V = identity(n);
+  const maxSweeps = 100;
+
+  for (let sweep = 0; sweep < maxSweeps; sweep++) {
+    // Sum of squared off-diagonal entries — converged when negligible.
+    let off = 0;
+    for (let p = 0; p < n; p++) {
+      for (let q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
+    }
+    if (off < 1e-28) break;
+
+    for (let p = 0; p < n; p++) {
+      for (let q = p + 1; q < n; q++) {
+        if (Math.abs(a[p][q]) < 1e-300) continue;
+        // Rotation angle that zeros a[p][q].
+        const phi = 0.5 * Math.atan2(2 * a[p][q], a[q][q] - a[p][p]);
+        const c = Math.cos(phi);
+        const s = Math.sin(phi);
+        // A ← Jᵀ A J (rotate columns p,q then rows p,q).
+        for (let k = 0; k < n; k++) {
+          const akp = a[k][p];
+          const akq = a[k][q];
+          a[k][p] = c * akp - s * akq;
+          a[k][q] = s * akp + c * akq;
+        }
+        for (let k = 0; k < n; k++) {
+          const apk = a[p][k];
+          const aqk = a[q][k];
+          a[p][k] = c * apk - s * aqk;
+          a[q][k] = s * apk + c * aqk;
+        }
+        // Accumulate eigenvectors: V ← V J.
+        for (let k = 0; k < n; k++) {
+          const vkp = V[k][p];
+          const vkq = V[k][q];
+          V[k][p] = c * vkp - s * vkq;
+          V[k][q] = s * vkp + c * vkq;
+        }
+      }
+    }
+  }
+
+  const values = a.map((row, i) => row[i]);
+  return { values, vectors: V };
+}
+
 // ── CLI ──
 
 const isMain =
@@ -347,6 +644,9 @@ if (isMain) {
     endDate,
     iterations: num(process.env.TUNE_ITERS, 300),
     refineIterations: num(process.env.TUNE_REFINE, 100),
+    restarts: num(process.env.TUNE_RESTARTS, 3),
+    popSize: process.env.TUNE_POP ? Number(process.env.TUNE_POP) : undefined,
+    sigma0: num(process.env.TUNE_SIGMA, 0.3),
     objective,
     trainFraction: num(process.env.TUNE_TRAIN_FRAC, 0.7),
     minTrades: num(process.env.TUNE_MIN_TRADES, 15),

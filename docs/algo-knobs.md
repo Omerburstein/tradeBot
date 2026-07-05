@@ -146,6 +146,20 @@ The tuner (`npm run tune`) sweeps the numeric knobs in `DEFAULT_SEARCH_SPACE`
 search space is taken straight from `DEFAULT_CONFIG` — so the three switches
 above stay at the values you set here during tuning.
 
+**Search strategy: CMA-ES.** The optimizer is a Covariance Matrix Adaptation
+Evolution Strategy — a derivative-free method suited to this black-box,
+non-differentiable objective (the backtest makes discrete trade decisions, so
+there is no usable gradient). Each generation samples a population from a
+multivariate Gaussian, keeps the best half, moves the mean toward their weighted
+average, and adapts both the step size and the full covariance so the search
+cloud stretches along the directions that actually improve P&L. To avoid getting
+trapped in one basin on a multi-modal landscape it runs several independent
+restarts (`TUNE_RESTARTS`, default 3; the first seeded at `DEFAULT_CONFIG`, the
+rest random) and keeps the global best. Set `TUNE_SEED` for fully reproducible
+runs. The total evaluation budget is `TUNE_ITERS + TUNE_REFINE` (split across
+restarts); `TUNE_POP` overrides the population size λ and `TUNE_SIGMA` the
+initial step size.
+
 `gexAutoExit` is currently commented out of the search space (pinned to the
 `DEFAULT_CONFIG` value). To let the tuner explore both exit styles again,
 uncomment its line in `DEFAULT_SEARCH_SPACE`.
