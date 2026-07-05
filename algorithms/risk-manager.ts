@@ -63,8 +63,8 @@ export function checkStopLoss(
     return { stopped: true, reason: `hard stop hit (${pnlPoints.toFixed(1)} pts)` };
   }
 
-  // Trailing stop: only active after reaching activation threshold
-  if (state.highWaterMark >= risk.trailingStopActivation) {
+  // Trailing stop: only when enabled, and only after reaching activation threshold
+  if (risk.trailingStopEnabled && state.highWaterMark >= risk.trailingStopActivation) {
     const trailLevel = state.highWaterMark - risk.trailingStopDistance;
     if (pnlPoints <= trailLevel) {
       return {

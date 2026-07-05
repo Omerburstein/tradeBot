@@ -216,6 +216,12 @@ export interface RiskParams {
    * round-trip cost and slippage.
    */
   minGexTakeProfitPoints: number;
+  /**
+   * Master switch for the trailing stop. When `false` the trailing stop is
+   * disabled entirely and only the hard `stopLossPoints` stop applies;
+   * `trailingStopActivation` / `trailingStopDistance` are then ignored.
+   */
+  trailingStopEnabled: boolean;
   /** Profit threshold (SPX pts) to activate trailing stop. */
   trailingStopActivation: number;
   /** Distance (SPX pts) the trailing stop trails behind HWM. */
@@ -335,7 +341,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   strongEntryThreshold: 2.0,
   exitFadeThreshold: 0.5,
   reversalThreshold: 1.0,
-  gexAutoExit: false,
+  gexAutoExit: true,
 
   strikeWindow: 120,
   zScoreLookback: 20,
@@ -347,13 +353,14 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     stopLossPoints: 10,
     riskRewardRatio: 3, // fallback only (no cone): take-profit at 30 pts
     minGexTakeProfitPoints: 15, // skip trades whose GEX TP (gamma-center distance) < 15 pts
+    trailingStopEnabled: false, // trailing stop OFF — only the hard stopLossPoints stop applies
     trailingStopActivation: 5,
     trailingStopDistance: 7,
     maxDailyLoss: 0.02,
     maxTradesPerDay: 6,
     slippagePerSide: 0.50,
     pointValue: 50, // $50 P&L per 1.0 ES point, per contract (/ES e-mini)
-    noNewTradesAfterET: '15:40', // was 14:40 CT — same instant, ET-normalized
+    noNewTradesAfterET: '14:00', // last entry time — no new trades at/after 14:00 ET
     forcedExitByET: '15:50', // was 14:50 CT — 10 min before the 16:00 ET close
   },
 };
