@@ -1,16 +1,14 @@
 /**
- * Persistent record of test-case model runs (TODO: model bookkeeping).
+ * Persistent record of tuned models.
  *
- * Every `npm run test-cases` invocation records the config it replayed under
- * plus that run's test-trade net P&L. Two slots are kept in
- * `algorithms/test-case-models.json`:
+ * Every `npm run tune` invocation records the winning config plus the metric it
+ * was ranked on (the tuner's objective, evaluated out-of-sample). Two slots are
+ * kept in `algorithms/tuned-models.json`:
  *
- *   - `lastModel` — always overwritten with the most recent run.
- *   - `bestModel` — the config with the highest test-trade net P&L seen so far,
- *     compared only against runs that replayed the *same* set of cases (so the
- *     metric is apples-to-apples).
+ *   - `lastModel` — always overwritten with the most recent tune run.
+ *   - `bestModel` — the run with the highest `metric` seen so far.
  *
- * This lets a tuning session keep the previously-tested config and the best
+ * This lets a tuning session keep the previously-tuned config and the best
  * config found without re-deriving them.
  */
 
@@ -23,13 +21,13 @@ import type { AlgoConfig } from './types.js';
 export interface ModelRecord {
   /** ISO-8601 UTC timestamp of when the run was recorded. */
   savedAt: string;
-  /** Test-case ids that produced `netPnl` (sorted). */
-  cases: string[];
-  /** Sum of in-window trade P&L (USD) across `cases`. */
-  netPnl: number;
-  /** Number of in-window trades that contributed to `netPnl`. */
-  tradeCount: number;
-  /** The full resolved config that was replayed. */
+  /** How the metric was produced, e.g. "tune totalPnl (out-sample)". */
+  source: string;
+  /** Scalar used to rank `bestModel` (higher is better). */
+  metric: number;
+  /** Free-form context (date range, objective, trade counts, …). */
+  meta?: Record<string, unknown>;
+  /** The full winning config. */
   config: AlgoConfig;
 }
 
@@ -40,7 +38,7 @@ export interface ModelStore {
 
 function storePath(): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  return resolve(here, 'test-case-models.json');
+  return resolve(here, 'tuned-models.json');
 }
 
 export function loadModelStore(): ModelStore {
@@ -63,31 +61,24 @@ export function saveModelStore(store: ModelStore): string {
 }
 
 /**
- * Record a completed test-case run. Always overwrites `lastModel`. Updates
- * `bestModel` when this run beats the stored best by `netPnl` and replayed the
- * same set of cases — or when there is no best yet.
+ * Record a completed tune run. Always overwrites `lastModel`. Updates
+ * `bestModel` when this run's `metric` beats the stored best (or there is no
+ * best yet). A non-finite metric never becomes best.
  */
 export function recordModelRun(record: ModelRecord): {
   store: ModelStore;
   becameBest: boolean;
   path: string;
 } {
-  const normalized: ModelRecord = { ...record, cases: [...record.cases].sort() };
   const store = loadModelStore();
-  store.lastModel = normalized;
+  store.lastModel = record;
 
   const best = store.bestModel;
-  const comparable = !best || sameCases(best.cases, normalized.cases);
-  const becameBest = comparable && (!best || normalized.netPnl > best.netPnl);
-  if (becameBest) store.bestModel = normalized;
+  const bestMetric =
+    best && Number.isFinite(best.metric as number) ? best.metric : Number.NEGATIVE_INFINITY;
+  const becameBest = Number.isFinite(record.metric) && record.metric > bestMetric;
+  if (becameBest) store.bestModel = record;
 
   const path = saveModelStore(store);
   return { store, becameBest, path };
-}
-
-function sameCases(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  const sa = [...a].sort();
-  const sb = [...b].sort();
-  return sa.every((v, i) => v === sb[i]);
 }

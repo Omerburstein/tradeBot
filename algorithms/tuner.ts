@@ -36,6 +36,7 @@
 import pino from 'pino';
 import { loadDateRange, getAvailableDates } from './data-loader.js';
 import { simulate, printTradeLog, printSummary } from './backtest.js';
+import { recordModelRun } from './model-store.js';
 import type { AlgoConfig, BacktestResult, EquitySettings, Snapshot } from './types.js';
 import { DEFAULT_CONFIG, DEFAULT_EQUITY } from './types.js';
 
@@ -339,13 +340,14 @@ if (isMain) {
       .catch((e) => console.error('  (could not query DB)', e.message));
   } else {
   const num = (v: string | undefined, d: number) => (v ? Number(v) : d);
+  const objective = (process.env.TUNE_OBJECTIVE as ObjectiveName) ?? 'totalPnl';
 
   runTuning({
     startDate,
     endDate,
     iterations: num(process.env.TUNE_ITERS, 300),
     refineIterations: num(process.env.TUNE_REFINE, 100),
-    objective: (process.env.TUNE_OBJECTIVE as ObjectiveName) ?? 'totalPnl',
+    objective,
     trainFraction: num(process.env.TUNE_TRAIN_FRAC, 0.7),
     minTrades: num(process.env.TUNE_MIN_TRADES, 15),
     seed: process.env.TUNE_SEED ? Number(process.env.TUNE_SEED) : undefined,
@@ -400,6 +402,35 @@ if (isMain) {
       printSummary(res.trainResult, 'WINNING CONFIG — TRAIN SUMMARY');
       printTradeLog(res.testResult.trades, 'WINNING CONFIG — TEST TRADES');
       printSummary(res.testResult, 'WINNING CONFIG — TEST SUMMARY');
+
+      // Persist the winning config. bestModel is ranked on the objective
+      // evaluated OUT-OF-SAMPLE (test slice) — the honest generalization metric.
+      const metric = objectiveValue(res.testResult, objective);
+      const { becameBest, store, path } = recordModelRun({
+        savedAt: new Date().toISOString(),
+        source: `tune ${objective} (out-sample)`,
+        metric,
+        meta: {
+          startDate,
+          endDate,
+          objective,
+          evaluated: res.evaluated,
+          trainPnl: res.trainResult.totalPnl,
+          testPnl: res.testResult.totalPnl,
+          trainTrades: res.trainResult.trades.length,
+          testTrades: res.testResult.trades.length,
+        },
+        config: res.best,
+      });
+
+      console.log('\n=== MODEL SAVED ===');
+      console.log(`  metric (${objective}, out-sample): ${metric.toFixed(3)}`);
+      console.log(
+        becameBest
+          ? '  → saved as lastModel AND bestModel (new best)'
+          : `  → saved as lastModel  (best so far: ${(store.bestModel?.metric ?? 0).toFixed(3)})`,
+      );
+      console.log(`  store: ${path}`);
     })
     .catch((e) => {
       console.error('Tuning failed:', e);

@@ -26,7 +26,6 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadDay } from './data-loader.js';
-import { recordModelRun } from './model-store.js';
 import { SignalGenerator } from './signal-generator.js';
 import { gexTakeProfitPoints } from './risk-manager.js';
 import type { AlgoConfig, Signal, Snapshot, TradeRecord } from './types.js';
@@ -66,6 +65,15 @@ export const TEST_CASES: TestCase[] = [
     description:
       '14:00–16:00 ET — inspect composite z-score, gamma exposure and ' +
       'expected-move cone between 14:00 and 16:00 ET on 2026-06-17.',
+  },
+  {
+    id: '2026-06-11-1100',
+    date: '2026-06-11',
+    startEt: '11:00',
+    endEt: '15:00',
+    description:
+      '11:00–15:00 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 11:00 and 15:00 ET on 2026-06-11.',
   },
 ];
 
@@ -572,28 +580,11 @@ if (isMain) {
       }
     }
 
-    const { becameBest, store, path } = recordModelRun({
-      savedAt: new Date().toISOString(),
-      cases: cases.map((c) => c.id),
-      netPnl,
-      tradeCount,
-      config,
-    });
-
     console.log(`\n${'='.repeat(72)}`);
     console.log(
       `TEST-TRADE RESULT  ${cases.length} case(s), ${tradeCount} trades  ` +
         `net pnl=${fmtUsd(netPnl)}`,
     );
-    console.log(
-      becameBest
-        ? '  → saved as lastModel AND bestModel (new best on the test trade)'
-        : '  → saved as lastModel' +
-            (store.bestModel
-              ? `  (best so far: ${fmtUsd(store.bestModel.netPnl)} on ${store.bestModel.cases.join(', ')})`
-              : ''),
-    );
-    console.log(`  store: ${path}`);
   })().catch((e) => {
     console.error('Test-case run failed:', e);
     process.exit(1);
