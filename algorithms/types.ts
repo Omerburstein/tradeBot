@@ -335,7 +335,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   strongEntryThreshold: 2.0,
   exitFadeThreshold: 0.5,
   reversalThreshold: 1.0,
-  gexAutoExit: true,
+  gexAutoExit: false,
 
   strikeWindow: 120,
   zScoreLookback: 20,

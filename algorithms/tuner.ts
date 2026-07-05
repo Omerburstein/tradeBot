@@ -83,7 +83,9 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   // Exit style toggle: sampled as 0/1 and coerced to the boolean config field.
   // 1 = GEX auto-exit on (fade + reversal close the trade); 0 = hold until a
   // structural exit (cone-return / stop-loss / take-profit / forced time gate).
-  gexAutoExit: { min: 0, max: 1, integer: true },
+  // Pinned OFF for now via DEFAULT_CONFIG.gexAutoExit=false — uncomment to let
+  // the tuner sweep both exit styles again.
+  // gexAutoExit: { min: 0, max: 1, integer: true },
 
   // Stats.
   zScoreLookback: { min: 8, max: 40, integer: true },

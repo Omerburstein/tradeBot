@@ -57,6 +57,15 @@ export const TEST_CASES: TestCase[] = [
       'the expected-move cone drive (or suppress) entries/exits between 11:00 ' +
       'and 15:00 ET.',
   },
+  {
+    id: '2026-06-17-1400',
+    date: '2026-06-17',
+    startEt: '14:00',
+    endEt: '16:00',
+    description:
+      '14:00–16:00 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 14:00 and 16:00 ET on 2026-06-17.',
+  },
 ];
 
 // ── Per-slot diagnostics captured during replay ──
