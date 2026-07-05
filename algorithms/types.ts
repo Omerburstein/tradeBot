@@ -240,6 +240,32 @@ export interface RiskParams {
   forcedExitByET: string;
 }
 
+/**
+ * Cone-breakout mode (TODO #8): a distinct entry/exit regime, OFF by default.
+ *
+ * When `enabled`, the algo replaces its default entry/exit rules with:
+ *   - Entry: enter ONLY on a break through the *direction-relevant* cone line,
+ *     confirmed by gamma direction. Long = SPX breaks ABOVE the upper line and
+ *     gamma points up (gexZ > 0); short = SPX breaks BELOW the lower line and
+ *     gamma points down (gexZ < 0). Breaking the wrong line never triggers, and
+ *     there are NO inside-cone entries.
+ *   - Exit: only the three toggles below fire (plus the always-on forced
+ *     end-of-day time exit). The default GEX signal-fade / reversal exits do
+ *     NOT apply in this mode.
+ * Each exit condition is individually switchable so it's easy to experiment.
+ * See docs/algo-knobs.md.
+ */
+export interface ConeBreakoutConfig {
+  /** Master switch. Off → the algo uses its default entry/exit rules. */
+  enabled: boolean;
+  /** Exit when SPX crosses back inside the cone through the relevant line. */
+  exitOnConeReEntry: boolean;
+  /** Exit when the GEX take-profit target is hit. */
+  exitOnTp: boolean;
+  /** Exit when the hard stop-loss is hit. */
+  exitOnSl: boolean;
+}
+
 // ── Configuration ──
 
 export interface AlgoConfig {
@@ -316,6 +342,9 @@ export interface AlgoConfig {
   /** Number of past ScoreComponents snapshots for z-score lookback. */
   zScoreLookback: number;
 
+  /** Cone-breakout entry/exit mode (TODO #8). Off by default. */
+  coneBreakout: ConeBreakoutConfig;
+
   risk: RiskParams;
 }
 
@@ -345,6 +374,13 @@ export const DEFAULT_CONFIG: AlgoConfig = {
 
   strikeWindow: 120,
   zScoreLookback: 20,
+
+  coneBreakout: {
+    enabled: false, // OFF → default entry/exit rules apply
+    exitOnConeReEntry: true, // exit when price crosses back inside the cone
+    exitOnTp: true, // exit when the GEX take-profit is hit
+    exitOnSl: true, // exit when the hard stop-loss is hit
+  },
 
   risk: {
     maxPositionSize: 2,

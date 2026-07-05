@@ -243,6 +243,12 @@ export class SignalGenerator {
     snapshot: Snapshot,
   ): Signal {
     const { config } = this;
+
+    // Cone-breakout mode (TODO #8) uses its own exit set (the three toggles).
+    if (config.coneBreakout.enabled) {
+      return this.checkBreakoutExits(score, cone, snapshot);
+    }
+
     const isLong = this.state.position === 'long';
     const directionalScore = isLong ? score.composite : -score.composite;
     const directionalDGamma = isLong ? score.dGammaZ : -score.dGammaZ;
@@ -291,6 +297,11 @@ export class SignalGenerator {
     const { config } = this;
     const z = score.composite.toFixed(2);
 
+    // Cone-breakout mode (TODO #8) uses its own, stricter entry rule.
+    if (config.coneBreakout.enabled) {
+      return this.checkBreakoutEntries(score, cone, snapshot);
+    }
+
     // ── CONE-PASS ENTRIES ──
     // Every cone-line pass is a trigger, but only when the Greeks point the
     // same way (conviction floor = entryThreshold). A pass against the Greeks
@@ -330,6 +341,89 @@ export class SignalGenerator {
     }
 
     return this.makeSignal('hold', score, cone, snapshot, 'low', `no entry signal (z-factor=${z})`);
+  }
+
+  /**
+   * Cone-breakout entries (TODO #8, active only when config.coneBreakout.enabled).
+   *
+   * Enter ONLY on a break through the direction-relevant cone line, confirmed by
+   * gamma direction (gexZ sign):
+   *   - LONG:  SPX broke ABOVE the upper line (cone.crossed === 'up')   + gexZ > 0
+   *   - SHORT: SPX broke BELOW the lower line (cone.crossed === 'down') + gexZ < 0
+   * Breaking the wrong line never triggers, and there are no inside-cone entries.
+   */
+  private checkBreakoutEntries(
+    score: ScoreComponents,
+    cone: ConeInfo,
+    snapshot: Snapshot,
+  ): Signal {
+    const z = score.composite.toFixed(2);
+    const gz = score.gexZ.toFixed(2);
+
+    if (cone.crossed === 'up') {
+      if (score.gexZ > 0) {
+        const confidence = this.assessConfidence(score, true);
+        return this.makeSignal('enter_long', score, cone, snapshot, confidence,
+          `breakout long: SPX broke above upper cone + gamma up (gexZ=${gz}, z=${z})`);
+      }
+      return this.makeSignal('hold', score, cone, snapshot, 'low',
+        `breakout up ignored: gamma not pointing up (gexZ=${gz})`);
+    }
+
+    if (cone.crossed === 'down') {
+      if (score.gexZ < 0) {
+        const confidence = this.assessConfidence(score, true);
+        return this.makeSignal('enter_short', score, cone, snapshot, confidence,
+          `breakout short: SPX broke below lower cone + gamma down (gexZ=${gz}, z=${z})`);
+      }
+      return this.makeSignal('hold', score, cone, snapshot, 'low',
+        `breakout down ignored: gamma not pointing down (gexZ=${gz})`);
+    }
+
+    return this.makeSignal('hold', score, cone, snapshot, 'low',
+      `no breakout (cone ${cone.state}, z=${z})`);
+  }
+
+  /**
+   * Cone-breakout exits (TODO #8, active only when config.coneBreakout.enabled).
+   *
+   * Exit on whichever fires first among the three individually-switchable
+   * conditions — cone re-entry, take-profit, stop-loss. The always-on forced
+   * end-of-day time exit is handled earlier in generateSignal(); the default
+   * GEX signal-fade / reversal exits do NOT apply in this mode.
+   */
+  private checkBreakoutExits(
+    score: ScoreComponents,
+    cone: ConeInfo,
+    snapshot: Snapshot,
+  ): Signal {
+    const { config } = this;
+    const cb = config.coneBreakout;
+
+    // (c) Stop-loss
+    if (cb.exitOnSl) {
+      const stopCheck = checkStopLoss(this.state, snapshot.spot, config);
+      if (stopCheck.stopped) {
+        return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
+      }
+    }
+
+    // (b) Take-profit (GEX-relative target frozen at entry)
+    if (cb.exitOnTp) {
+      const tpCheck = checkTakeProfit(this.state, snapshot.spot);
+      if (tpCheck.hit) {
+        return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
+      }
+    }
+
+    // (a) Cone re-entry: price crossed back inside the band through the relevant
+    // line (the position was opened on that side, so 'returned' is that line).
+    if (cb.exitOnConeReEntry && cone.crossed === 'returned') {
+      return this.makeSignal('exit', score, cone, snapshot, 'medium',
+        'cone re-entry: price back inside the band');
+    }
+
+    return this.makeSignal('hold', score, cone, snapshot, 'low', 'breakout position held');
   }
 
   private assessConfidence(score: ScoreComponents, coneTrigger: boolean): Confidence {

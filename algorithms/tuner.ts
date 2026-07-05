@@ -265,7 +265,7 @@ function bestOf(candidates: TuneCandidate[]): TuneCandidate {
 // ── Dotted-path helpers (operate on a deep-cloned config) ──
 
 function cloneConfig(config: AlgoConfig): AlgoConfig {
-  return { ...config, risk: { ...config.risk } };
+  return { ...config, risk: { ...config.risk }, coneBreakout: { ...config.coneBreakout } };
 }
 
 function getPath(obj: AlgoConfig, path: string): number {

@@ -65,6 +65,28 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `strikeWindow` | `120` | Only consider strikes within ±this many pts of spot |
 | `zScoreLookback` | `20` | Number of past snapshots for the z-score baseline |
 
+### Cone-breakout mode (`DEFAULT_CONFIG.coneBreakout`)
+A distinct entry/exit regime, **off by default**. When `enabled`, it *replaces*
+the default entry and exit rules (see below) — it does not stack on them.
+| Knob | Current | Meaning |
+|------|---------|---------|
+| `enabled` | `false` | Master switch. Off → default rules apply. |
+| `exitOnConeReEntry` | `true` | Exit when SPX crosses back inside the cone through the relevant line |
+| `exitOnTp` | `true` | Exit when the GEX take-profit target is hit |
+| `exitOnSl` | `true` | Exit when the hard stop-loss is hit |
+
+**When `enabled: true`:**
+- **Entry** — only on a break through the *direction-relevant* cone line, confirmed by gamma direction:
+  - **Long:** SPX breaks **above the upper** cone line **and** gamma points up (`gexZ > 0`)
+  - **Short:** SPX breaks **below the lower** cone line **and** gamma points down (`gexZ < 0`)
+  - Breaking the wrong line never triggers; there are **no inside-cone entries**.
+- **Exit** — whichever of the three toggles above fires first, **plus** the always-on forced end-of-day exit (`forcedExitByET`). The GEX signal-fade / reversal exits (`gexAutoExit`) do **not** apply in this mode.
+- Pre-entry gates still apply: `noNewTradesAfterET`, daily limits, and the `minGexTakeProfitPoints` floor.
+
+> "Gamma points up/down" = the sign of `gexZ`, the directional gamma-exposure
+> z-score (positive = net upward gamma pressure). Tell me if you'd rather gate
+> on raw GEX or on `dGammaZ` instead — it's a one-line change.
+
 ### Risk / money management (`DEFAULT_CONFIG.risk`)
 | Knob | Current | Meaning |
 |------|---------|---------|
@@ -107,6 +129,11 @@ A position is closed by the **first** of these to fire, checked every slot:
 7. **Reversal** — directional z < −`reversalThreshold` — **only if `gexAutoExit`**
 
 So `gexAutoExit: false` removes #6 and #7, leaving the structural/risk exits.
+
+**In cone-breakout mode** (`coneBreakout.enabled: true`) this list is replaced by:
+the forced time exit (#1, always) plus only the enabled `coneBreakout` toggles —
+`exitOnSl` (stop-loss), `exitOnTp` (take-profit), `exitOnConeReEntry` (cone
+re-entry). Signal fade / reversal do not apply.
 
 ---
 
