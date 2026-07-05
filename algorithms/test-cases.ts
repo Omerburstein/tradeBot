@@ -75,6 +75,15 @@ export const TEST_CASES: TestCase[] = [
       '11:00–15:00 ET — inspect composite z-score, gamma exposure and ' +
       'expected-move cone between 11:00 and 15:00 ET on 2026-06-11.',
   },
+  {
+    id: '2026-05-19-0930',
+    date: '2026-05-19',
+    startEt: '09:30',
+    endEt: '15:30',
+    description:
+      '09:30–15:30 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 15:30 ET on 2026-05-19.',
+  },
 ];
 
 // ── Per-slot diagnostics captured during replay ──

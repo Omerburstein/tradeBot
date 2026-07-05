@@ -403,12 +403,15 @@ if (isMain) {
       printTradeLog(res.testResult.trades, 'WINNING CONFIG — TEST TRADES');
       printSummary(res.testResult, 'WINNING CONFIG — TEST SUMMARY');
 
-      // Persist the winning config. bestModel is ranked on the objective
-      // evaluated OUT-OF-SAMPLE (test slice) — the honest generalization metric.
-      const metric = objectiveValue(res.testResult, objective);
+      // Persist the winning config. bestModel is ranked on the OUT-OF-SAMPLE
+      // (test-slice) total P&L — the tune "test case" — regardless of which
+      // objective was optimized in-sample. This is the honest keep-or-discard
+      // signal: real dollars made on days the tuner never trained on.
+      const t = res.testResult;
+      const metric = t.totalPnl;
       const { becameBest, store, path } = recordModelRun({
         savedAt: new Date().toISOString(),
-        source: `tune ${objective} (out-sample)`,
+        source: 'tune test-slice totalPnl (out-sample)',
         metric,
         meta: {
           startDate,
@@ -416,15 +419,21 @@ if (isMain) {
           objective,
           evaluated: res.evaluated,
           trainPnl: res.trainResult.totalPnl,
-          testPnl: res.testResult.totalPnl,
           trainTrades: res.trainResult.trades.length,
-          testTrades: res.testResult.trades.length,
+          // Full out-of-sample test summary — the basis for bestModel ranking.
+          testPnl: t.totalPnl,
+          testTrades: t.trades.length,
+          testWinRate: t.winRate,
+          testProfitFactor: t.profitFactor,
+          testSharpe: t.sharpe,
+          testMaxDrawdown: t.maxDrawdown,
+          testFinalEquity: t.finalEquity,
         },
         config: res.best,
       });
 
       console.log('\n=== MODEL SAVED ===');
-      console.log(`  metric (${objective}, out-sample): ${metric.toFixed(3)}`);
+      console.log(`  metric (test-slice totalPnl, out-sample): $${metric.toFixed(2)}`);
       console.log(
         becameBest
           ? '  → saved as lastModel AND bestModel (new best)'
