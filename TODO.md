@@ -36,7 +36,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   whichever comes first: (a) SPX re-enters the cone, (b) the take-profit target
   is hit, or (c) the stop-loss is hit.
 
-- [x] **6. Change positions power to 1/3 by default and expose it as a tunable parameter.**
+- [ ] **6. Change positions power to 1/3 by default and expose it as a tunable parameter.**
   Update the positions signal's exponent from its current default to `1/3` (cube
   root compression), which gives a more linear response to large position values.
   Also expose this exponent as a tunable parameter in the tuner so it can be

@@ -293,7 +293,7 @@ export interface AlgoConfig {
   positiveGammaBias: number;
   /** Exponent on per-strike gamma change (dGamma/dt). */
   pDGamma: number;
-  /** Exponent on per-strike net positions (saturating, < 1; cube-root by default). */
+  /** Exponent on per-strike net positions (saturating, < 1). */
   pPositions: number;
   /** Exponent on per-strike positions change (dPositions/dt). */
   pDPositions: number;
@@ -358,7 +358,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   pGamma: 1.2,
   positiveGammaBias: 1.1,
   pDGamma: 1.1,
-  pPositions: 1 / 3, // cube-root compression: more linear response to large position values
+  pPositions: 0.5,
   pDPositions: 0.5,
   pDistance: 1.5,
   distanceWeightSpan: 2.0,

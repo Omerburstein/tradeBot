@@ -128,8 +128,8 @@ positionsRaw += |positions|^pPositions · gammaStrength · sign · dWeight   (ga
 - **Why chosen:** it confirms or tempers the gamma read; when big positions sit
   on the same gamma walls, conviction rises. Weighted below gamma (0.18) because
   it is noisier and only meaningful near gamma.
-- **How computed:** absolute position size **saturated** by `pPositions = 1/3`
-  (cube-root: a monster print is not 10× the signal of a large one), gated + scaled by
+- **How computed:** absolute position size **saturated** by `pPositions = 0.5`
+  (a monster print is not 10× the signal of a large one), gated + scaled by
   `gammaStrength`, directioned and distance-weighted.
 
 ### 3.4 dPositions/dt — positions momentum  →  `dPositionsZ` (weight `wDPositions`, default **0.12**)
@@ -201,7 +201,7 @@ The composite is a **conviction gate**, not a standalone trigger:
 | `pGamma` | 1.2 | emphasize large gamma |
 | `positiveGammaBias` | 1.1 | slight boost to positive gamma |
 | `pDGamma` | 1.1 | emphasize large gamma change |
-| `pPositions` | 1/3 | saturate position size (cube-root) |
+| `pPositions` | 0.5 | saturate position size |
 | `pDPositions` | 0.5 | saturate position change |
 | `pDistance` | 1.5 | curvature of the distance ramp |
 | `distanceWeightSpan` | 2.0 | edge weighs up to 3× ATM |
