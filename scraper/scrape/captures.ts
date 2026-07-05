@@ -1,16 +1,18 @@
 /**
  * API-response interception. `attachApiCaptures` installs a single
  * `response` listener that routes every dashboard/4 JSON response into the
- * right ApiCaptures bucket (Greeks exposures, contracts, straddle/cone,
- * net-flow/tide). The backfill / walk-back paths share it so each attaches
- * interception identically instead of duplicating the handler.
+ * right ApiCaptures bucket (periscope exposures/positions/timestamps,
+ * straddle/cone, net-flow/tide, candles, ticks). The backfill / walk-back
+ * paths share it so each attaches interception identically instead of
+ * duplicating the handler.
  */
 import { type Page } from 'playwright';
 import { logger } from '../core/logger.js';
 import type {
   ApiCaptures,
-  ApiExposureResponse,
-  ApiContractsResponse,
+  ApiPeriscopeExposuresResponse,
+  ApiPeriscopePositionsResponse,
+  ApiPeriscopeTimestampsResponse,
   ApiStraddleResponse,
   ApiNetFlowResponse,
   ApiCandleEntry,
@@ -22,19 +24,54 @@ import type {
  * into the right ApiCaptures bucket. Returns the live arrays; the caller
  * clears them between days.
  */
+/** Auth-relevant request headers to replay on direct periscope fetches. */
+const PERISCOPE_HEADER_ALLOWLIST = /^(authorization|origin|referer|x-.+)$/i;
+
 export function attachApiCaptures(page: Page): ApiCaptures {
-  const caps: ApiCaptures = { mme: [], mmc: [], straddle: [], tide: [], candles: [], ticks: [] };
+  const caps: ApiCaptures = {
+    periscopeHeaders: null,
+    exposures: [],
+    positions: [],
+    timestamps: [],
+    straddle: [],
+    tide: [],
+    candles: [],
+    ticks: [],
+  };
   page.on('response', (response) => {
     const url = response.url();
     const ct = response.headers()['content-type'] ?? '';
     if (!ct.includes('json')) return;
+    // Stash the auth headers the page itself sent on its first periscope
+    // XHR — the direct fetch helpers replay them (the phx API 403s bare
+    // cookie-auth requests to periscope/*).
+    if (caps.periscopeHeaders === null && url.includes('/periscope/')) {
+      response
+        .request()
+        .allHeaders()
+        .then((all) => {
+          const kept: Record<string, string> = {};
+          for (const [k, v] of Object.entries(all)) {
+            if (PERISCOPE_HEADER_ALLOWLIST.test(k)) kept[k] = v;
+          }
+          if (Object.keys(kept).length > 0) caps.periscopeHeaders ??= kept;
+        })
+        .catch(() => undefined);
+    }
     response
       .json()
       .then((body) => {
-        if (url.includes('market_maker_exposures')) {
-          caps.mme.push({ url, body: body as ApiExposureResponse });
-        } else if (url.includes('market_maker_contracts')) {
-          caps.mmc.push({ url, body: body as ApiContractsResponse });
+        if (url.includes('periscope/exposures')) {
+          caps.exposures.push({ url, body: body as ApiPeriscopeExposuresResponse });
+        } else if (url.includes('periscope/positions')) {
+          caps.positions.push({ url, body: body as ApiPeriscopePositionsResponse });
+        } else if (url.includes('periscope/timestamps')) {
+          const ts = body as ApiPeriscopeTimestampsResponse;
+          caps.timestamps.push({ url, body: ts });
+          logger.info(
+            { url, minutes: ts.data?.length ?? 0 },
+            'captured periscope/timestamps',
+          );
         } else if (url.includes('/straddle')) {
           caps.straddle.push({ url, body: body as ApiStraddleResponse });
         } else if (url.includes('net-flow-ticks')) {

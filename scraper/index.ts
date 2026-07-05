@@ -11,32 +11,28 @@
  *      has already been captured.
  *   6. SIGTERM handler clears the interval, flushes Sentry, exits 0.
  *
- * Two-cadence capture:
- *   UW refreshes the Greeks (Gamma/Charm/Vanna) and positions only every
- *   10 min, but the SPX price and Market Tide every 5 min. So each tick
- *   does as little work as the clock allows:
- *     - On a 10-min boundary → FULL scrape (Greeks + positions + price +
- *       Market Tide + Cone) via scrapeAllPanels.
- *     - On a 5-min-but-not-10-min boundary → LIGHT scrape (price + Market
- *       Tide only) via scrapeMarketTideAndPrice — skips the expensive,
- *       anti-bot-sensitive navigation the full scrape does.
- *   e.g. 10:00 → full, 10:05 → light, 10:10 → full, 10:15 → light, …
+ * Per-minute capture (2026-07 UW redesign):
+ *   UW now publishes a Greeks/positions snapshot every MINUTE (the old
+ *   10-min slot cadence is gone), and the new periscope API is fetched
+ *   directly — no widget driving — so every tick is a FULL scrape
+ *   (Greeks + positions + price + Market Tide + Cone) via scrapeAllPanels.
+ *   The old 5-min "light" price/tide tick is obsolete: the full tick now
+ *   runs every minute and captures price + tide along the way.
  *
- * Schedule-aware dedup (two independent watermarks):
+ * Schedule-aware dedup:
  *   - The scraper wakes every minute during 09:21-16:14 ET (Mon-Fri).
- *   - `lastFullWindowEnd` tracks the end-time (e.g. "10:10") of the last
- *     10-min Greeks slot captured; `lastTideWindowEnd` tracks the last
- *     5-min price/Market-Tide slot captured.
- *   - Each tick first ensures the most recently CLOSED 10-min window is
- *     captured (full scrape); otherwise it ensures the most recently
- *     CLOSED 5-min window is captured (light scrape); otherwise no-op.
- *   - When UW hasn't rolled to the expected slot yet, the tick logs +
- *     retries next minute. Both watermarks reset on leaving the window.
+ *   - `lastFullWindowEnd` tracks the end-time (e.g. "10:07") of the last
+ *     1-min snapshot captured. When the current minute's snapshot is
+ *     already captured, the tick is a no-op; when UW hasn't published the
+ *     current minute yet, the scrape returns the latest published minute
+ *     and the tick retries next minute. Resets on leaving the window.
  *
- * This pattern absorbs UW's 1-3 min publication lag without polling
- * blindly, and ensures the first analyzable slot ("09:20 - 09:30")
- * and the debrief slot ("15:50 - 16:00") are captured as soon as UW
- * publishes them, rather than later on the next boundary.
+ * Webhook cadence:
+ *   The auto-playbook webhook stays at the historical ~10-min cadence:
+ *   it fires once per 10-min window (on the first captured snapshot whose
+ *   end-time falls in a new window), NOT once per minute — the Vercel
+ *   app triggers a Claude run per invocation, so firing 390×/day instead
+ *   of ~39×/day would 10× that cost.
  *
  * One-shot test mode: set FORCE_TICK=true to bypass the window gate,
  * run a single tick, and exit. Useful for verifying auth + selectors
@@ -88,7 +84,7 @@ const { LOG_LEVEL, MS_PER_TICK, isInActivePollingWindow, APP_ENV, IS_STAGING } =
   await import('./core/config.js');
 const { expectedWindowEnd, parseSlotEnd, isPersistableSlot } = await import('./core/dates.js');
 const { insertSnapshots, insertSpotPrice, insertPositions } = await import('../db/index.js');
-const { scrapeAllPanels, scrapeMarketTideAndPrice, scrapeBackfill, scrapeBackfillRange, scrapeBackfillDates } =
+const { scrapeAllPanels, scrapeBackfill, scrapeBackfillRange, scrapeBackfillDates } =
   await import('./scrape/index.js');
 const { loadWebhookConfig, postPlaybookWebhook } = await import('./core/webhook.js');
 
@@ -116,14 +112,18 @@ if (webhookConfig.baseUrl == null || webhookConfig.secret == null) {
 let intervalHandle: NodeJS.Timeout | null = null;
 let tickInFlight = false;
 
-// Dedup watermarks: the end-time (HH:MM) of the last slot we successfully
-// captured on each cadence. `lastFullWindowEnd` is the 10-min Greeks slot
-// (e.g. "10:10"); `lastTideWindowEnd` is the 5-min price/Market-Tide slot
-// (e.g. "10:05"). Both reset to null when we leave the active polling
-// window so the next trading day starts fresh. Used by runTick to
-// short-circuit ticks where the expected window has already been captured.
+// Dedup watermark: the end-time (HH:MM, ET) of the last 1-min snapshot we
+// successfully captured (e.g. "10:07"). Resets to null when we leave the
+// active polling window so the next trading day starts fresh. Used by
+// runTick to short-circuit ticks where the current minute is already
+// captured.
 let lastFullWindowEnd: string | null = null;
-let lastTideWindowEnd: string | null = null;
+
+// The 10-min window ("HH:M0") the auto-playbook webhook last fired for.
+// The webhook fires once per 10-min window — on the first captured
+// snapshot whose end-time lands in a new window — preserving the
+// pre-redesign ~39 invocations/day despite the 1-min capture cadence.
+let lastWebhookWindow: string | null = null;
 
 // Consecutive scrape-returned-0-rows counter. Fires a single Sentry
 // message after 3 in a row to surface UW session-logout / rendering
@@ -147,13 +147,13 @@ async function runTick(
   // (overnight, weekend, post-close). The next trading day will start
   // with clean watermarks. Bypassed ticks (FORCE_TICK / backfill) don't
   // touch state.
-  if (!bypass && !inWindow && (lastFullWindowEnd !== null || lastTideWindowEnd !== null)) {
+  if (!bypass && !inWindow && (lastFullWindowEnd !== null || lastWebhookWindow !== null)) {
     logger.info(
-      { lastFullWindowEnd, lastTideWindowEnd },
+      { lastFullWindowEnd, lastWebhookWindow },
       'left active polling window — resetting dedup state',
     );
     lastFullWindowEnd = null;
-    lastTideWindowEnd = null;
+    lastWebhookWindow = null;
   }
 
   if (!bypass && !inWindow) {
@@ -161,32 +161,15 @@ async function runTick(
     return;
   }
 
-  // Decide what (if anything) this tick needs to scrape. A bypassed tick
-  // (FORCE_TICK) always runs the full scrape so it exercises every selector.
-  // Otherwise: ensure the most recently CLOSED 10-min Greeks window is
-  // captured first (full scrape); else ensure the most recently CLOSED
-  // 5-min price/Market-Tide window is captured (light scrape); else no-op.
-  let action: 'full' | 'light' | 'skip';
-  const cur5 = expectedWindowEnd(now, 5);
-  if (bypass) {
-    action = 'full';
-  } else {
-    const cur10 = expectedWindowEnd(now, 10);
-    if (cur10 != null && cur10 !== lastFullWindowEnd) {
-      action = 'full';
-    } else if (
-      cur5 != null &&
-      cur5 !== lastTideWindowEnd &&
-      cur5 !== lastFullWindowEnd
-    ) {
-      action = 'light';
-    } else {
-      action = 'skip';
-    }
-    if (action === 'skip') {
+  // Skip only when the current minute's snapshot is already captured
+  // (UW publishes per minute now, so a fresh minute ⇒ scrape). A bypassed
+  // tick (FORCE_TICK) always scrapes.
+  if (!bypass) {
+    const cur1 = expectedWindowEnd(now, 1);
+    if (cur1 === null || cur1 === lastFullWindowEnd) {
       logger.debug(
-        { cur10, cur5, lastFullWindowEnd, lastTideWindowEnd },
-        'expected windows already captured — skipping scrape',
+        { cur1, lastFullWindowEnd },
+        'current minute already captured — skipping scrape',
       );
       return;
     }
@@ -195,11 +178,7 @@ async function runTick(
   tickInFlight = true;
   const startedAt = Date.now();
   try {
-    if (action === 'light') {
-      await doLightScrape(startedAt);
-    } else {
-      await doFullScrape(startedAt);
-    }
+    await doFullScrape(startedAt);
   } catch (err) {
     Sentry.captureException(err);
     logger.error({ err, ms: Date.now() - startedAt }, 'tick failed');
@@ -209,49 +188,22 @@ async function runTick(
 }
 
 /**
- * Light tick: capture only the SPX price + Market Tide (5-min cadence) and
- * advance `lastTideWindowEnd`. No Greeks/positions, no webhook. Spot is
- * inserted at the same instant as the latest Market Tide slot so the two
- * series stay aligned.
+ * The 10-min window an ET "HH:MM" slot end falls in, e.g. "10:07" →
+ * "10:00". Drives the once-per-window webhook gating. Returns null on
+ * unparseable input.
  */
-async function doLightScrape(startedAt: number): Promise<void> {
-  const result = await scrapeMarketTideAndPrice();
-
-  // Persist spot at the tide slot's instant (Market Tide itself is stored
-  // inside the scrape). Non-blocking — a spot failure must not stall dedup.
-  if (result.spot !== null && result.tideCapturedAt !== null) {
-    try {
-      await insertSpotPrice(result.tideCapturedAt, result.date, result.spot);
-    } catch (err) {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err) },
-        'insertSpotPrice failed (light tick) — non-blocking',
-      );
-    }
-  }
-
-  // Advance the 5-min watermark to the slot we actually captured. When UW
-  // hasn't published the expected 5-min point yet, tideSlotEnd lags the
-  // boundary and the next minute retries.
-  if (result.tideSlotEnd !== null) {
-    lastTideWindowEnd = result.tideSlotEnd;
-  }
-
-  logger.info(
-    {
-      spot: result.spot,
-      tideSlotEnd: result.tideSlotEnd,
-      tideInserted: result.tideInserted,
-      ms: Date.now() - startedAt,
-    },
-    'light tick complete',
-  );
+function tenMinWindowOf(hhmm: string): string | null {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm);
+  if (m == null) return null;
+  const floored = Math.floor(Number.parseInt(m[2]!, 10) / 10) * 10;
+  return `${m[1]}:${String(floored).padStart(2, '0')}`;
 }
 
 /**
  * Full tick: capture Greeks + positions + price + Market Tide + Cone via
  * scrapeAllPanels, persist them, advance `lastFullWindowEnd`, and fire the
- * auto-playbook webhook on a genuinely new 10-min slot.
+ * auto-playbook webhook when the captured snapshot opens a new 10-min
+ * window (once per window, not once per minute).
  */
 async function doFullScrape(startedAt: number): Promise<void> {
   {
@@ -305,12 +257,12 @@ async function doFullScrape(startedAt: number): Promise<void> {
       return;
     }
 
-    // Dedup: if UW's "Latest" panel still shows the same slot we
-    // already captured, UW hasn't rolled to the next window yet. Skip
-    // DB insert + webhook (would just generate 422s) and retry next
-    // minute. Only short-circuits when we have a previous capture AND
-    // the parse succeeded; an unparseable timeframe falls through to
-    // the normal insert path so nothing silently drops.
+    // Dedup: if UW still serves the same latest minute we already
+    // captured, it hasn't published a new snapshot yet. Skip DB insert +
+    // webhook (would just generate conflicts) and retry next minute.
+    // Only short-circuits when we have a previous capture AND the parse
+    // succeeded; an unparseable timeframe falls through to the normal
+    // insert path so nothing silently drops.
     if (
       lastFullWindowEnd !== null &&
       capturedEnd !== null &&
@@ -356,13 +308,12 @@ async function doFullScrape(startedAt: number): Promise<void> {
     if (capturedEnd !== null) {
       lastFullWindowEnd = capturedEnd;
     } else {
-      // Unparseable timeframe (UW renamed the label, leading whitespace
-      // changed, etc.). Without a fallback the dedup-skip never engages
-      // and the scraper does a full Playwright run every minute for the
-      // rest of the day. Anchor to wall-clock so the schedule-aware skip
-      // still works; alert Sentry so we notice the format change. The
-      // data did insert correctly — the parse is only needed for dedup.
-      lastFullWindowEnd = expectedWindowEnd(new Date());
+      // Unparseable timeframe (label format changed, leading whitespace,
+      // etc.). Without a fallback the dedup-skip never engages. Anchor to
+      // the current wall-clock minute so the schedule-aware skip still
+      // works; alert Sentry so we notice the format change. The data did
+      // insert correctly — the parse is only needed for dedup.
+      lastFullWindowEnd = expectedWindowEnd(new Date(), 1);
       Sentry.captureMessage(
         'periscope-scraper: unparseable timeframe label — UW format may have changed',
         {
@@ -384,8 +335,23 @@ async function doFullScrape(startedAt: number): Promise<void> {
     }
 
     // Auto-playbook webhook (Phase 3 of periscope-auto-playbook spec).
-    // Fires once per new-slot capture. Failures Sentry-captured but
-    // never block the next tick. Skipped silently when env vars unset.
+    // Fires once per 10-MIN WINDOW (on the first captured snapshot whose
+    // end lands in a new window), not once per 1-min capture — the Vercel
+    // app runs Claude per invocation, so per-minute firing would 10× that
+    // cost. Failures Sentry-captured but never block the next tick (and
+    // don't re-fire within the window, matching the old once-per-slot
+    // behavior). Skipped silently when env vars unset.
+    const webhookWindow = capturedEnd !== null ? tenMinWindowOf(capturedEnd) : null;
+    if (webhookWindow !== null && webhookWindow === lastWebhookWindow) {
+      logger.debug(
+        { slot: anchor.timeframe, webhookWindow },
+        'auto-playbook webhook already fired for this 10-min window — skipping',
+      );
+      return;
+    }
+    if (webhookWindow !== null) {
+      lastWebhookWindow = webhookWindow;
+    }
     const tradingDate = anchor.capturedAt.slice(0, 10);
     const result = await postPlaybookWebhook(
       {
@@ -487,8 +453,12 @@ const forceTick =
   (process.env.FORCE_TICK ?? '').trim().toLowerCase() === 'true';
 
 const backfillDate = (process.env.BACKFILL_DATE ?? '').trim();
-const backfillStart = (process.env.BACKFILL_START ?? '').trim() || '09:20';
-const backfillEnd = (process.env.BACKFILL_END ?? '').trim() || '15:50';
+// BACKFILL_START/END bound the captured instants (ET HH:MM of captured_at,
+// inclusive) since the 2026-07 per-minute API. Defaults cover the persisted
+// window: 09:31 (first full post-bell minute) through the 16:00 close.
+// (Pre-redesign these were slot-START bounds, defaulting to 09:20/15:50.)
+const backfillStart = (process.env.BACKFILL_START ?? '').trim() || '09:31';
+const backfillEnd = (process.env.BACKFILL_END ?? '').trim() || '16:00';
 const backfillDateStart = (process.env.BACKFILL_DATE_START ?? '').trim();
 const backfillDateEnd = (process.env.BACKFILL_DATE_END ?? '').trim();
 // Explicit comma/space-separated list of YYYY-MM-DD trading days to backfill.

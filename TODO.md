@@ -78,7 +78,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Scraper
 
-- [ ] **5. Change the scraper to capture data every minute (page layout changed — review it first).**
+- [x] **5. Change the scraper to capture data every minute (page layout changed — review it first).**
   Change the scraper so it takes the data every one minute instead of the
   current 10-minute cadence. IMPORTANT: the Unusual Whales Periscope page has
   changed — before making any changes, go over the current page thoroughly

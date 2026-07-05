@@ -1,8 +1,13 @@
 /**
- * Page-navigation interactions — driving UW's Expiry dropdown, the DTE
- * filter, and the date picker (both the day-chevron path and the calendar
- * widget). Every waitForTimeout here is empirically-tuned anti-bot pacing
- * and Radix animation settling; do not swap for locator-based waits.
+ * LEGACY (pre-2026-07 UW layout) — page-navigation interactions: driving
+ * UW's Expiry dropdown, the DTE filter, and the date picker (day-chevron +
+ * calendar paths). The 2026-07 periscope API redesign made all scraping
+ * paths fetch snapshots directly (api-helpers.ts fetchPeriscopeSlot), so
+ * NOTHING imports this module anymore. It is kept as a reference for
+ * driving UW's Radix widgets (the Expiry dialog still exists on the new
+ * page and was last confirmed working 2026-07-05). Every waitForTimeout
+ * here is empirically-tuned anti-bot pacing and Radix animation settling;
+ * do not swap for locator-based waits.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';

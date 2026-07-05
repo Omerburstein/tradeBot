@@ -4,7 +4,8 @@
  * Runs the live scrape pipeline end-to-end (`scrapeAllPanels`) against the
  * actual UW Periscope page and asserts the captured snapshot is "good":
  * structurally valid AND consistent with the critical invariants in
- * CLAUDE.md (single expiry, Gamma-anchored timeframe, slot-END capturedAt).
+ * CLAUDE.md (session + next-trading-day expiries, one shared 1-min
+ * timeframe, slot-END capturedAt).
  *
  * It does NOT write to Postgres or fire the webhook — `scrapeAllPanels` is
  * the same read-only entry point `probe.ts` uses. Safe to run any time, but
@@ -119,15 +120,24 @@ async function main(): Promise<void> {
     check(`${p} strikes substantially overlap gamma (>=90%)`, ratio >= 0.9, `overlap ${overlap}/${pStrikes.size}`);
   }
 
-  // ── Single expiry across all rows ────────────────────────────────────
-  const expiries = new Set(rows.map((r) => r.expiry));
-  check('all rows share one expiry', expiries.size === 1, `expiries=${[...expiries].join(', ')}`);
-  const expiry = [...expiries][0] ?? '';
-  check('expiry is YYYY-MM-DD', ISO_DATE_PATTERN.test(expiry), `expiry="${expiry}"`);
+  // ── Expiries: the session day (0DTE) plus optionally the next trading
+  // day (1DTE) — the capture fetches both at the same minute. ──────────
+  const expiries = [...new Set(rows.map((r) => r.expiry))].sort();
+  check(
+    'rows carry 1-2 expiries (session + optional next trading day)',
+    expiries.length >= 1 && expiries.length <= 2,
+    `expiries=${expiries.join(', ')}`,
+  );
+  for (const expiry of expiries) {
+    check(`expiry "${expiry}" is YYYY-MM-DD`, ISO_DATE_PATTERN.test(expiry), `expiry="${expiry}"`);
+  }
+  if (expiries.length === 1) {
+    notes.push('only one expiry captured — next-trading-day fetch may have returned no data.');
+  }
 
-  // ── Gamma-anchored timeframe: every panel matches gamma's slot ───────
+  // ── One shared timeframe across every panel and expiry ───────────────
   const timeframes = new Set(rows.map((r) => r.timeframe));
-  check('all rows share one timeframe (Gamma anchor holds)', timeframes.size === 1, `timeframes=${[...timeframes].join(' | ')}`);
+  check('all rows share one timeframe', timeframes.size === 1, `timeframes=${[...timeframes].join(' | ')}`);
   const timeframe = [...timeframes][0] ?? '';
   const tfMatch = TIMEFRAME_PATTERN.exec(timeframe);
   check('timeframe matches "HH:MM - HH:MM"', tfMatch !== null, `timeframe="${timeframe}"`);

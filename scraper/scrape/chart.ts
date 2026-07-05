@@ -85,8 +85,10 @@ export async function clickZoomOut(
 
 /**
  * Wait for the page to have loaded enough that data is rendered.
- * For the chart view, we look for the "SPX Market Maker Exposures" title
- * or the Timeframe widget — either means the chart panel is mounted.
+ * The 2026-07 redesign removed the old "Timeframe:" widget, so we look for
+ * the "Market Maker Exposures" window title (present in both layouts) —
+ * it means the Exposures window is mounted and its on-load XHRs have fired
+ * (or are firing).
  *
  * Returns true if the chart appears ready, false on timeout.
  */
@@ -96,10 +98,11 @@ export async function waitForChartReady(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    // Check for the Timeframe widget (reliable indicator the MM Exposures
-    // panel is rendered and interactive).
-    const tfCount = await page.locator('span', { hasText: /^Timeframe:$/ }).count();
-    if (tfCount > 0) return true;
+    const titleCount = await page
+      .getByText(/Market Maker Exposures/i)
+      .count()
+      .catch(() => 0);
+    if (titleCount > 0) return true;
 
     // Also check for explicit "No data available"
     const noDataCount = await page.getByText(/no data available/i).count();

@@ -98,21 +98,24 @@ export function isInRth(d: Date): boolean {
  *  and 09:35. */
 export const MARKET_OPEN_MIN = 9 * 60 + 30;
 
-/** ET end of the first 10-min Greek slot (09:40) — the lower bound for the
- *  Greek/position snapshots, whose captured_at is the slot END. */
-export const FIRST_GREEK_SLOT_END_MIN = 9 * 60 + 40;
+/** ET end of the first fully-in-RTH 1-min Greek slot (09:31) — the lower
+ *  bound for the Greek/position snapshots, whose captured_at is the slot
+ *  END. Excludes the 09:30 minute itself (its slot straddles the bell).
+ *  Was 09:40 under the pre-2026-07 10-min cadence; existing 10-min rows
+ *  (ends 09:40+) all still pass. */
+export const FIRST_GREEK_SLOT_END_MIN = 9 * 60 + 31;
 
 /**
  * Returns true when a captured slot's END time (its captured_at instant)
  * belongs to the data we persist: Mon-Fri, up to 16:00 ET inclusive,
  * DST-aware. The lower bound depends on the dataset's cadence:
  *
- *   - Greeks / positions (10-min slots, captured_at = slot END) → 09:40,
- *     excluding the opening 09:20-09:30 slot that straddles the bell. This is
+ *   - Greeks / positions (1-min snapshots, captured_at = minute END) →
+ *     09:31, excluding the opening minute that straddles the bell. This is
  *     the default (`FIRST_GREEK_SLOT_END_MIN`).
  *   - Spot / Market Tide (5-min instants) → pass `MARKET_OPEN_MIN` (09:30) so
  *     the 09:30 and 09:35 points are kept — they're real prices at the bell,
- *     not a straddling 10-min slot.
+ *     not a straddling slot.
  *
  * Used as the single retention gate across every persistence path so
  * out-of-window slots are dropped no matter which path produced them.
@@ -152,8 +155,9 @@ export function isInActivePollingWindow(d: Date): boolean {
  * Return the end time (HH:MM) of the most recently CLOSED `stepMin`-minute
  * UW slot at the given instant, in ET. DST-aware. Returns null when the
  * instant is before the first boundary of the day (i.e. before `stepMin`
- * minutes past midnight ET). Defaults to 10-min slots (the Greeks/positions
- * cadence); pass `stepMin = 5` for the price + Market Tide cadence.
+ * minutes past midnight ET). The live tick passes `stepMin = 1` (UW
+ * publishes per minute since 2026-07); the webhook gating uses the default
+ * 10-min windows; `stepMin = 5` matches the price + Market Tide cadence.
  *
  * Examples (all ET, default stepMin=10):
  *   09:30:00 → "09:30"  (the 09:20-09:30 slot just closed)

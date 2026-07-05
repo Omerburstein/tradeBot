@@ -1,9 +1,11 @@
 /**
- * Timeframe helpers — HH:MM string math plus the Playwright interactions
- * that drive UW's Timeframe widget (walk to a target slot, step forward /
- * backward by one 10-min slot, read the current label). The intra-slot
- * waitForTimeout pacing here is intentional anti-bot tuning — do not
- * replace with locator waits.
+ * Timeframe helpers — HH:MM string math (normalizeHhmm is still used by
+ * orchestrate.ts) plus LEGACY Playwright walkers for the old "Timeframe:"
+ * widget. The 2026-07 UW redesign REMOVED that widget (time is now an
+ * hour:minute picker and snapshots are fetched directly by timestamp), so
+ * the widget walkers below no longer match anything on the page and are
+ * kept only as a reference. The intra-slot waitForTimeout pacing was
+ * intentional anti-bot tuning.
  */
 import { type Page } from 'playwright';
 import { logger } from '../core/logger.js';

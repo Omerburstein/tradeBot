@@ -14,27 +14,21 @@ import {
   insertSnapshots,
   insertPositions,
 } from '../../db/index.js';
-import { computeCapturedAt } from '../core/dates.js';
 import { logger } from '../core/logger.js';
 import type { SnapshotRow, PositionRow } from '../core/types.js';
 import { withBrowser } from './browser.js';
 import { attachApiCaptures } from './captures.js';
 import { clickZoomOut, waitForChartReady } from './chart.js';
-import { setExpirySingle, walkDateToTarget } from './navigation.js';
+import { normalizeHhmm } from './timeframe.js';
 import {
-  advanceTimeframeOneSlot,
-  nextTimeframe,
-  normalizeHhmm,
-  walkTimeframeToTarget,
-} from './timeframe.js';
-import {
-  apiResponseToRows,
-  contractsResponseToRows,
+  exposuresToRows,
+  positionsToRows,
+  utcToETHhmm,
   type SpotRow,
 } from './api-transforms.js';
 import {
-  pickBestMme,
-  pickBestMmc,
+  fetchPeriscopeTimestamps,
+  fetchPeriscopeSlot,
   storeMarketTide,
   storeSpot,
   storeCone,
@@ -67,21 +61,26 @@ interface DayStoreSummary {
 }
 
 /**
- * Scrape one trading day AND persist everything for it: navigate the
- * chart to `date`, set Expiry=Single, iterate 10-min slots from
- * `startNorm`..`endNorm` capturing Greeks/positions, then store the 5-min
- * spot series, Market Tide (5-min) and the Cone param (straddle, once/day —
- * skipped if already in the DB).
+ * Scrape one trading day AND persist everything for it: list the day's
+ * published snapshot minutes (periscope/timestamps), fetch each selected
+ * minute's Greeks + positions directly from the periscope API for both the
+ * session expiry (0DTE) and the next trading day (1DTE), then store the
+ * 5-min spot series, Market Tide (5-min) and the Cone param (straddle,
+ * once/day — skipped if already in the DB).
+ *
+ * `startNorm`..`endNorm` bound the captured instants (ET HH:MM, inclusive)
+ * and BACKFILL_STEP_MIN (default 10) selects every Nth minute — 10 keeps
+ * the historical 10-min cadence/volume; 1 backfills full minute resolution.
  *
  * This is THE shared per-day scraper: scrapeBackfill (single date),
  * scrapeBackfillRange (fixed list), and scrapeWalkBack (descending walk)
  * all route through it, so scrape + insert behavior lives in one place.
  *
- * A Greeks navigation/selection failure (e.g. the date is outside the
- * Single-mode Expiry dropdown) is NON-FATAL: it's logged and the day still
- * persists its per-date Market Tide / spot / Cone, returning rowsParsed=0.
- * Callers treat rowsParsed=0 as "empty" (the walk-back stop condition still
- * works) while the API-sourced datasets are saved regardless.
+ * A Greeks fetch failure (or a date past UW's history floor, where the
+ * timestamps list comes back empty) is NON-FATAL: it's logged and the day
+ * still persists its per-date Market Tide / spot / Cone, returning
+ * rowsParsed=0. Callers treat rowsParsed=0 as "empty" (the walk-back stop
+ * condition still works) while the API-sourced datasets are saved regardless.
  */
 async function scrapeAndStoreDay(
   page: Page,
@@ -95,12 +94,14 @@ async function scrapeAndStoreDay(
 ): Promise<DayStoreSummary> {
   // Drop any responses left over from the previous day so the `?? last`
   // fallbacks below can't read stale data for this date.
-  caps.mme.length = 0;
-  caps.mmc.length = 0;
+  caps.exposures.length = 0;
+  caps.positions.length = 0;
   caps.straddle.length = 0;
   caps.tide.length = 0;
   caps.ticks.length = 0;
-  // caps.candles is NOT cleared — it fires once on page load and covers all dates
+  // caps.candles and caps.timestamps are NOT cleared — candles fire once on
+  // page load and cover all dates; timestamps responses are keyed by their
+  // URL's date param so stale entries can never match another day.
 
   // Fetch THIS day's ATM straddle (Cone param) too — same reason: the
   // straddle endpoint only auto-fires for today on load, so without this the
@@ -117,116 +118,62 @@ async function scrapeAndStoreDay(
   const dayPositions: PositionRow[] = [];
   let slotsScanned = 0;
 
-  /**
-   * Walk every 10-min slot from startNorm..endNorm for the currently
-   * selected expiry, pushing Greeks/positions into the day arrays.
-   * `expiry` is the expiry currently selected in the Expiry filter — used
-   * both to pick the right URL-matched API response AND to stamp the rows
-   * (the response BODY's `date` is the session date, not the expiry, so it
-   * can't label non-0DTE rows). Returns the slot count walked.
-   *
-   * Spot is NOT recorded here: it's the underlying SPX price (independent of
-   * expiry and of the 10-min Greek cadence), so it's stored once per day at
-   * 5-min boundaries (see storeSpot) after both passes.
-   */
-  async function walkSlotsForExpiry(expiry: string): Promise<number> {
-    await waitForChartReady(page);
-    await walkTimeframeToTarget(page, startNorm);
-    await page.waitForTimeout(1_500);
-
-    let currentStart = startNorm;
-    let walked = 0;
-    while (currentStart <= endNorm) {
-      const slotEnd = nextTimeframe(currentStart);
-      const capturedAt = computeCapturedAt(date, slotEnd);
-
-      // Wait for API response
-      await page.waitForLoadState('networkidle').catch(() => undefined);
-      await page.waitForTimeout(1_000);
-
-      const latestMme = pickBestMme(caps.mme, expiry);
-
-      if (latestMme) {
-        const { rows, qualifyingStrikes } = apiResponseToRows(
-          latestMme,
-          capturedAt,
-          expiry,
-        );
-        dayRows.push(...rows);
-
-        const latestMmc = pickBestMmc(caps.mmc, expiry);
-        if (latestMmc) {
-          dayPositions.push(
-            ...contractsResponseToRows(latestMmc, capturedAt, qualifyingStrikes, expiry),
-          );
-        }
-      }
-
-      walked += 1;
-
-      const nextStart = nextTimeframe(currentStart);
-      if (nextStart > endNorm) break;
-
-      // Clear only the per-slot Greek responses — straddle/tide are
-      // fetched once per day and must survive the whole slot loop.
-      caps.mme.length = 0;
-      caps.mmc.length = 0;
-      await advanceTimeframeOneSlot(page);
-      await page.waitForTimeout(1_500);
-      currentStart = nextStart;
-    }
-    return walked;
-  }
-
-  // ── Greeks + positions (require chart navigation) ──
-  // Navigating to the date and selecting Single-mode expiry can fail for older
-  // days that fall out of the Single-mode Expiry dropdown. That failure is
-  // NON-FATAL: the per-date Market Tide / spot / Cone (captured above + stored
-  // below) don't depend on the chart, so we log, skip the Greeks for this day,
-  // and still persist those datasets.
+  // ── Greeks + positions (direct periscope API fetches per instant) ──
+  // The 2026-07 endpoints key snapshots by (timestamp, expiries) query
+  // params, so a backfill day needs NO chart navigation: list the day's
+  // published minutes, filter to [startNorm..endNorm] at BACKFILL_STEP_MIN
+  // granularity, and fetch each snapshot pair for the session expiry (0DTE)
+  // and the next trading day (1DTE). Any failure is NON-FATAL: the per-date
+  // Market Tide / spot / Cone (captured above + stored below) don't depend
+  // on the Greeks, so we log, skip, and still persist those datasets.
+  const stepRaw = Number.parseInt((process.env.BACKFILL_STEP_MIN ?? '').trim(), 10);
+  const stepMin = Number.isFinite(stepRaw) && stepRaw > 0 ? stepRaw : 10;
   try {
-    await walkDateToTarget(page, date);
-    await page.waitForTimeout(1_500);
-    const ok = await setExpirySingle(page, date);
-    if (!ok) {
-      throw new Error(
-        `setExpirySingle(${date}) failed — date may be outside Single-mode dropdown for this chart frame`,
-      );
+    const stamps = await fetchPeriscopeTimestamps(page, caps, date);
+
+    // Select the instants to capture: within the requested ET window and on
+    // the step grid (e.g. step 10 → :00/:10/:20/… boundaries only).
+    const slots: Array<{ iso: string; ms: number }> = [];
+    for (const s of stamps) {
+      const ms = Date.parse(s);
+      if (!Number.isFinite(ms)) continue;
+      const hhmm = utcToETHhmm(s);
+      if (hhmm < startNorm || hhmm > endNorm) continue;
+      const totalMin =
+        Number.parseInt(hhmm.slice(0, 2), 10) * 60 + Number.parseInt(hhmm.slice(3), 10);
+      if (totalMin % stepMin !== 0) continue;
+      slots.push({ iso: new Date(ms).toISOString(), ms });
     }
+    logger.info(
+      { date, stepMin, publishedMinutes: stamps.length, slotsSelected: slots.length },
+      'scrapeAndStoreDay: slot instants resolved',
+    );
 
-    // Pass 1: the session-day expiry (0DTE).
-    slotsScanned += await walkSlotsForExpiry(date);
-
-    // Pass 2: the next trading day's expiry (1DTE+). The dialog is already in
-    // Single mode, so skipModeSwitch avoids toggling it back to Multi. A
-    // failure here is non-fatal — pass-1 rows are already collected.
     const nextExpiry = nextTradingDay(date);
-    caps.mme.length = 0;
-    caps.mmc.length = 0;
-    try {
-      const nextOk = await setExpirySingle(page, nextExpiry, { skipModeSwitch: true });
-      if (nextOk) {
-        slotsScanned += await walkSlotsForExpiry(nextExpiry);
-      } else {
-        logger.warn(
-          { date, nextExpiry },
-          'scrapeAndStoreDay: next expiry not selectable — storing session-day expiry only',
-        );
+    for (const slot of slots) {
+      for (const expiry of [date, nextExpiry]) {
+        const { exposures, positions } = await fetchPeriscopeSlot(page, caps, {
+          timestampMs: slot.ms,
+          expiry,
+        });
+        if (exposures) {
+          const parsed = exposuresToRows(exposures, slot.iso, expiry);
+          dayRows.push(...parsed.rows);
+          if (positions) {
+            dayPositions.push(
+              ...positionsToRows(positions, slot.iso, parsed.qualifyingStrikes, expiry),
+            );
+          }
+        }
+        await page.waitForTimeout(200); // pacing between API fetches // anti-bot
       }
-    } catch (err) {
-      logger.warn(
-        { date, nextExpiry, err: err instanceof Error ? err.message : String(err) },
-        'scrapeAndStoreDay: next-expiry walk failed — non-blocking',
-      );
+      slotsScanned += 1;
     }
   } catch (err) {
     logger.warn(
       { date, err: err instanceof Error ? err.message : String(err) },
       'scrapeAndStoreDay: Greeks scrape failed — storing Market Tide/spot/Cone only',
     );
-    // Escape any stuck modal/popover so the next day starts clean.
-    await page.keyboard.press('Escape').catch(() => undefined);
-    await page.keyboard.press('Escape').catch(() => undefined);
   }
 
   // ── Persist Greeks + positions (empty when the Greeks scrape was skipped) ──
@@ -284,9 +231,6 @@ export async function scrapeBackfill(
     );
     await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
     await waitForChartReady(page);
-
-    // Collapse the left nav sidebar to maximize chart area.
-    await clickZoomOut(page);
 
     // Capture the net-flow-ticks (Market Tide) URL fired on load — its date
     // param is later swapped per backfill day (the widget won't refetch on
@@ -441,9 +385,6 @@ export async function scrapeBackfillDates(
     await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
     await waitForChartReady(page);
 
-    // Collapse the left nav sidebar to maximize chart area.
-    await clickZoomOut(page);
-
     // Capture the net-flow-ticks (Market Tide) URL fired on load — its date
     // param is swapped per backfill day (the widget won't refetch on
     // chart-date changes).
@@ -573,9 +514,6 @@ export async function scrapeWalkBack(opts: {
     logger.info({ url: UW_PERISCOPE_URL }, 'navigating to periscope');
     await page.goto(UW_PERISCOPE_URL, { waitUntil: 'networkidle' });
     await waitForChartReady(page);
-
-    // Collapse the left nav sidebar to maximize chart area.
-    await clickZoomOut(page);
 
     // Capture the net-flow-ticks (Market Tide) URL fired on load — its date
     // param is swapped per day (the widget won't refetch on chart-date

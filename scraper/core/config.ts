@@ -66,12 +66,11 @@ export const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 /**
  * 1 minute between tick wake-ups.
  *
- * The tick body is schedule-aware: it only invokes the Playwright
- * scrape when a new 10-min UW slot is expected (i.e., the most
- * recently closed 10-min window has not yet been captured). Outside
- * that "publish window" — and outside the active polling window
- * (09:21-16:14 ET) — the tick is a cheap no-op. See `runTick` in
- * index.ts and `expectedWindowEnd` in dates.ts.
+ * UW publishes a snapshot per minute (2026-07 redesign), so inside the
+ * active polling window (09:21-16:14 ET) nearly every tick scrapes the
+ * newest minute; the tick is only a no-op when the current minute was
+ * already captured or outside the window. See `runTick` in index.ts and
+ * `expectedWindowEnd` in dates.ts.
  */
 export const MS_PER_TICK = 60 * 1000;
 

@@ -6,9 +6,8 @@
  */
 import type { Panel, SnapshotRow, MarketTideRow, PositionRow } from '../core/types.js';
 import type {
-  ApiExposureRow,
-  ApiExposureResponse,
-  ApiContractsResponse,
+  ApiPeriscopeExposuresResponse,
+  ApiPeriscopePositionsResponse,
   ApiStraddleResponse,
   ApiNetFlowResponse,
   ApiIntradayCandle,
@@ -31,8 +30,9 @@ const FIVE_MIN_MS = 5 * 60 * 1000;
  */
 const GAMMA_MIN_ABS = 150;
 
-/** Greeks present in the API response, in capture order. */
-const GREEKS_TO_CAPTURE: ReadonlyArray<{ panel: Panel; key: keyof Pick<ApiExposureRow, 'gamma' | 'charm' | 'vanna'> }> = [
+/** Greeks present in the API response, in capture order. `delta` also
+ *  arrives from the new endpoint but is not persisted (DB `panel` CHECK). */
+const GREEKS_TO_CAPTURE: ReadonlyArray<{ panel: Panel; key: 'gamma' | 'charm' | 'vanna' }> = [
   { panel: 'gamma', key: 'gamma' },
   { panel: 'charm', key: 'charm' },
   { panel: 'vanna', key: 'vanna' },
@@ -57,45 +57,47 @@ export function utcToETHhmm(utcIso: string): string {
 }
 
 /**
- * Derive a UW-style timeframe label from an API timestamp.
- * The API timestamp represents the slot END time.
- * Returns e.g. "09:20 - 09:30" (ET) from the end time "09:30".
+ * Derive a UW-style timeframe label from an API snapshot instant.
+ * The new periscope endpoints publish one snapshot per MINUTE, and the
+ * timestamp is the minute's END instant, so the label spans one minute:
+ * e.g. "09:29 - 09:30" (ET) for the instant "…T13:30:00Z" (EDT).
+ * (The pre-2026-07 endpoints published 10-min slots — old DB rows carry
+ * "09:20 - 09:30"-style labels; parseSlotEnd handles both.)
  */
 export function apiTimestampToTimeframe(utcIso: string): string {
   const endHhmm = utcToETHhmm(utcIso);
-  // Slot start is 10 minutes before end
   const d = new Date(utcIso);
-  d.setMinutes(d.getMinutes() - 10);
+  d.setMinutes(d.getMinutes() - 1);
   const startHhmm = utcToETHhmm(d.toISOString());
   return `${startHhmm} - ${endHhmm}`;
 }
 
 /**
- * Convert an API exposure response into SnapshotRow[] for all three Greeks.
- * Each row in the API data has gamma, charm, vanna as string fields — we
- * parse them into numeric values and emit one SnapshotRow per (strike, greek).
+ * Convert a periscope/exposures response into SnapshotRow[] for all three
+ * persisted Greeks. `expiry` is REQUIRED: the new response carries no
+ * date/expiry field, so rows are stamped with the `expiries=` filter the
+ * request was made with.
  */
-export function apiResponseToRows(
-  apiData: ApiExposureResponse,
+export function exposuresToRows(
+  apiData: ApiPeriscopeExposuresResponse,
   capturedAt: string,
-  expiryOverride?: string,
-): { rows: SnapshotRow[]; spot: number; timeframe: string; expiry: string; qualifyingStrikes: Set<number> } {
+  expiry: string,
+): { rows: SnapshotRow[]; timeframe: string; qualifyingStrikes: Set<number> } {
   const rows: SnapshotRow[] = [];
-  const timeframe = apiTimestampToTimeframe(apiData.timestamp);
-  // apiData.date is the trading-SESSION date, which equals the expiry only
-  // for 0DTE. For a non-0DTE expiry the caller passes expiryOverride (the
-  // expiry selected in the Expiry filter / URL param).
-  const expiry = expiryOverride ?? apiData.date; // YYYY-MM-DD
-  const spot = apiData.index_values.close;
+  const timeframe = apiTimestampToTimeframe(capturedAt);
 
-  const dataRows = Object.values(apiData.data);
+  // Defensive: dashboard/4 serves the market_maker participant only, but
+  // keep the filter explicit in case UW adds buckets to this endpoint.
+  const dataRows = (apiData.data ?? []).filter(
+    (r) => r.participant == null || r.participant === 'market_maker',
+  );
 
   // Gamma is the anchor: only persist strikes whose gamma magnitude exceeds
   // the threshold. Charm/Vanna for a strike are kept only when that same
   // strike's gamma qualifies — i.e. a strike is all-or-nothing across Greeks.
   const qualifyingStrikes = new Set<number>();
   for (const row of dataRows) {
-    const gamma = Number.parseFloat(row.gamma);
+    const gamma = Number(row.gamma);
     if (Number.isFinite(gamma) && Math.abs(gamma) > GAMMA_MIN_ABS) {
       qualifyingStrikes.add(row.strike);
     }
@@ -104,11 +106,8 @@ export function apiResponseToRows(
   for (const greek of GREEKS_TO_CAPTURE) {
     for (const row of dataRows) {
       if (!qualifyingStrikes.has(row.strike)) continue;
-      const valueStr = row[greek.key];
-      const value = Number.parseFloat(valueStr);
+      const value = Number(row[greek.key]);
       if (!Number.isFinite(value)) continue;
-      // Skip rows where all Greeks are zero (noise at extreme strikes)
-      // Keep zero values though since they can be meaningful at specific strikes
       rows.push({
         capturedAt,
         expiry,
@@ -120,32 +119,34 @@ export function apiResponseToRows(
     }
   }
 
-  return { rows, spot, timeframe, expiry, qualifyingStrikes };
+  return { rows, timeframe, qualifyingStrikes };
 }
 
 /**
- * Convert an API contracts response into PositionRow[] — one row per strike
- * with separate call_qty and put_qty columns. Only includes strikes that
- * appear in `qualifyingStrikes` (gamma-gated).
+ * Convert a periscope/positions response into PositionRow[] — one row per
+ * strike with separate call_qty and put_qty columns (from the row's
+ * `market_maker` net quantity). Only includes strikes that appear in
+ * `qualifyingStrikes` (gamma-gated). `expiry` is required for the same
+ * reason as in exposuresToRows.
  */
-export function contractsResponseToRows(
-  apiData: ApiContractsResponse,
+export function positionsToRows(
+  apiData: ApiPeriscopePositionsResponse,
   capturedAt: string,
   qualifyingStrikes: ReadonlySet<number>,
-  expiryOverride?: string,
+  expiry: string,
 ): PositionRow[] {
-  const timeframe = apiTimestampToTimeframe(apiData.timestamp);
-  // apiData.date is the trading-SESSION date (== expiry only for 0DTE).
-  const expiry = expiryOverride ?? apiData.date;
+  const timeframe = apiTimestampToTimeframe(capturedAt);
 
   const callByStrike = new Map<number, number>();
   const putByStrike = new Map<number, number>();
-  for (const row of apiData.data) {
+  for (const row of apiData.data ?? []) {
     if (!qualifyingStrikes.has(row.strike)) continue;
-    if (row.type === 'call') {
-      callByStrike.set(row.strike, (callByStrike.get(row.strike) ?? 0) + row.qty);
+    const qty = Number(row.market_maker);
+    if (!Number.isFinite(qty)) continue;
+    if (row.option_type === 'call') {
+      callByStrike.set(row.strike, (callByStrike.get(row.strike) ?? 0) + qty);
     } else {
-      putByStrike.set(row.strike, (putByStrike.get(row.strike) ?? 0) + row.qty);
+      putByStrike.set(row.strike, (putByStrike.get(row.strike) ?? 0) + qty);
     }
   }
 

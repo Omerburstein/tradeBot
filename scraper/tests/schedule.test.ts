@@ -117,12 +117,13 @@ check('rth: Sunday excluded', !isInRth(sunday('12:30:00')));
 check('rth: DST summer 10:00 EDT included', isInRth(monSummer('10:00:00')));
 
 // ─────────────────────────────────────────────────────────────────────
-// 2b. Persisted-slot gate — Mon-Fri 09:40-16:00 ET (drops premarket,
-//     postmarket, AND the opening 09:20-09:30 slot that ends at 09:30)
+// 2b. Persisted-slot gate — Mon-Fri 09:31-16:00 ET (drops premarket,
+//     postmarket, AND the bell-straddling minute that ends at 09:30).
+//     Lower bound moved 09:40 → 09:31 with the 1-min capture cadence.
 // ─────────────────────────────────────────────────────────────────────
-check('persist: 09:30 (opening slot end) excluded', !isPersistableSlot(monWinter('09:30:00')));
-check('persist: 09:40 (first kept slot end) included', isPersistableSlot(monWinter('09:40:00')));
-check('persist: 09:39 excluded', !isPersistableSlot(monWinter('09:39:00')));
+check('persist: 09:30 (bell-straddling minute end) excluded', !isPersistableSlot(monWinter('09:30:00')));
+check('persist: 09:31 (first kept minute end) included', isPersistableSlot(monWinter('09:31:00')));
+check('persist: 09:40 (legacy 10-min first slot end) included', isPersistableSlot(monWinter('09:40:00')));
 check('persist: upper bound 16:00 inclusive', isPersistableSlot(monWinter('16:00:00')));
 check('persist: just after 16:01 excluded', !isPersistableSlot(monWinter('16:01:00')));
 check('persist: midday weekday included', isPersistableSlot(monWinter('12:30:00')));
@@ -141,6 +142,12 @@ eq('slot: 16:00:00 → "16:00"', expectedWindowEnd(monWinter('16:00:00')), '16:0
 eq('slot: 00:05 before first boundary → null', expectedWindowEnd(monWinter('00:05:00')), null);
 eq('slot: 00:10 first boundary → "00:10"', expectedWindowEnd(monWinter('00:10:00')), '00:10');
 
+// 1-min cadence (live tick since the 2026-07 redesign) — expectedWindowEnd(d, 1)
+eq('slot1: 10:07:00 → "10:07"', expectedWindowEnd(monWinter('10:07:00'), 1), '10:07');
+eq('slot1: 10:07:59 → "10:07"', expectedWindowEnd(monWinter('10:07:59'), 1), '10:07');
+eq('slot1: 16:00:00 → "16:00"', expectedWindowEnd(monWinter('16:00:00'), 1), '16:00');
+eq('slot1: 00:00:30 before first boundary → null', expectedWindowEnd(monWinter('00:00:30'), 1), null);
+
 // 5-min cadence (price + Market Tide) — expectedWindowEnd(d, 5)
 eq('slot5: 10:05:00 → "10:05"', expectedWindowEnd(monWinter('10:05:00'), 5), '10:05');
 eq('slot5: 10:09:59 → "10:05"', expectedWindowEnd(monWinter('10:09:59'), 5), '10:05');
@@ -154,6 +161,7 @@ eq('slot5: DST summer 13:35 EDT → "13:35"', expectedWindowEnd(monSummer('13:35
 // ─────────────────────────────────────────────────────────────────────
 eq('parse: "09:20 - 09:30" → "09:30"', parseSlotEnd('09:20 - 09:30'), '09:30');
 eq('parse: "15:50 - 16:00" → "16:00"', parseSlotEnd('15:50 - 16:00'), '16:00');
+eq('parse: 1-min label "10:06 - 10:07" → "10:07"', parseSlotEnd('10:06 - 10:07'), '10:07');
 eq('parse: unpadded "9:10 - 9:20" → "09:20"', parseSlotEnd('9:10 - 9:20'), '09:20');
 eq('parse: garbage → null', parseSlotEnd('not a slot'), null);
 eq('parse: empty → null', parseSlotEnd(''), null);

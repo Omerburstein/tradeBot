@@ -3,6 +3,15 @@
  * intercepts, plus the public ScrapeResult and the ApiCaptures bucket
  * grouping. Pure types — no runtime code — so every engine module can
  * import them without pulling in browser or DB dependencies.
+ *
+ * ENDPOINT GENERATION (2026-07): UW rebuilt Periscope. The old
+ * `market_maker_exposures` / `market_maker_contracts` endpoints were
+ * replaced by `periscope/exposures` / `periscope/positions`, keyed by an
+ * epoch-ms `timestamp` query param (one snapshot per MINUTE) and an
+ * `expiries=<YYYY-MM-DD>` filter param, plus a new `periscope/timestamps`
+ * endpoint that lists every published minute for a date. The scraper now
+ * fetches these directly (authenticated page.request) instead of driving
+ * the removed Timeframe widget.
  */
 import type { SnapshotRow, PositionRow } from '../core/types.js';
 
@@ -11,86 +20,80 @@ export interface ScrapeResult {
   rows: SnapshotRow[];
   /** Positions (call/put qty per strike) — persisted to the `positions` table. */
   positionRows: PositionRow[];
-  /** SPX spot price at capture time (from the API index_values or page header). */
+  /** SPX spot price at capture time (page header, else latest 1-min tick close). */
   spot: number | null;
 }
 
 /**
- * Result of a light tick — the cheap 5-min capture that reads only the
- * price + Market Tide (which refresh every 5 min) and skips the expensive
- * Greeks/positions navigation (which only refresh every 10 min). Market Tide
- * is persisted inside the scrape; the caller persists the spot price.
+ * One row of the `periscope/exposures` response `data`/`prev*` arrays.
+ * Greeks arrive as numbers (the old endpoint sent strings). `delta` is new
+ * with this endpoint generation and not yet persisted (the DB `panel`
+ * CHECK allows gamma/charm/vanna only).
  */
-export interface LightScrapeResult {
-  /** SPX spot price read from the page header, or null when unavailable. */
-  spot: number | null;
-  /** Trading date scraped (YYYY-MM-DD). */
-  date: string;
-  /** ET HH:MM end of the latest captured Market Tide slot, or null. Drives 5-min dedup. */
-  tideSlotEnd: string | null;
-  /** ISO instant of that tide slot (used as the spot price captured_at), or null. */
-  tideCapturedAt: string | null;
-  /** Number of Market Tide rows inserted by this tick. */
-  tideInserted: number;
-}
-
-/**
- * Shape of a single row in the UW `market_maker_exposures` API response.
- * The `data` field is an object keyed by index (0, 1, 2, ...) containing
- * these rows.
- */
-export interface ApiExposureRow {
-  count: number;
+export interface ApiPeriscopeExposureRow {
+  ticker_id: number;
+  /** UTC ISO minute instant of the snapshot, e.g. "2026-07-02T20:00:00Z". */
   timestamp: string;
-  gamma: string;
   strike: number;
-  vanna: string;
-  charm: string;
+  /** Participant bucket — "market_maker" on dashboard/4. */
+  participant: string;
+  gamma: number;
+  charm: number;
+  vanna: number;
+  delta: number;
 }
 
 /**
- * Shape of the `market_maker_exposures` API response body.
+ * Shape of the `periscope/exposures?ticker=SPX&timestamp=<ms>&...` response.
+ * `prev`/`prev2`/`prev3` mirror `data` at the `prev_minutes` offsets the
+ * dashboard requests (10,20) — the scraper ignores them.
  */
-export interface ApiExposureResponse {
-  data: Record<string, ApiExposureRow>;
-  timestamp: string; // e.g. "2026-06-18T20:00:00Z"
-  date: string;      // e.g. "2026-06-18"
-  index_values: {
-    close: number;
-    high: number;
-    low: number;
-    open: number;
-  };
-  prev?: ApiExposureRow[];
-  prev2?: ApiExposureRow[];
-  prev3?: ApiExposureRow[];
+export interface ApiPeriscopeExposuresResponse {
+  data: ApiPeriscopeExposureRow[];
+  prev?: ApiPeriscopeExposureRow[] | null;
+  prev2?: ApiPeriscopeExposureRow[] | null;
+  prev3?: ApiPeriscopeExposureRow[] | null;
 }
 
 /**
- * Shape of a single row in the UW `market_maker_contracts` API response.
- * Each strike appears twice — once for "call" and once for "put".
+ * One row of the `periscope/positions` response `data` array. The
+ * market-maker net position per (strike, option_type); the other
+ * participant columns are null on dashboard/4.
  */
-export interface ApiContractsRow {
-  count: number;
-  timestamp: string;
-  type: 'call' | 'put';
+export interface ApiPeriscopePositionRow {
+  ticker_id: number;
   strike: number;
-  qty: number;
+  option_type: 'call' | 'put';
+  /** UTC ISO minute instant of the snapshot. */
+  timestamp: string;
+  market_maker: number | null;
+  firm_long: number | null;
+  firm_short: number | null;
+  broker_dealer_long: number | null;
+  broker_dealer_short: number | null;
+  customer_long: number | null;
+  customer_short: number | null;
+  pro_long: number | null;
+  pro_short: number | null;
+}
+
+/** Shape of the `periscope/positions?ticker=SPX&timestamp=<ms>&...` response. */
+export interface ApiPeriscopePositionsResponse {
+  data: ApiPeriscopePositionRow[];
+  prev?: ApiPeriscopePositionRow[] | null;
+  prev2?: ApiPeriscopePositionRow[] | null;
+  prev3?: ApiPeriscopePositionRow[] | null;
 }
 
 /**
- * Shape of the `market_maker_contracts` API response body.
+ * Shape of the `periscope/timestamps?date=YYYY-MM-DD` response — every
+ * minute instant UW has a snapshot for on that date (UTC ISO strings,
+ * covering the full session including pre/post market, ~04:00 ET to
+ * ~24:00 ET). The live tick picks the latest instant ≤ now; backfill
+ * iterates the list at BACKFILL_STEP_MIN granularity.
  */
-export interface ApiContractsResponse {
-  data: ApiContractsRow[];
-  timestamp: string;
-  date: string;
-  index_values: {
-    close: number;
-    high: number;
-    low: number;
-    open: number;
-  };
+export interface ApiPeriscopeTimestampsResponse {
+  data: string[];
 }
 
 /**
@@ -174,10 +177,22 @@ export interface ApiNetFlowResponse {
  * All intercepted dashboard/4 JSON responses we care about, grouped by
  * endpoint. One listener fills every bucket so each scrape path attaches
  * interception identically instead of duplicating the response handler.
+ * The exposures/positions/timestamps buckets are also fed by the direct
+ * `page.request` fetch helpers in api-helpers.ts.
  */
 export interface ApiCaptures {
-  mme: Array<{ url: string; body: ApiExposureResponse }>;
-  mmc: Array<{ url: string; body: ApiContractsResponse }>;
+  /**
+   * Request headers the PAGE sent on its own periscope/* XHRs (filtered to
+   * auth-relevant ones — authorization, origin, referer, x-*). The phx API
+   * rejects bare cookie-auth requests to the periscope endpoints with 403,
+   * so the direct fetch helpers replay these headers to stay
+   * indistinguishable from the dashboard's own traffic.
+   */
+  periscopeHeaders: Record<string, string> | null;
+  exposures: Array<{ url: string; body: ApiPeriscopeExposuresResponse }>;
+  positions: Array<{ url: string; body: ApiPeriscopePositionsResponse }>;
+  /** Available snapshot minutes per date — fires on page load for the viewed date. */
+  timestamps: Array<{ url: string; body: ApiPeriscopeTimestampsResponse }>;
   straddle: Array<{ url: string; body: ApiStraddleResponse }>;
   tide: Array<{ url: string; body: ApiNetFlowResponse }>;
   /** Daily OHLC for SPX — fires once on page load. Fallback cone apex (`o`) when ticks are missing. */

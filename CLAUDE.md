@@ -2,9 +2,9 @@
 
 ## What This Project Does
 
-Production Railway-deployed scraper for [Unusual Whales Periscope](https://unusualwhales.com/dashboard/4) — a dashboard showing SPX options Greeks (Gamma, Charm, Vanna) by strike price. The scraper polls every minute during RTH, captures the three Greek panels, parses them, and bulk-inserts snapshots into Neon Postgres. A webhook fires on each new insert to trigger an auto-playbook Vercel app.
+Production Railway-deployed scraper for [Unusual Whales Periscope](https://unusualwhales.com/dashboard/4) — a dashboard showing SPX options Greeks (Gamma, Charm, Vanna) by strike price. The scraper polls every minute during RTH, fetches the latest published per-minute snapshot directly from UW's periscope API (Greeks + positions, for the session expiry and the next trading day), and bulk-inserts it into Neon Postgres. A webhook fires once per 10-min window to trigger an auto-playbook Vercel app.
 
-**Domain**: 0DTE SPX options Greeks — capturing Market Maker positioning (Gamma, Charm, Vanna) in 10-min slots, Mon–Fri 09:20–16:00 ET.
+**Domain**: 0DTE SPX options Greeks — capturing Market Maker positioning (Gamma, Charm, Vanna) in 1-min snapshots (2026-07 UW redesign; was 10-min slots), Mon–Fri 09:30–16:00 ET.
 
 ---
 
@@ -17,7 +17,7 @@ scraper/
 │   ├── config.ts         # Env var validation + MS_PER_TICK constant
 │   ├── types.ts          # Panel type + SnapshotRow interface
 │   ├── dates.ts          # Timezone utilities (ET↔UTC, RTH/active-window gates)
-│   ├── parser.ts         # Pure HTML → SnapshotRow[] (node-html-parser, no DOM)
+│   ├── parser.ts         # LEGACY: HTML → SnapshotRow[] for the pre-2026-07 table view
 │   ├── webhook.ts        # Auto-playbook webhook poster (non-blocking, 3-attempt retry)
 │   └── logger.ts         # Shared Pino logger for the scrape/ engine
 ├── scrape/               # Playwright scrape engine (split from the old ~2000-line scrape.ts)
@@ -25,13 +25,13 @@ scraper/
 │   ├── browser.ts        # Stealth init + withBrowser lifecycle
 │   ├── api-types.ts      # API response interfaces + ApiCaptures + ScrapeResult
 │   ├── api-transforms.ts # Pure API payload → SnapshotRow[]/MarketTideRow[] transforms
-│   ├── api-helpers.ts    # Shared helpers: pickBestMme/Mmc, storeMarketTide, storeCone
+│   ├── api-helpers.ts    # Shared helpers: fetchPeriscopeTimestamps/Slot (direct API), storeMarketTide, storeCone
 │   ├── captures.ts       # attachApiCaptures response router
 │   ├── trading-calendar.ts # Holidays + trading-day arithmetic
-│   ├── timeframe.ts      # Timeframe HH:MM math + widget walkers
-│   ├── navigation.ts     # Expiry/DTE filters + date-picker walkers
+│   ├── timeframe.ts      # HH:MM math (+ LEGACY walkers for the removed Timeframe widget)
+│   ├── navigation.ts     # LEGACY: Expiry/DTE dialog + date-picker walkers (unused since 2026-07)
 │   ├── chart.ts          # Chart-ready wait, zoom-out, spot/strike readers
-│   ├── panels.ts         # scrapeAllPanels (live single-slot tick)
+│   ├── panels.ts         # scrapeAllPanels (live per-minute tick)
 │   └── orchestrate.ts    # Per-day scraper + backfill/range/walk-back/discover
 ├── tools/                # Dev/probe utilities
 │   ├── probe.ts          # One-shot scrapeAllPanels runner
@@ -70,30 +70,30 @@ db/                       # Neon Postgres persistence layer (repo-root sibling o
 
 ### Timestamps & Timezone
 - **All wall-clock representation is Eastern Time (ET / America/New_York)** — matching exactly what the UW Periscope dashboard displays. The `timeframe` label, the slot-END gates, dedup, and the headless browser's `timezoneId` all speak ET. (Converted from CT on 2026-06-20 so DB labels match the dashboard; ET is always +1h from the SPX pit's CT, so the same real-world instants are preserved.)
-- `capturedAt` always represents slot **END** time (e.g., the 09:20–09:30 slot → `capturedAt = 09:30 ET`). It is an absolute UTC instant and is unaffected by the CT→ET choice — only the wall-clock representation moved.
-- **Never** use wall-clock time as `capturedAt`; use `computeCapturedAt(date, slotEndHhmm)` in `core/dates.ts` (slotEndHhmm is ET).
+- `capturedAt` always represents slot **END** time. Since 2026-07 a "slot" is one minute: the 10:06–10:07 snapshot → `capturedAt = 10:07 ET` (pre-redesign 10-min rows, e.g. 09:20–09:30 → 09:30, remain valid). It is an absolute UTC instant and is unaffected by the CT→ET choice — only the wall-clock representation moved.
+- **Never** use wall-clock time as `capturedAt`. The periscope API supplies the snapshot instant directly (`periscope/timestamps` UTC ISO entries — use them as-is); when deriving an instant from an ET wall-clock label, use `computeCapturedAt(date, slotEndHhmm)` in `core/dates.ts` (slotEndHhmm is ET).
 - All timestamps stored as UTC ISO-8601 TIMESTAMPTZ in Postgres.
 - **Do NOT assume container TZ** — `computeCapturedAt` computes the ET→UTC offset explicitly via `Intl.DateTimeFormat`. This was a regression (corrupted 5/4–5/7 data). Do not revert to `new Date(...).toISOString()` + env TZ.
 
 ### Anti-Bot Timing
 - `waitForTimeout` calls with comments like `// anti-bot`, `// stealth`, or `// empirically tuned` are **intentional pacing delays** — do NOT replace them with locator-based waits
-- Day-chevron navigation: safe for <5 days; >10 consecutive clicks triggers UW anti-bot → use calendar widget
-- Settle waits (800ms Radix animation, 1.5s data refetch, 5s edge cases) were tuned empirically — do not reduce without testing
+- The direct periscope API fetches are paced (~200-300ms between request pairs) to stay indistinguishable from the dashboard's own traffic — keep the pacing when adding fetch loops
+- (Legacy, for the widget walkers kept as reference: day-chevron navigation was safe for <5 days; >10 consecutive clicks tripped UW anti-bot → calendar widget. Radix settle waits were 800ms/1.5s/5s.)
 
 ### Greeks & Panels
-- Greeks are captured in order: **Gamma → Charm → Vanna**
-- Gamma is the **anchor**: Charm and Vanna must match Gamma's timeframe or the scraper realigns
-- If UW publishes a new slot mid-capture (timeframe drift), the scraper detects it and walks back to the gamma timeframe
+- The periscope/exposures response carries **Gamma, Charm, Vanna (and delta) for every strike in ONE payload per minute** — no per-panel capture order or timeframe-drift realignment exists anymore (both were artifacts of the pre-2026-07 three-panel scrape)
+- Gamma is still the **anchor for persistence**: a strike's Charm/Vanna rows are kept only when that strike's |gamma| clears the threshold (see `db/snapshots.ts` `filterInsertable` and `exposuresToRows`)
+- `delta` arrives from the new endpoint but is NOT persisted (DB `panel` CHECK allows gamma/charm/vanna)
 
 ### Scraping Path Consistency
 
 All scraping paths — the live tick (`panels.ts`) and every backfill path (`orchestrate.ts`: single-date, range, walk-back) — **must behave identically** for any shared concern. This is enforced structurally:
 
 - **API capture**: both paths call `attachApiCaptures(page)` from `captures.ts` — never inline a response listener again.
-- **Response selection** (best MME / MMC): both call `pickBestMme` / `pickBestMmc` from `api-helpers.ts`.
+- **Snapshot fetching**: both call `fetchPeriscopeTimestamps` / `fetchPeriscopeSlot` from `api-helpers.ts` (direct authenticated GETs against `periscope/timestamps|exposures|positions`).
 - **Market Tide + Cone storage**: both call `storeMarketTide` / `storeCone` from `api-helpers.ts`.
 
-**When you change any of those four concerns, change it in `api-helpers.ts` or `captures.ts` — not in `panels.ts` or `orchestrate.ts`.** The individual files only hold path-specific logic (navigation, expiry switching, slot walking, RTH guards).
+**When you change any of those concerns, change it in `api-helpers.ts` or `captures.ts` — not in `panels.ts` or `orchestrate.ts`.** The individual files only hold path-specific logic (latest-minute selection, slot iteration, RTH guards).
 
 ---
 
@@ -101,10 +101,11 @@ All scraping paths — the live tick (`panels.ts`) and every backfill path (`orc
 - `SnapshotRow` in `scraper/core/types.ts` must stay in sync with `insertSnapshots` in `db/snapshots.ts`
 - Unique constraint: `(captured_at, expiry, panel, strike)` → inserts are idempotent (`ON CONFLICT DO NOTHING`)
 
-### Schedule-Aware Dedup
-- `lastCapturedWindowEnd` tracks the last captured slot's end time (e.g., `"09:30"`, ET)
-- If `expectedWindowEnd(now) === lastCapturedWindowEnd`, skip Playwright entirely (no new data yet)
+### Schedule-Aware Dedup & Webhook Cadence
+- `lastFullWindowEnd` tracks the last captured snapshot's end minute (e.g., `"10:07"`, ET)
+- If `expectedWindowEnd(now, 1) === lastFullWindowEnd`, skip Playwright entirely (current minute already captured)
 - This resets to `null` on overnight/weekend transitions
+- The auto-playbook webhook fires once per **10-min window** (first captured snapshot landing in a new window), NOT once per minute — the Vercel app runs Claude per invocation, so per-minute firing would 10× that cost
 
 ---
 
@@ -138,6 +139,8 @@ All scraping paths — the live tick (`panels.ts`) and every backfill path (`orc
 | `FORCE_TICK=true` | One-shot tick bypassing market-hours gate (test auth/selectors) |
 | `BACKFILL_DATE=YYYY-MM-DD` | Backfill a single date |
 | `BACKFILL_DATE_START` / `BACKFILL_DATE_END` | Multi-day backfill range |
+| `BACKFILL_START` / `BACKFILL_END` | ET HH:MM bounds on backfilled `captured_at` instants (defaults 09:31 / 16:00) |
+| `BACKFILL_STEP_MIN` | Backfill minute step (default 10 = historical cadence/volume; 1 = full minute resolution) |
 | `HEADLESS=false` | Visible browser (pair with `FORCE_TICK=true`) |
 | `SAVE_SCREENSHOT=true` | Save `page.png` + `page.html` to `docs/tmp/` after capture |
 
@@ -170,15 +173,17 @@ Always run this after editing TypeScript files. The project has no automated tes
 
 ## Known Gotchas
 
-1. **Headless Single-date dropdown**: UW returns an "All" placeholder in headless mode instead of the date list. Workaround: fall back to `walkDateToTarget` + `DTE=[0,0]`. The headed probe (`periscope-probe.mjs`) gets the full list — likely UW's headless-detection guard.
+1. **UW replaced the periscope endpoints in 2026-07**: `market_maker_exposures` / `market_maker_contracts` are GONE. The current API is `periscope/timestamps?date=` (lists every published minute), and `periscope/exposures` / `periscope/positions` keyed by `ticker=SPX&expiries=<YYYY-MM-DD>&timestamp=<epoch-ms>&prev_minutes=10,20` (note: `expiries`, plural). Response shapes also changed: `data` is an array, Greeks are numbers, exposures carry `delta`, positions use `option_type`/`market_maker`, and there is no top-level `date`/`index_values` (spot comes from the page header or the last 1-min tick). The old "Timeframe:" widget no longer exists on the page.
 
 2. **`US_MARKET_HOLIDAYS` is hardcoded** in `scrape/trading-calendar.ts` (2025–2026). Update annually in December. Used to skip backfill days (perf optimization, not a correctness gate).
 
-3. **Radix popovers**: Multiple poppers can be mounted simultaneously. Locators filter by content to avoid clicking wrong ones. Close animation from one click can block the next; scraper settles + uses `force: true` + retries.
+3. **Date-keyed tick endpoints ignore their `date` param** (net-flow-ticks, one_minute_ticks) — they always return the LATEST session. Historical intraday spot comes only from `index_candles/SPX/5m` (~30 trading days back).
 
 4. **Webhook is non-blocking**: Webhook failures log to Sentry but never block the next tick. If `VERCEL_BASE_URL` is unset, webhook is silently skipped.
 
 5. **3 consecutive empty scrapes**: Triggers a Sentry warning — likely means UW session logout or a rendering outage, not genuinely empty data.
+
+6. **(Legacy widget lore, relevant only to `navigation.ts`/`timeframe.ts` reference code)**: headless mode used to get an "All"-placeholder expiry dropdown; Radix popovers could stack and block clicks; day-chevron walking past ~10 clicks tripped anti-bot.
 
 ---
 

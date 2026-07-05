@@ -24,8 +24,9 @@ import {
 } from './api-transforms.js';
 import type {
   ApiCaptures,
-  ApiExposureResponse,
-  ApiContractsResponse,
+  ApiPeriscopeExposuresResponse,
+  ApiPeriscopePositionsResponse,
+  ApiPeriscopeTimestampsResponse,
   ApiNetFlowResponse,
   ApiStraddleResponse,
   ApiIntradayCandle,
@@ -44,38 +45,154 @@ import type {
  */
 const MARKET_TIDE_LOOKBACK_DAYS = 30;
 
+/** Ticker the Periscope dashboard/4 serves — matches the other hardcoded
+ *  SPX endpoints (index_candles/SPX, bsoc/SPX). */
+const PERISCOPE_TICKER = 'SPX';
+
+/** Fallback API origin when no XHR was captured to derive it from. */
+const PHX_API_FALLBACK_ORIGIN = 'https://phx.unusualwhales.com';
+
 /**
- * Three-tier best-response selection for market_maker_exposures.
- * Prefers the most-recent response whose URL matches `expiry=<targetExpiry>`,
- * then any non-"all" expiry response, then the last response as a last resort.
- * Returns null when the array is empty.
+ * Resolve the phx API origin from any captured dashboard XHR so the direct
+ * fetch helpers below keep working if UW moves the API host. Falls back to
+ * the known production origin.
  */
-export function pickBestMme(
-  responses: Array<{ url: string; body: ApiExposureResponse }>,
-  targetExpiry: string,
-): ApiExposureResponse | null {
-  const rev = [...responses].reverse();
-  return (
-    rev.find(r => r.url.includes(`expiry=${targetExpiry}`))?.body
-    ?? rev.find(r => !r.url.includes('expiry=all'))?.body
-    ?? (responses.length > 0 ? responses[responses.length - 1]!.body : null)
-  );
+export function phxApiOrigin(caps: ApiCaptures): string {
+  const anyUrl =
+    caps.timestamps[caps.timestamps.length - 1]?.url
+    ?? caps.tide[caps.tide.length - 1]?.url
+    ?? caps.candles[caps.candles.length - 1]?.url
+    ?? caps.straddle[caps.straddle.length - 1]?.url;
+  if (anyUrl != null) {
+    try {
+      return new URL(anyUrl).origin;
+    } catch {
+      // fall through to the hardcoded origin
+    }
+  }
+  return PHX_API_FALLBACK_ORIGIN;
 }
 
 /**
- * Three-tier best-response selection for market_maker_contracts.
- * Same tier order as pickBestMme: exact expiry match → non-"all" → last.
+ * The list of snapshot minutes UW has published for `date` (UTC ISO
+ * strings, ascending, covering ~04:00-24:00 ET). Prefers the response the
+ * page fired on load (zero extra requests when viewing that date), else
+ * fetches `periscope/timestamps?date=` directly through the authenticated
+ * page context. Returns [] on any failure (callers treat that as "no data
+ * for this date" — e.g. past UW's history floor).
  */
-export function pickBestMmc(
-  responses: Array<{ url: string; body: ApiContractsResponse }>,
-  targetExpiry: string,
-): ApiContractsResponse | null {
-  const rev = [...responses].reverse();
-  return (
-    rev.find(r => r.url.includes(`expiry=${targetExpiry}`))?.body
-    ?? rev.find(r => !r.url.includes('expiry=all'))?.body
-    ?? (responses.length > 0 ? responses[responses.length - 1]!.body : null)
-  );
+export async function fetchPeriscopeTimestamps(
+  page: Page,
+  caps: ApiCaptures,
+  date: string,
+): Promise<string[]> {
+  const captured = [...caps.timestamps]
+    .reverse()
+    .find((r) => r.url.includes(`date=${date}`));
+  if (captured) return captured.body.data ?? [];
+
+  const url = `${phxApiOrigin(caps)}/api/periscope/timestamps?date=${date}`;
+  try {
+    const resp = await page.request.get(url, { headers: caps.periscopeHeaders ?? {} });
+    if (!resp.ok()) {
+      logger.warn(
+        { date, status: resp.status() },
+        'periscope/timestamps fetch non-OK — treating date as unavailable',
+      );
+      return [];
+    }
+    const body = (await resp.json()) as ApiPeriscopeTimestampsResponse;
+    caps.timestamps.push({ url, body });
+    return body.data ?? [];
+  } catch (err) {
+    logger.warn(
+      { date, err: err instanceof Error ? err.message : String(err) },
+      'periscope/timestamps fetch failed',
+    );
+    return [];
+  }
+}
+
+/**
+ * Fetch one (minute, expiry) Greek + positions snapshot pair directly
+ * through the authenticated page context — the SAME URLs the dashboard
+ * fires when its time picker / Expiry filter change (including the
+ * `prev_minutes` param, so our requests are indistinguishable from the
+ * page's own). This is the single capture primitive shared by the live
+ * tick (panels.ts) and every backfill path (orchestrate.ts).
+ *
+ * `timestampMs` is the snapshot minute as epoch ms; `expiry` becomes the
+ * `expiries=<YYYY-MM-DD>` filter. Either half is null on failure —
+ * non-blocking, callers skip what's missing.
+ */
+export async function fetchPeriscopeSlot(
+  page: Page,
+  caps: ApiCaptures,
+  opts: { timestampMs: number; expiry: string },
+): Promise<{
+  exposures: ApiPeriscopeExposuresResponse | null;
+  positions: ApiPeriscopePositionsResponse | null;
+}> {
+  const origin = phxApiOrigin(caps);
+  const query = `ticker=${PERISCOPE_TICKER}&expiries=${opts.expiry}&timestamp=${opts.timestampMs}&prev_minutes=10,20`;
+
+  async function getJson<T>(endpoint: 'exposures' | 'positions'): Promise<T | null> {
+    const url = `${origin}/api/periscope/${endpoint}?${query}`;
+    try {
+      const resp = await page.request.get(url, { headers: caps.periscopeHeaders ?? {} });
+      if (!resp.ok()) {
+        logger.warn(
+          { url, status: resp.status() },
+          `periscope/${endpoint} fetch non-OK`,
+        );
+        return null;
+      }
+      return (await resp.json()) as T;
+    } catch (err) {
+      logger.warn(
+        { url, err: err instanceof Error ? err.message : String(err) },
+        `periscope/${endpoint} fetch failed`,
+      );
+      return null;
+    }
+  }
+
+  const exposures = await getJson<ApiPeriscopeExposuresResponse>('exposures');
+  const positions = await getJson<ApiPeriscopePositionsResponse>('positions');
+  if (exposures) caps.exposures.push({ url: `${origin}/api/periscope/exposures?${query}`, body: exposures });
+  if (positions) caps.positions.push({ url: `${origin}/api/periscope/positions?${query}`, body: positions });
+  return { exposures, positions };
+}
+
+/**
+ * Latest published snapshot minute for `date` that is not in the future:
+ * epoch ms of the max timestamp ≤ now, or null when the date has none.
+ * The live tick captures THIS minute each tick.
+ */
+export function latestPublishedMs(stamps: readonly string[], nowMs: number): number | null {
+  let best: number | null = null;
+  for (const s of stamps) {
+    const t = Date.parse(s);
+    if (!Number.isFinite(t) || t > nowMs) continue;
+    if (best === null || t > best) best = t;
+  }
+  return best;
+}
+
+/**
+ * SPX spot fallback from the captured one_minute_ticks response (fires on
+ * page load for the latest session): the close of the last 1-min bar.
+ * Used when the page-header spot is unreadable. Returns null when no
+ * usable tick for `date` was captured.
+ */
+export function latestTickClose(caps: ApiCaptures, date: string): number | null {
+  const tickResp =
+    [...caps.ticks].reverse().find((r) => r.url.includes(`date=${date}`))
+    ?? caps.ticks[caps.ticks.length - 1];
+  const data = tickResp?.body.data;
+  if (data == null || data.length === 0) return null;
+  const close = Number.parseFloat(data[data.length - 1]!.close);
+  return Number.isFinite(close) && close > 0 ? close : null;
 }
 
 /**
