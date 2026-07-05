@@ -21,11 +21,12 @@
  *   TEST_CASE_ID=2026-06-10-midday npm run test-cases   # one case
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadDay } from './data-loader.js';
+import { recordModelRun } from './model-store.js';
 import { SignalGenerator } from './signal-generator.js';
 import { gexTakeProfitPoints } from './risk-manager.js';
 import type { AlgoConfig, Signal, Snapshot, TradeRecord } from './types.js';
@@ -520,6 +521,26 @@ function escapeXml(s: string): string {
   return s.replace(/[<>&]/g, (c) => (c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'));
 }
 
+// ── Config resolution ──
+
+/**
+ * Resolve the config to replay under. When `ALGO_CONFIG_PATH` points at a JSON
+ * file, it is shallow-merged over `DEFAULT_CONFIG` (with `risk` merged too), so
+ * both full configs and partial diffs work. Otherwise `DEFAULT_CONFIG` is used.
+ */
+function loadRunConfig(): { config: AlgoConfig; source: string } {
+  const path = process.env.ALGO_CONFIG_PATH;
+  if (!path) return { config: DEFAULT_CONFIG, source: 'DEFAULT_CONFIG' };
+
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<AlgoConfig>;
+  const config: AlgoConfig = {
+    ...DEFAULT_CONFIG,
+    ...raw,
+    risk: { ...DEFAULT_CONFIG.risk, ...(raw.risk ?? {}) },
+  };
+  return { config, source: path };
+}
+
 // ── CLI ──
 
 const isMain =
@@ -537,10 +558,42 @@ if (isMain) {
   }
 
   (async () => {
+    const { config, source } = loadRunConfig();
+    console.log(`Config source: ${source}`);
+
+    let netPnl = 0;
+    let tradeCount = 0;
     for (const testCase of cases) {
-      const result = await runTestCase(testCase);
-      printExplanation(result, DEFAULT_CONFIG);
+      const result = await runTestCase(testCase, config);
+      printExplanation(result, config);
+      for (const t of result.trades) {
+        netPnl += t.pnl;
+        tradeCount += 1;
+      }
     }
+
+    const { becameBest, store, path } = recordModelRun({
+      savedAt: new Date().toISOString(),
+      cases: cases.map((c) => c.id),
+      netPnl,
+      tradeCount,
+      config,
+    });
+
+    console.log(`\n${'='.repeat(72)}`);
+    console.log(
+      `TEST-TRADE RESULT  ${cases.length} case(s), ${tradeCount} trades  ` +
+        `net pnl=${fmtUsd(netPnl)}`,
+    );
+    console.log(
+      becameBest
+        ? '  → saved as lastModel AND bestModel (new best on the test trade)'
+        : '  → saved as lastModel' +
+            (store.bestModel
+              ? `  (best so far: ${fmtUsd(store.bestModel.netPnl)} on ${store.bestModel.cases.join(', ')})`
+              : ''),
+    );
+    console.log(`  store: ${path}`);
   })().catch((e) => {
     console.error('Test-case run failed:', e);
     process.exit(1);

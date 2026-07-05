@@ -1,0 +1,98 @@
+{
+  "lastModel": {
+    "savedAt": "2026-07-05T08:44:31.625Z",
+    "cases": [
+      "2026-06-10-midday",
+      "2026-06-17-1400"
+    ],
+    "netPnl": 0,
+    "tradeCount": 0,
+    "config": {
+      "wGex": 0.38662722774913183,
+      "wDGamma": 0.3880563815837511,
+      "wPositions": 0.20591357158792942,
+      "wDPositions": 0.019402819079187554,
+      "pGamma": 1.3787431793054568,
+      "positiveGammaBias": 1.0165889960248025,
+      "pDGamma": 1.0089466326404364,
+      "pPositions": 0.6080701359361411,
+      "pDPositions": 0.3854233193350956,
+      "pDistance": 1.2966971932025628,
+      "distanceWeightSpan": 1.6425874086096885,
+      "positionsGammaGate": 0.3380723587237298,
+      "zClamp": 3.865675250277855,
+      "entryThreshold": 1.5520688689127562,
+      "strongEntryThreshold": 1.5,
+      "exitFadeThreshold": 1.1459779207594691,
+      "reversalThreshold": 0.5,
+      "gexAutoExit": true,
+      "strikeWindow": 120,
+      "zScoreLookback": 31,
+      "risk": {
+        "maxPositionSize": 2,
+        "accountEquity": 50000,
+        "maxRiskPerTrade": 0.01,
+        "stopLossPoints": 10,
+        "riskRewardRatio": 3,
+        "minGexTakeProfitPoints": 15,
+        "trailingStopEnabled": false,
+        "trailingStopActivation": 5,
+        "trailingStopDistance": 7,
+        "maxDailyLoss": 0.02,
+        "maxTradesPerDay": 6,
+        "slippagePerSide": 0.5,
+        "pointValue": 50,
+        "noNewTradesAfterET": "14:00",
+        "forcedExitByET": "15:50"
+      }
+    }
+  },
+  "bestModel": {
+    "savedAt": "2026-07-05T08:37:29.928Z",
+    "cases": [
+      "2026-06-10-midday",
+      "2026-06-17-1400"
+    ],
+    "netPnl": 0,
+    "tradeCount": 0,
+    "config": {
+      "wGex": 0.38662722774913183,
+      "wDGamma": 0.3880563815837511,
+      "wPositions": 0.20591357158792942,
+      "wDPositions": 0.019402819079187554,
+      "pGamma": 1.3787431793054568,
+      "positiveGammaBias": 1.0165889960248025,
+      "pDGamma": 1.0089466326404364,
+      "pPositions": 0.6080701359361411,
+      "pDPositions": 0.3854233193350956,
+      "pDistance": 1.2966971932025628,
+      "distanceWeightSpan": 1.6425874086096885,
+      "positionsGammaGate": 0.3380723587237298,
+      "zClamp": 3.865675250277855,
+      "entryThreshold": 1.5520688689127562,
+      "strongEntryThreshold": 1.5,
+      "exitFadeThreshold": 1.1459779207594691,
+      "reversalThreshold": 0.5,
+      "gexAutoExit": true,
+      "strikeWindow": 120,
+      "zScoreLookback": 31,
+      "risk": {
+        "maxPositionSize": 2,
+        "accountEquity": 50000,
+        "maxRiskPerTrade": 0.01,
+        "stopLossPoints": 10,
+        "riskRewardRatio": 3,
+        "minGexTakeProfitPoints": 15,
+        "trailingStopEnabled": false,
+        "trailingStopActivation": 5,
+        "trailingStopDistance": 7,
+        "maxDailyLoss": 0.02,
+        "maxTradesPerDay": 6,
+        "slippagePerSide": 0.5,
+        "pointValue": 50,
+        "noNewTradesAfterET": "14:00",
+        "forcedExitByET": "15:50"
+      }
+    }
+  }
+}
