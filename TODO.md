@@ -64,6 +64,22 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   the flag, all defaulting to true). Document the flag and its sub-options in
   the algorithm knobs/parameters doc.
 
+- [ ] **9. Rework cone-based entry thresholds: normal when outside (gamma-aligned), strong when inside; remove old cone logic.**
+  Change how the cone state affects the entry threshold:
+  - **Outside the cone**: use the *normal* entry threshold, but only when gamma
+    points in the same direction as the breakout (above cone + gamma positive
+    → long eligible; below cone + gamma negative → short eligible). A breakout
+    in the opposite gamma direction does not qualify.
+  - **Inside the cone**: use the *strong* entry threshold (higher bar to enter).
+  Remove the existing cone-based entry/exit logic that this replaces — there
+  should be a single, clean cone-threshold rule after the change.
+
+- [x] **10. Remove dGammaZ sign as an entry gate condition.**
+  Stop using the sign of `dGammaZ` as a gate or directional filter anywhere in
+  the entry logic. Its value should still feed into the composite z-score as
+  before — only remove the places where the *sign* of `dGammaZ` is checked to
+  allow or block an entry (i.e. outside the z-score calculation itself).
+
 ## Training / Backtesting
 
 - [ ] **4. Feed SPX price data from DB as the signal input for backtest and tune.**

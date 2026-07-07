@@ -251,7 +251,6 @@ export class SignalGenerator {
 
     const isLong = this.state.position === 'long';
     const directionalScore = isLong ? score.composite : -score.composite;
-    const directionalDGamma = isLong ? score.dGammaZ : -score.dGammaZ;
 
     // Stop-loss check
     const stopCheck = checkStopLoss(this.state, snapshot.spot, config);
@@ -303,37 +302,37 @@ export class SignalGenerator {
     }
 
     // ── CONE-PASS ENTRIES ──
-    // Every cone-line pass is a trigger, but only when the Greeks point the
-    // same way (conviction floor = entryThreshold). A pass against the Greeks
-    // (e.g. pass up while bearish) is a mismatch and is explicitly rejected.
+    // Every cone-line pass is a trigger, but only when the composite conviction
+    // clears entryThreshold in the same direction as the pass. (The sign of
+    // dGammaZ is no longer a gate — TODO #10 — it still feeds the composite.)
     if (cone.crossed === 'up') {
-      if (score.composite > config.entryThreshold && score.dGammaZ > 0) {
+      if (score.composite > config.entryThreshold) {
         const confidence = this.assessConfidence(score, true);
         return this.makeSignal('enter_long', score, cone, snapshot, confidence,
           `long entry: cone pass up + bullish Greeks (z-factor=${z})`);
       }
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `cone pass up ignored: Greeks not bullish enough (z-factor=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
+        `cone pass up ignored: z-factor below entry threshold (z-factor=${z})`);
     }
 
     if (cone.crossed === 'down') {
-      if (score.composite < -config.entryThreshold && score.dGammaZ < 0) {
+      if (score.composite < -config.entryThreshold) {
         const confidence = this.assessConfidence(score, true);
         return this.makeSignal('enter_short', score, cone, snapshot, confidence,
           `short entry: cone pass down + bearish Greeks (z-factor=${z})`);
       }
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `cone pass down ignored: Greeks not bearish enough (z-factor=${z}, dGammaZ=${score.dGammaZ.toFixed(2)})`);
+        `cone pass down ignored: z-factor above entry threshold (z-factor=${z})`);
     }
 
     // ── STRONG INSIDE-CONE ENTRIES (no pass) ──
     if (cone.state === 'inside') {
-      if (score.composite > config.strongEntryThreshold && score.dGammaZ > 0) {
+      if (score.composite > config.strongEntryThreshold) {
         const confidence = this.assessConfidence(score, false);
         return this.makeSignal('enter_long', score, cone, snapshot, confidence,
           `long entry: strong inside-cone signal (z-factor=${z})`);
       }
-      if (score.composite < -config.strongEntryThreshold && score.dGammaZ < 0) {
+      if (score.composite < -config.strongEntryThreshold) {
         const confidence = this.assessConfidence(score, false);
         return this.makeSignal('enter_short', score, cone, snapshot, confidence,
           `short entry: strong inside-cone signal (z-factor=${z})`);

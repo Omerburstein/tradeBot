@@ -183,7 +183,8 @@ each term is a clamped z-score in `[−3.5, +3.5]`, the composite lives roughly 
 The composite is a **conviction gate**, not a standalone trigger:
 - **Entry** requires a cone breakout in the same direction **and** the composite
   clearing `entryThreshold` (**1.5**), or a strong inside-cone reading clearing
-  `strongEntryThreshold` (**2.0**), with `dGammaZ` agreeing in sign.
+  `strongEntryThreshold` (**2.0**). The sign of `dGammaZ` is no longer a separate
+  gate (TODO #10) — it contributes to the composite via `wDGamma·dGammaZ` only.
 - **Exit** fires on signal fade (composite falls below `exitFadeThreshold`,
   **0.5**), a reversal past `reversalThreshold` (**1.0**) the other way, cone
   re-entry, or the stop / take-profit.
