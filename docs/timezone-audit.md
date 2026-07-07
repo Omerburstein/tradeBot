@@ -102,25 +102,23 @@ the exact instants:
 selectable `--tz` CLI option for parsing raw ES CSV input; the default is
 `America/New_York`. It is a tool parameter, not a hardcoded pipeline assumption.
 
-## 4b. Slot-start vs slot-end timing
+## 4b. Slot timing — Greeks are applied at the frame END
 
-UW publishes each frame's Greeks at the **START** of the frame. The frame END is
-only the label/timestamp UW stamps the window with — the `11:40 - 11:50` frame is
-timestamped 11:50 even though its data reflects the start (11:40). A saved
-2026-06-23 capture shows this label/timestamp lag: at 11:58 ET the page still
-showed `11:40 - 11:50` with API `timestamp` 11:50. (An earlier draft of this
-audit misread that lag as UW "publishing only after a slot closes" and labelled
-the slot-start reading a look-ahead — that was wrong: the data is a
-start-of-frame reading.)
+UW exposes a frame's Greeks only **after** the frame closes, and stamps it with
+the frame **END** time. A saved 2026-06-23 capture shows this: at 11:58 ET the
+page still displayed `11:40 - 11:50` (with API `timestamp` = 11:50, the end), and
+the forming `11:50 - 12:00` frame was not yet visible. So a slot's Greeks do not
+exist until its end.
 
-Because the data is a start-of-frame reading, the algo applies each slot's Greeks
-from the frame **START** — the causal, live-realistic timing (e.g. the
-`[13:10,13:20)` Greeks act from 13:10). This is the default via
-`LOOKAHEAD_GREEKS_FROM_SLOT_START` (data-loader.ts; on out of the box, TODO #9).
-When it re-stamps a slot to its start, only spx/es are re-priced at that instant;
-the Greeks/positions/cone ride along. Set the flag to `false` to instead key each
-slot to its END label (the raw UW timestamp). The env var keeps its historical
-(now-misleading) name.
+The algo therefore keys each slot to its END (`captured_at`) and applies it from
+there — the causal, no-look-ahead timing: the `[13:10,13:20)` Greeks act from
+13:20, the moment they're published. A price tick between Greek slots reuses the
+most-recently-published slot with the current spot (see `densifyDecisions`).
+
+> An earlier iteration added an opt-in `LOOKAHEAD_GREEKS_FROM_SLOT_START` toggle
+> (later briefly defaulted on) to apply Greeks from the frame START, on the theory
+> that UW published at the start. The 2026-06-23 capture disproved that, so the
+> toggle and its slot-shifting were removed — end-keying is the only behaviour.
 
 ## 5. Verification
 

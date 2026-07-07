@@ -21,68 +21,9 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   per slot and down-weight (most faithful) vs. score the two expiries separately
   and blend composites.
 
-- [ ] **2. Add separate entry/exit z-score thresholds and include both as tunable parameters.**
-  The algo's exit condition should require a z-score strictly below the entry
-  z-score threshold (not the same value). Add a distinct `exitZ` parameter
-  alongside the existing entry z-score, so the trade exits when signal z drops
-  below `exitZ` (which should be less than the entry threshold). Expose both
-  `entryZ` and `exitZ` as factors in the tuner so they are optimised together
-  during training.
-
-- [x] **3. Restrict entries to cone breakouts confirmed by gamma direction; exit on cone re-entry, TP, or SL.**
-  Only enter a trade when SPX has broken outside the expected-move cone AND the
-  net gamma exposure is pointing in the same direction as the breakout (positive
-  gamma for upside break, negative gamma for downside break). Exit the trade on
-  whichever comes first: (a) SPX re-enters the cone, (b) the take-profit target
-  is hit, or (c) the stop-loss is hit.
-
-- [ ] **6. Change positions power to 1/3 by default and expose it as a tunable parameter.**
-  Update the positions signal's exponent from its current default to `1/3` (cube
-  root compression), which gives a more linear response to large position values.
-  Also expose this exponent as a tunable parameter in the tuner so it can be
-  optimised during training alongside the other factors.
-
-- [ ] **7. Block new trade entries after 14:00 ET.**
-  The algo must not open a new position at or after 14:00 ET. Any slot at or
-  past that wall-clock time should be treated as entry-ineligible; existing open
-  trades may still be managed (exit, TP, SL) after 14:00, but no new entries
-  are allowed.
-
-- [x] **8. Add a cone-breakout mode flag with gamma-direction and asymmetric cone-line gating.**
-  Add a single boolean flag (e.g. `coneBreakoutMode`, default off) that changes
-  the entry and exit rules as follows when enabled:
-  - **Entry**: only enter when SPX breaks through the *relevant* cone line AND
-    gamma is pointing in the same direction. For a long, only the *upper* cone
-    line is relevant (SPX must break above it); for a short, only the *lower*
-    cone line matters (SPX must break below it). Breaking the wrong line does
-    not trigger an entry.
-  - **Exit**: exit the trade on whichever comes first — (a) SPX crosses back
-    inside the cone through the same relevant line, (b) the take-profit target
-    is hit, or (c) the stop-loss is hit.
-  All three exit conditions should be individually easy to enable/disable (e.g.
-  separate booleans `exitOnConeReEntry`, `exitOnTp`, `exitOnSl` nested under
-  the flag, all defaulting to true). Document the flag and its sub-options in
-  the algorithm knobs/parameters doc.
-
-- [x] **9. Rework cone-based entry thresholds: normal when outside (gamma-aligned), strong when inside; remove old cone logic.**
-  Change how the cone state affects the entry threshold:
-  - **Outside the cone**: use the *normal* entry threshold, but only when gamma
-    points in the same direction as the breakout (above cone + gamma positive
-    → long eligible; below cone + gamma negative → short eligible). A breakout
-    in the opposite gamma direction does not qualify.
-  - **Inside the cone**: use the *strong* entry threshold (higher bar to enter).
-  Remove the existing cone-based entry/exit logic that this replaces — there
-  should be a single, clean cone-threshold rule after the change.
-
-- [x] **10. Remove dGammaZ sign as an entry gate condition.**
-  Stop using the sign of `dGammaZ` as a gate or directional filter anywhere in
-  the entry logic. Its value should still feed into the composite z-score as
-  before — only remove the places where the *sign* of `dGammaZ` is checked to
-  allow or block an entry (i.e. outside the z-score calculation itself).
-
 ## Training / Backtesting
 
-- [ ] **4. Feed SPX price data from DB as the signal input for backtest and tune.**
+- [ ] **2. Feed SPX price data from DB as the signal input for backtest and tune.**
   In both the backtesting and tuning paths, replace any hardcoded or synthetic
   SPX price data with real SPX prices loaded from the DB. The SPX series is the
   data the algo uses to decide whether it wants to trade (entry/exit signal
@@ -93,11 +34,3 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 ## Data
 
 ## Scraper
-
-- [x] **5. Change the scraper to capture data every minute (page layout changed — review it first).**
-  Change the scraper so it takes the data every one minute instead of the
-  current 10-minute cadence. IMPORTANT: the Unusual Whales Periscope page has
-  changed — before making any changes, go over the current page thoroughly
-  (selectors, panel layout, timeframe widget, API responses) to make sure you
-  know exactly how it looks now, so the capture/parse logic is updated against
-  the real current structure rather than the old assumptions.

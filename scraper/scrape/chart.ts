@@ -17,6 +17,11 @@ import { logger } from '../core/logger.js';
  * 1000 points of spot — SPX strikes always sit within a few hundred points of
  * the underlying, while unrelated labels are far outside that band.
  */
+/** SPX strikes always sit within a few hundred points of the underlying;
+ *  numeric SVG labels further out belong to other panels, not the strike
+ *  axis. */
+const MAX_STRIKE_DISTANCE_FROM_SPOT = 1_000;
+
 export async function furthestVisibleStrikeDistance(
   page: Page,
   spot: number,
@@ -32,7 +37,7 @@ export async function furthestVisibleStrikeDistance(
   let max: number | null = null;
   for (const s of strikes) {
     const dist = Math.abs(s - spot);
-    if (dist > 1000) continue; // exclude numeric labels from other panels
+    if (dist > MAX_STRIKE_DISTANCE_FROM_SPOT) continue;
     if (max === null || dist > max) max = dist;
   }
   return max;

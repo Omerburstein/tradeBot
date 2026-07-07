@@ -109,6 +109,11 @@ if (webhookConfig.baseUrl == null || webhookConfig.secret == null) {
   );
 }
 
+/** Max time to wait for Sentry to drain queued events during shutdown. */
+const SENTRY_FLUSH_TIMEOUT_MS = 2_000;
+/** Grace period before force-exiting a one-shot run whose event loop won't drain. */
+const HARD_EXIT_FALLBACK_MS = 2_000;
+
 let intervalHandle: NodeJS.Timeout | null = null;
 let tickInFlight = false;
 
@@ -413,7 +418,7 @@ async function shutdown(signal: string): Promise<void> {
     intervalHandle = null;
   }
   try {
-    await Sentry.flush(2000);
+    await Sentry.flush(SENTRY_FLUSH_TIMEOUT_MS);
   } catch (err) {
     logger.error({ err }, 'sentry flush failed');
   }
@@ -438,13 +443,13 @@ process.on('SIGINT', () => {
  */
 async function gracefulExit(code: number): Promise<void> {
   try {
-    await Sentry.close(2000);
+    await Sentry.close(SENTRY_FLUSH_TIMEOUT_MS);
   } catch {
     // never block exit on telemetry teardown
   }
   process.exitCode = code;
   // Safety net: if some handle keeps the loop alive, force-exit shortly.
-  setTimeout(() => process.exit(code), 2_000).unref();
+  setTimeout(() => process.exit(code), HARD_EXIT_FALLBACK_MS).unref();
 }
 
 logger.info({ appEnv: APP_ENV, staging: IS_STAGING }, 'periscope-scraper starting');

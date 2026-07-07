@@ -32,7 +32,8 @@ scraper/
 │   ├── navigation.ts     # LEGACY: Expiry/DTE dialog + date-picker walkers (unused since 2026-07)
 │   ├── chart.ts          # Chart-ready wait, zoom-out, spot/strike readers
 │   ├── panels.ts         # scrapeAllPanels (live per-minute tick)
-│   └── orchestrate.ts    # Per-day scraper + backfill/range/walk-back/discover
+│   ├── orchestrate.ts    # Per-day scraper + backfill/range/walk-back entry points
+│   └── discovery.ts      # discoverEndpoints dev helper (dump all JSON XHRs)
 ├── tools/                # Dev/probe utilities
 │   ├── probe.ts          # One-shot scrapeAllPanels runner
 │   ├── discover.ts       # Dump all JSON XHRs for endpoint discovery

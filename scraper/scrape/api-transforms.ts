@@ -4,6 +4,7 @@
  * helpers they need. No browser, no DB, no I/O — just data shaping, so
  * these are the easiest pieces of the engine to reason about and test.
  */
+import { GAMMA_MIN_ABS } from '../core/types.js';
 import type { Panel, SnapshotRow, MarketTideRow, PositionRow } from '../core/types.js';
 import type {
   ApiPeriscopeExposuresResponse,
@@ -22,13 +23,6 @@ export interface SpotRow {
 }
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
-
-/**
- * Minimum gamma magnitude (|gamma|) for a strike to be persisted. Strikes
- * whose gamma is within ±this value are dropped entirely, along with their
- * charm/vanna rows — gamma is the anchor that gates the whole strike.
- */
-const GAMMA_MIN_ABS = 150;
 
 /** Greeks present in the API response, in capture order. `delta` also
  *  arrives from the new endpoint but is not persisted (DB `panel` CHECK). */

@@ -18,7 +18,13 @@
  *
  * Usage:
  *   npm run test-cases                 # run every case with DEFAULT_CONFIG
- *   TEST_CASE_ID=2026-06-10-midday npm run test-cases   # one case
+ *   npm run test-cases:best            # run under bestModel from tuned-models.json
+ *   npm run test-cases:latest          # run under lastModel  from tuned-models.json
+ *   ALGO_CONFIG_PATH=my.json npm run test-cases          # run under a config file
+ *   TEST_CASE_ID=2026-06-10-midday npm run test-cases    # one case (combines with any of the above)
+ *
+ * Config selection (highest priority first): --best/USE_BEST_MODEL,
+ * --latest/USE_LATEST_MODEL, ALGO_CONFIG_PATH, then DEFAULT_CONFIG.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -28,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { loadDay } from './data-loader.js';
 import { SignalGenerator } from './signal-generator.js';
 import { gexTakeProfitPoints } from './risk-manager.js';
+import { loadModelStore, type ModelRecord } from './model-store.js';
 import type { AlgoConfig, Signal, Snapshot, TradeRecord } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
 
@@ -83,6 +90,87 @@ export const TEST_CASES: TestCase[] = [
     description:
       '09:30–15:30 ET — inspect composite z-score, gamma exposure and ' +
       'expected-move cone between 09:30 and 15:30 ET on 2026-05-19.',
+  },
+  {
+    id: '2026-05-21-0930',
+    date: '2026-05-21',
+    startEt: '09:30',
+    endEt: '15:10',
+    description:
+      '09:30–15:10 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 15:10 ET on 2026-05-21.',
+  },
+  {
+    id: '2026-05-26-0930',
+    date: '2026-05-26',
+    startEt: '09:30',
+    endEt: '12:30',
+    description:
+      '09:30–12:30 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 12:30 ET on 2026-05-26.',
+  },
+  {
+    id: '2026-05-28-0930',
+    date: '2026-05-28',
+    startEt: '09:30',
+    endEt: '15:00',
+    description:
+      '09:30–15:00 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 15:00 ET on 2026-05-28.',
+  },
+  {
+    id: '2026-05-29-0930',
+    date: '2026-05-29',
+    startEt: '09:30',
+    endEt: '14:30',
+    description:
+      '09:30–14:30 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 14:30 ET on 2026-05-29.',
+  },
+  {
+    id: '2026-06-01-0930',
+    date: '2026-06-01',
+    startEt: '09:30',
+    endEt: '16:00',
+    description:
+      '09:30–16:00 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 16:00 ET on 2026-06-01.',
+  },
+  {
+    id: '2026-06-02-1030',
+    date: '2026-06-02',
+    startEt: '10:30',
+    endEt: '13:30',
+    description:
+      '10:30–13:30 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 10:30 and 13:30 ET on 2026-06-02.',
+  },
+  {
+    id: '2026-06-03-0930',
+    date: '2026-06-03',
+    startEt: '09:30',
+    endEt: '15:30',
+    description:
+      '09:30–15:30 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 15:30 ET on 2026-06-03.',
+  },
+  {
+    id: '2026-06-04-0930',
+    date: '2026-06-04',
+    startEt: '09:30',
+    endEt: '15:30',
+    description:
+      '09:30–15:30 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 09:30 and 15:30 ET on 2026-06-04.',
+  },
+  {
+    id: '2026-06-05-1400',
+    date: '2026-06-05',
+    startEt: '14:00',
+    endEt: '15:30',
+    description:
+      '14:00–15:30 ET — inspect composite z-score, gamma exposure and ' +
+      'expected-move cone between 14:00 and 15:30 ET on 2026-06-05.',
   },
 ];
 
@@ -541,21 +629,61 @@ function escapeXml(s: string): string {
 // ── Config resolution ──
 
 /**
- * Resolve the config to replay under. When `ALGO_CONFIG_PATH` points at a JSON
- * file, it is shallow-merged over `DEFAULT_CONFIG` (with `risk` merged too), so
- * both full configs and partial diffs work. Otherwise `DEFAULT_CONFIG` is used.
+ * Shallow-merge a (possibly partial) config over `DEFAULT_CONFIG`, merging the
+ * nested `risk` object too, so both full configs and partial diffs work.
  */
-function loadRunConfig(): { config: AlgoConfig; source: string } {
-  const path = process.env.ALGO_CONFIG_PATH;
-  if (!path) return { config: DEFAULT_CONFIG, source: 'DEFAULT_CONFIG' };
-
-  const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<AlgoConfig>;
-  const config: AlgoConfig = {
+function mergeOverDefault(raw: Partial<AlgoConfig>): AlgoConfig {
+  return {
     ...DEFAULT_CONFIG,
     ...raw,
     risk: { ...DEFAULT_CONFIG.risk, ...(raw.risk ?? {}) },
   };
-  return { config, source: path };
+}
+
+/** Truthy env flag: "1", "true", "yes" (case-insensitive). */
+function envFlag(name: string): boolean {
+  const v = process.env[name]?.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/** Short description of a stored model record for the "Config source:" line. */
+function describeModel(rec: ModelRecord): string {
+  return `${rec.source} · metric=${rec.metric} · savedAt=${rec.savedAt}`;
+}
+
+/**
+ * Resolve the config to replay under, in priority order:
+ *   1. `--best`  / `USE_BEST_MODEL`   → `bestModel.config` from tuned-models.json
+ *   2. `--latest`/ `USE_LATEST_MODEL` → `lastModel.config` from tuned-models.json
+ *   3. `ALGO_CONFIG_PATH`             → JSON file (full config or partial diff)
+ *   4. otherwise                      → `DEFAULT_CONFIG`
+ *
+ * Stored-model and file configs are merged over `DEFAULT_CONFIG` so configs
+ * saved before a field was added still resolve every key.
+ */
+function loadRunConfig(): { config: AlgoConfig; source: string } {
+  const argv = process.argv.slice(2);
+  const wantBest = argv.includes('--best') || envFlag('USE_BEST_MODEL');
+  const wantLatest = argv.includes('--latest') || envFlag('USE_LATEST_MODEL');
+
+  if (wantBest || wantLatest) {
+    const store = loadModelStore();
+    const rec = wantBest ? store.bestModel : store.lastModel;
+    const slot = wantBest ? 'bestModel' : 'lastModel';
+    if (!rec) {
+      throw new Error(
+        `No ${slot} recorded in tuned-models.json — run \`npm run tune\` first, ` +
+          `or drop the ${wantBest ? '--best/USE_BEST_MODEL' : '--latest/USE_LATEST_MODEL'} flag.`,
+      );
+    }
+    return { config: mergeOverDefault(rec.config), source: `${slot} (${describeModel(rec)})` };
+  }
+
+  const path = process.env.ALGO_CONFIG_PATH;
+  if (!path) return { config: DEFAULT_CONFIG, source: 'DEFAULT_CONFIG' };
+
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<AlgoConfig>;
+  return { config: mergeOverDefault(raw), source: path };
 }
 
 // ── CLI ──

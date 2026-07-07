@@ -14,6 +14,8 @@
     "backtest": "node --env-file=.env --import=tsx/esm algorithms/backtest.ts",
     "tune": "node --env-file=.env --import=tsx/esm algorithms/tuner.ts",
     "test-cases": "node --env-file=.env --import=tsx/esm algorithms/test-cases.ts",
+    "test-cases:best": "node --env-file=.env --import=tsx/esm algorithms/test-cases.ts --best",
+    "test-cases:latest": "node --env-file=.env --import=tsx/esm algorithms/test-cases.ts --latest",
     "coverage": "node --env-file=.env --import=tsx/esm algorithms/coverage-report.ts",
     "ingest": "node --env-file=.env --import=tsx/esm scripts/ingest-prices.ts",
     "backfill-prices": "node --env-file=.env --import=tsx/esm scripts/backfill-prices.ts",

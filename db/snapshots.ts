@@ -1,7 +1,6 @@
+import { GAMMA_MIN_ABS } from '../scraper/core/types.js';
 import type { SnapshotRow } from '../scraper/core/types.js';
 import { getDb, isRthRow, MAX_ROWS_PER_INSERT } from './client.js';
-
-const GAMMA_MIN_VALUE = 150;
 
 /** Identity of a single strike observation, shared across the three panels. */
 function strikeKey(row: SnapshotRow): string {
@@ -10,7 +9,7 @@ function strikeKey(row: SnapshotRow): string {
 
 /** True for a gamma row whose magnitude clears the persistence threshold. */
 function isQualifyingGamma(row: SnapshotRow): boolean {
-  return row.panel === 'gamma' && Math.abs(row.value) > GAMMA_MIN_VALUE;
+  return row.panel === 'gamma' && Math.abs(row.value) > GAMMA_MIN_ABS;
 }
 
 /**

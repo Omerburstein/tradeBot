@@ -52,6 +52,12 @@ const PERISCOPE_TICKER = 'SPX';
 /** Fallback API origin when no XHR was captured to derive it from. */
 const PHX_API_FALLBACK_ORIGIN = 'https://phx.unusualwhales.com';
 
+/** `prev_minutes` param the dashboard sends on every exposures/positions
+ *  request (10- and 20-min-ago snapshots). Replayed verbatim so our
+ *  fetches are indistinguishable from the page's own; the prev payloads
+ *  themselves are ignored. */
+const PREV_MINUTES_PARAM = '10,20';
+
 /**
  * Resolve the phx API origin from any captured dashboard XHR so the direct
  * fetch helpers below keep working if UW moves the API host. Falls back to
@@ -134,7 +140,7 @@ export async function fetchPeriscopeSlot(
   positions: ApiPeriscopePositionsResponse | null;
 }> {
   const origin = phxApiOrigin(caps);
-  const query = `ticker=${PERISCOPE_TICKER}&expiries=${opts.expiry}&timestamp=${opts.timestampMs}&prev_minutes=10,20`;
+  const query = `ticker=${PERISCOPE_TICKER}&expiries=${opts.expiry}&timestamp=${opts.timestampMs}&prev_minutes=${PREV_MINUTES_PARAM}`;
 
   async function getJson<T>(endpoint: 'exposures' | 'positions'): Promise<T | null> {
     const url = `${origin}/api/periscope/${endpoint}?${query}`;

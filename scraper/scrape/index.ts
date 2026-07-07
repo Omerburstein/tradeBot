@@ -12,8 +12,8 @@ export {
   scrapeBackfillRange,
   scrapeBackfillDates,
   scrapeWalkBack,
-  discoverEndpoints,
 } from './orchestrate.js';
+export { discoverEndpoints } from './discovery.js';
 export { tradingDaysBetween } from './trading-calendar.js';
 export type { ScrapeResult } from './api-types.js';
 

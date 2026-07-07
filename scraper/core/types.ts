@@ -7,6 +7,15 @@
 
 export type Panel = 'gamma' | 'charm' | 'vanna';
 
+/**
+ * Minimum |gamma| for a strike to be persisted. Gamma is the anchor that
+ * gates the whole strike: charm/vanna rows are kept only when the same
+ * strike's gamma clears this threshold. Single source of truth for both
+ * the scrape-side pre-filter (`exposuresToRows`) and the DB backstop
+ * (`db/snapshots.ts` `filterInsertable`).
+ */
+export const GAMMA_MIN_ABS = 150;
+
 export interface SnapshotRow {
   /** ISO-8601 UTC timestamp; serialized to TIMESTAMPTZ in Postgres. */
   capturedAt: string;

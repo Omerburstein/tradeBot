@@ -74,5 +74,16 @@ export const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
  */
 export const MS_PER_TICK = 60 * 1000;
 
+/**
+ * Minute step for backfill slot selection. UW publishes one snapshot per
+ * minute; the default 10 keeps the historical 10-min cadence/volume, while
+ * BACKFILL_STEP_MIN=1 backfills full minute resolution.
+ */
+function resolveBackfillStepMin(): number {
+  const raw = Number.parseInt((process.env.BACKFILL_STEP_MIN ?? '').trim(), 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 10;
+}
+export const BACKFILL_STEP_MIN = resolveBackfillStepMin();
+
 // Re-exported so index.ts can keep its old single-import shape.
 export { isInActivePollingWindow } from './dates.js';
