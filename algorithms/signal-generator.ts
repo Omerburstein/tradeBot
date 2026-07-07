@@ -2,24 +2,26 @@
  * Signal generator: combines score engine + cone tracker + risk manager
  * into actionable entry/exit signals.
  *
- * Entry logic (user requirements):
- *   The cone is treated as support/resistance, NOT a magnet. A breakout
- *   through a band is a continuation signal — trade in the breakout direction.
- *   Every cone-line pass is a trade trigger, but ONLY when it agrees with the
- *   Greek/momentum direction (conviction floor = entryThreshold). A pass up
- *   with bearish Greeks (or a pass down with bullish Greeks) is a mismatch and
- *   is rejected.
- *   - LONG:  cone pass UP   + composite > +entryThreshold AND dGamma rising
- *            (or, with no pass, a strong inside signal: composite > strongEntryThreshold)
- *   - SHORT: cone pass DOWN + composite < -entryThreshold AND dGamma falling
- *            (or, with no pass, a strong inside signal: composite < -strongEntryThreshold)
+ * Entry logic (TODO #9 — cone-threshold rule):
+ *   The cone sets *which* entry bar the composite z-score must clear, keyed on
+ *   the current cone state (not on pass events):
+ *   - OUTSIDE the cone → the normal `entryThreshold`, but only when gamma agrees
+ *     with the breakout side:
+ *       - LONG:  price ABOVE the cone + gamma up   (gexZ > 0) + composite > +entryThreshold
+ *       - SHORT: price BELOW the cone + gamma down (gexZ < 0) + composite < -entryThreshold
+ *     A breakout against the gamma direction never qualifies.
+ *   - INSIDE the cone → the higher `strongEntryThreshold` (no breakout to
+ *     corroborate the signal), taken in the composite's direction.
+ *   The *first* tick of a gamma-aligned cone pass earns a small discount on the
+ *   outside-cone bar (`conePassBonus`), rewarding a fresh breakout.
  *
  * Exit logic:
  *   - Signal fade: composite drops below ±0.5
- *   - Cone returned: price falls back inside the cone after a breakout (failed breakout)
  *   - Reversal: composite flips past ±1.0 in opposing direction
  *   - Stop-loss: hard or trailing stop hit
  *   - Time gate: forced exit before 0DTE decay chaos (15:50 ET)
+ *   (The cone no longer drives exits in default mode — see TODO #9. Cone re-entry
+ *    exits live only in cone-breakout mode, TODO #8.)
  */
 
 import type pino from 'pino';
@@ -264,10 +266,9 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
     }
 
-    // Cone returned: price fell back inside the band — breakout failed
-    if (cone.crossed === 'returned') {
-      return this.makeSignal('exit', score, cone, snapshot, 'medium', 'cone returned: failed breakout, price back inside band');
-    }
+    // (The cone no longer forces an exit in default mode — TODO #9 reduced the
+    // cone to an entry-threshold selector. Cone re-entry exits are cone-breakout
+    // mode only, handled in checkBreakoutExits.)
 
     // GEX-driven auto-exits (signal fade + reversal). Gated by config.gexAutoExit:
     // when disabled, the position is held through score fades/flips and only a
@@ -301,42 +302,57 @@ export class SignalGenerator {
       return this.checkBreakoutEntries(score, cone, snapshot);
     }
 
-    // ── CONE-PASS ENTRIES ──
-    // Every cone-line pass is a trigger, but only when the composite conviction
-    // clears entryThreshold in the same direction as the pass. (The sign of
-    // dGammaZ is no longer a gate — TODO #10 — it still feeds the composite.)
-    if (cone.crossed === 'up') {
-      if (score.composite > config.entryThreshold) {
-        const confidence = this.assessConfidence(score, true);
-        return this.makeSignal('enter_long', score, cone, snapshot, confidence,
-          `long entry: cone pass up + bullish Greeks (z-factor=${z})`);
+    // ── CONE-THRESHOLD RULE (TODO #9) ──
+    // The cone state selects the entry bar: the normal `entryThreshold` OUTSIDE
+    // the cone (gamma-aligned breakout only), the higher `strongEntryThreshold`
+    // INSIDE it. A fresh gamma-aligned pass discounts the outside bar by
+    // `conePassBonus` on that first tick. Gamma direction = sign of gexZ.
+    const gz = score.gexZ.toFixed(2);
+
+    if (cone.state === 'above') {
+      // Above the cone → long only, and only when gamma also points up.
+      if (score.gexZ > 0) {
+        const bonus = cone.crossed === 'up' ? config.conePassBonus : 0;
+        const threshold = config.entryThreshold - bonus;
+        if (score.composite > threshold) {
+          const confidence = this.assessConfidence(score, true);
+          return this.makeSignal('enter_long', score, cone, snapshot, confidence,
+            `long entry: above cone + gamma up (z-factor=${z}, thr=${threshold.toFixed(2)}${bonus ? ', fresh-pass bonus' : ''})`);
+        }
+        return this.makeSignal('hold', score, cone, snapshot, 'low',
+          `above cone: z-factor below entry threshold (z-factor=${z}, thr=${threshold.toFixed(2)})`);
       }
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `cone pass up ignored: z-factor below entry threshold (z-factor=${z})`);
+        `above cone ignored: gamma not pointing up (gexZ=${gz})`);
     }
 
-    if (cone.crossed === 'down') {
-      if (score.composite < -config.entryThreshold) {
-        const confidence = this.assessConfidence(score, true);
-        return this.makeSignal('enter_short', score, cone, snapshot, confidence,
-          `short entry: cone pass down + bearish Greeks (z-factor=${z})`);
+    if (cone.state === 'below') {
+      // Below the cone → short only, and only when gamma also points down.
+      if (score.gexZ < 0) {
+        const bonus = cone.crossed === 'down' ? config.conePassBonus : 0;
+        const threshold = config.entryThreshold - bonus;
+        if (score.composite < -threshold) {
+          const confidence = this.assessConfidence(score, true);
+          return this.makeSignal('enter_short', score, cone, snapshot, confidence,
+            `short entry: below cone + gamma down (z-factor=${z}, thr=${threshold.toFixed(2)}${bonus ? ', fresh-pass bonus' : ''})`);
+        }
+        return this.makeSignal('hold', score, cone, snapshot, 'low',
+          `below cone: z-factor above entry threshold (z-factor=${z}, thr=${threshold.toFixed(2)})`);
       }
       return this.makeSignal('hold', score, cone, snapshot, 'low',
-        `cone pass down ignored: z-factor above entry threshold (z-factor=${z})`);
+        `below cone ignored: gamma not pointing down (gexZ=${gz})`);
     }
 
-    // ── STRONG INSIDE-CONE ENTRIES (no pass) ──
-    if (cone.state === 'inside') {
-      if (score.composite > config.strongEntryThreshold) {
-        const confidence = this.assessConfidence(score, false);
-        return this.makeSignal('enter_long', score, cone, snapshot, confidence,
-          `long entry: strong inside-cone signal (z-factor=${z})`);
-      }
-      if (score.composite < -config.strongEntryThreshold) {
-        const confidence = this.assessConfidence(score, false);
-        return this.makeSignal('enter_short', score, cone, snapshot, confidence,
-          `short entry: strong inside-cone signal (z-factor=${z})`);
-      }
+    // ── INSIDE THE CONE → higher bar (strongEntryThreshold), either direction ──
+    if (score.composite > config.strongEntryThreshold) {
+      const confidence = this.assessConfidence(score, false);
+      return this.makeSignal('enter_long', score, cone, snapshot, confidence,
+        `long entry: strong inside-cone signal (z-factor=${z})`);
+    }
+    if (score.composite < -config.strongEntryThreshold) {
+      const confidence = this.assessConfidence(score, false);
+      return this.makeSignal('enter_short', score, cone, snapshot, confidence,
+        `short entry: strong inside-cone signal (z-factor=${z})`);
     }
 
     return this.makeSignal('hold', score, cone, snapshot, 'low', `no entry signal (z-factor=${z})`);

@@ -98,6 +98,7 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   // Signal thresholds.
   entryThreshold: { min: 0.8, max: 2.5 },
   strongEntryThreshold: { min: 1.5, max: 3.5 },
+  conePassBonus: { min: 0.0, max: 0.75 },
   exitFadeThreshold: { min: 0.0, max: 1.2 },
   reversalThreshold: { min: 0.5, max: 2.0 },
 

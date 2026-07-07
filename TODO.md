@@ -64,7 +64,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   the flag, all defaulting to true). Document the flag and its sub-options in
   the algorithm knobs/parameters doc.
 
-- [ ] **9. Rework cone-based entry thresholds: normal when outside (gamma-aligned), strong when inside; remove old cone logic.**
+- [x] **9. Rework cone-based entry thresholds: normal when outside (gamma-aligned), strong when inside; remove old cone logic.**
   Change how the cone state affects the entry threshold:
   - **Outside the cone**: use the *normal* entry threshold, but only when gamma
     points in the same direction as the breakout (above cone + gamma positive

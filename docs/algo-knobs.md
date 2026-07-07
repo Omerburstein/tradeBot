@@ -53,11 +53,23 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 ### Entry / exit thresholds (`DEFAULT_CONFIG`)
 | Knob | Current | Meaning |
 |------|---------|---------|
-| `entryThreshold` | `1.5` | Composite z needed for a cone-breach entry |
-| `strongEntryThreshold` | `2.0` | Composite z needed for an inside-cone entry (no breach) |
+| `entryThreshold` | `1.5` | Composite z needed for an **outside-cone** (gamma-aligned breakout) entry |
+| `strongEntryThreshold` | `2.0` | Composite z needed for an **inside-cone** entry (higher bar) |
+| `conePassBonus` | `0.25` | Threshold discount on the **first** tick of a gamma-aligned cone pass — lowers the outside-cone bar to `entryThreshold − conePassBonus` for that tick. `0` disables it. |
 | `exitFadeThreshold` | `0.5` | Directional z below which a position exits (fade) — only if `gexAutoExit` |
 | `reversalThreshold` | `1.0` | Opposing-direction z that forces an exit — only if `gexAutoExit` |
 | `gexAutoExit` | `true` | Master switch for the two GEX-driven exits above |
+
+**Cone-threshold entry rule (TODO #9, default mode):** the cone state picks the
+bar the composite z must clear.
+- **Outside the cone** → `entryThreshold`, but only when gamma agrees with the
+  side: **above the cone + gamma up (`gexZ > 0`) → long**, **below the cone +
+  gamma down (`gexZ < 0`) → short**. A breakout against the gamma direction never
+  triggers.
+- **Inside the cone** → the higher `strongEntryThreshold`, taken in the
+  composite's direction.
+- The first tick of a gamma-aligned pass discounts the outside bar by
+  `conePassBonus`. The cone does **not** drive exits in default mode.
 
 ### Window / stats (`DEFAULT_CONFIG`)
 | Knob | Current | Meaning |
@@ -126,11 +138,12 @@ A position is closed by the **first** of these to fire, checked every slot:
 2. **Hard stop-loss** — `stopLossPoints` against you *(always on)*
 3. **Trailing stop** — only if `trailingStopEnabled`
 4. **Take-profit** — GEX target (gamma-center distance frozen at entry) *(always on)*
-5. **Cone returned** — price fell back inside the band after a breakout *(always on)*
-6. **Signal fade** — directional z < `exitFadeThreshold` — **only if `gexAutoExit`**
-7. **Reversal** — directional z < −`reversalThreshold` — **only if `gexAutoExit`**
+5. **Signal fade** — directional z < `exitFadeThreshold` — **only if `gexAutoExit`**
+6. **Reversal** — directional z < −`reversalThreshold` — **only if `gexAutoExit`**
 
-So `gexAutoExit: false` removes #6 and #7, leaving the structural/risk exits.
+So `gexAutoExit: false` removes #5 and #6, leaving the structural/risk exits.
+(Since TODO #9, the cone no longer forces an exit in default mode — it only
+selects the entry threshold. Cone re-entry exits are cone-breakout mode only.)
 
 **In cone-breakout mode** (`coneBreakout.enabled: true`) this list is replaced by:
 the forced time exit (#1, always) plus only the enabled `coneBreakout` toggles —

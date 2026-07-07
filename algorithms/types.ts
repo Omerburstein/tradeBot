@@ -317,10 +317,25 @@ export interface AlgoConfig {
    */
   zClamp: number;
 
-  /** Z-score threshold for standard entries (cone-breach). */
+  /**
+   * Z-score threshold for entries taken OUTSIDE the cone (TODO #9). Applies when
+   * price is above the cone with gamma pointing up (long) or below the cone with
+   * gamma pointing down (short) — the gamma-aligned breakout case.
+   */
   entryThreshold: number;
-  /** Z-score threshold for inside-cone entries (stronger signal needed). */
+  /**
+   * Z-score threshold for entries taken INSIDE the cone (TODO #9) — a higher bar
+   * than `entryThreshold`, since there is no breakout to corroborate the signal.
+   */
   strongEntryThreshold: number;
+  /**
+   * Small threshold discount (SPX z-score units) granted on the *first* tick a
+   * gamma-aligned cone pass occurs (TODO #9). On the tick price crosses the
+   * relevant line in the gamma direction, the outside-cone entry bar is lowered
+   * to `entryThreshold − conePassBonus`, giving a fresh breakout a slight edge.
+   * `0` disables the bonus.
+   */
+  conePassBonus: number;
   /** Z-score level below which an open position is exited (signal fade). */
   exitFadeThreshold: number;
   /** Z-score in opposing direction that triggers an exit. */
@@ -368,6 +383,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
 
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,
+  conePassBonus: 0.25,
   exitFadeThreshold: 0.5,
   reversalThreshold: 1.0,
   gexAutoExit: true,
