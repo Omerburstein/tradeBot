@@ -9,7 +9,9 @@ allowed-tools: [Bash, Read]
 
 Replay the explained test cases (`TEST_CASES` in `algorithms/test-cases.ts`)
 through the `SignalGenerator` and report the trades + net PnL. Each case also
-writes an SVG to `docs/test-cases/<id>.svg`.
+writes an SVG to `docs/test-cases/<id>.svg`, and every run tees its full
+explained output to `docs/test-cases/logs/` (a timestamped
+`test-cases-<UTC>.log` plus `latest.log`; both gitignored).
 
 ## Input
 
@@ -67,8 +69,9 @@ Surface the real output, not a paraphrase:
 - The final `TEST-TRADE RESULT` line (case count, trade count, net PnL).
 - If the user asked about specific behavior, quote the relevant per-slot
   `why:` / `factors:` lines from the timeline (e.g. the GEX-TP gate, cone
-  state, composite-z thresholds).
-- Mention the SVG path(s) under `docs/test-cases/`.
+  state, composite-z thresholds). The full run is also saved to
+  `docs/test-cases/logs/latest.log` if you need to re-read it.
+- Mention the SVG path(s) under `docs/test-cases/` and the `Log written:` path.
 
 ## Notes
 

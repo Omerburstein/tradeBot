@@ -12,6 +12,8 @@
  *   3. Writes a per-case SVG graph to `docs/test-cases/<id>.svg` plotting the
  *      composite z-score and gexZ (left axis) against spot + cone bands and the
  *      entry/exit levels (right axis) over the window.
+ *   4. Tees the full explained run to `docs/test-cases/logs/` — a timestamped
+ *      `test-cases-<UTC>.log` per run plus `latest.log` (both gitignored).
  *
  * The TEST_CASES list and runTestCase() are exported so the backtest/tuner can
  * import and replay the same scenarios under a candidate config.
@@ -576,6 +578,12 @@ function resolveOutPath(id: string): string {
   return resolve(here, '..', 'docs', 'test-cases', `${id}.svg`);
 }
 
+/** Directory the per-run explained logs are written to (gitignored). */
+function logsDir(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..', 'docs', 'test-cases', 'logs');
+}
+
 function niceCeil(v: number): number {
   if (v <= 0) return 1;
   const pow = Math.pow(10, Math.floor(Math.log10(v)));
@@ -702,6 +710,31 @@ if (isMain) {
     process.exit(1);
   }
 
+  // Tee every console line into a buffer so the full explained run is persisted
+  // to docs/test-cases/logs/ alongside the per-case SVGs. Terminal output is
+  // unchanged — the original console methods still write to stdout/stderr.
+  const logLines: string[] = [];
+  const tee =
+    (write: (...a: unknown[]) => void) =>
+    (...args: unknown[]) => {
+      logLines.push(args.map((a) => (typeof a === 'string' ? a : String(a))).join(' '));
+      write(...args);
+    };
+  const origLog = console.log.bind(console);
+  console.log = tee(origLog);
+  console.error = tee(console.error.bind(console));
+
+  const flushLog = (): string => {
+    const dir = logsDir();
+    mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-'); // filesystem-safe
+    const body = logLines.join('\n') + '\n';
+    const file = resolve(dir, `test-cases-${stamp}.log`);
+    writeFileSync(file, body, 'utf8');
+    writeFileSync(resolve(dir, 'latest.log'), body, 'utf8'); // convenience: always the most recent run
+    return file;
+  };
+
   (async () => {
     const { config, source } = loadRunConfig();
     console.log(`Config source: ${source}`);
@@ -722,8 +755,17 @@ if (isMain) {
       `TEST-TRADE RESULT  ${cases.length} case(s), ${tradeCount} trades  ` +
         `net pnl=${fmtUsd(netPnl)}`,
     );
+
+    const logFile = flushLog();
+    origLog(`Log written: ${logFile}`);
   })().catch((e) => {
     console.error('Test-case run failed:', e);
+    try {
+      const logFile = flushLog();
+      origLog(`Partial log written: ${logFile}`);
+    } catch {
+      /* best-effort log flush on failure */
+    }
     process.exit(1);
   });
 }
