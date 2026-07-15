@@ -4,11 +4,14 @@
  * A curated list of date + intraday-window cases the algo is replayed against.
  * For every case this file:
  *   1. Replays the FULL trading day through the same SignalGenerator the
- *      backtest/tuner use (so z-score history + cone crossings are correct),
- *      then zooms into the case's [start, end] ET window.
- *   2. Prints an EXPLAINED timeline — for each slot the action taken, and for
- *      every entry / exit / missed-trigger the factors and thresholds that
- *      drove the decision (composite z, gexZ, dGammaZ, cone state, GEX-TP gate).
+ *      backtest/tuner use (so z-score history + cone crossings are correct).
+ *   2. Prints an EXPLAINED timeline for the WHOLE day — every slot from the
+ *      market open onward is listed with ALL of its factor z-scores (composite,
+ *      gexZ, dGammaZ, positionsZ, dPositionsZ) computed exactly as the tuner
+ *      computes them, so e.g. the 09:30 factors are visible even when the case
+ *      window starts at 09:40. The case's [start, end] ET window is bracketed
+ *      inline; for every entry / exit / missed-trigger the factors and
+ *      thresholds that drove the decision are expanded (cone state, GEX-TP gate).
  *   3. Writes a per-case SVG graph to `docs/test-cases/<id>.svg` plotting the
  *      composite z-score and gexZ (left axis) against spot + cone bands and the
  *      entry/exit levels (right axis) over the window.
@@ -203,10 +206,14 @@ interface SlotDiag {
 
 export interface TestCaseResult {
   testCase: TestCase;
-  /** In-window slots only (the part the case is about). */
+  /** Every slot of the trading day, from the open (drives the explained log). */
+  allSlots: SlotDiag[];
+  /** In-window slots only (drives the SVG — the part the case is about). */
   slots: SlotDiag[];
   /** Trades that entered or exited inside the window. */
   trades: TradeRecord[];
+  /** All trades of the day (used to annotate entries/exits in the full log). */
+  allTrades: TradeRecord[];
   /** Absolute path of the SVG written, or null when there was no data. */
   svgPath: string | null;
 }
@@ -302,13 +309,13 @@ export async function runTestCase(
     svgPath = writeSvg(testCase, windowSlots, trades, config);
   }
 
-  return { testCase, slots: windowSlots, trades, svgPath };
+  return { testCase, allSlots: diags, slots: windowSlots, trades, allTrades, svgPath };
 }
 
 // ── Explanation (console) ──
 
 function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
-  const { testCase, slots, trades, svgPath } = result;
+  const { testCase, allSlots, slots, trades, allTrades, svgPath } = result;
 
   console.log(`\n${'='.repeat(72)}`);
   console.log(`TEST CASE  ${testCase.id}`);
@@ -316,8 +323,8 @@ function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
   console.log(testCase.description);
   console.log('='.repeat(72));
 
-  if (slots.length === 0) {
-    console.log('\n  (no in-window snapshots found — is the day loaded in the DB?)');
+  if (allSlots.length === 0) {
+    console.log('\n  (no snapshots found for this day — is the day loaded in the DB?)');
     return;
   }
 
@@ -328,17 +335,36 @@ function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
       `GEX-TP min=${r.minGexTakeProfitPoints}pts`,
   );
   console.log(
-    'Legend: z=composite z-score, gexZ/dGamZ=factor z-scores, cone=band state\n',
+    'Legend: z=composite z-score, gexZ/dGamZ/posZ/dPosZ=factor z-scores, cone=band state',
+  );
+  console.log(
+    `Timeline: FULL day from the open — factors computed exactly as the tuner does; ` +
+      `the ${testCase.startEt}–${testCase.endEt} ET window is bracketed by ▶/◀.\n`,
   );
 
-  const entryTimes = new Map(trades.map((t) => [t.entryTime, t]));
-  const exitTimes = new Map(trades.map((t) => [t.exitTime, t]));
+  // Annotate entries/exits across the whole day (not just the window) so the
+  // full-day timeline is self-consistent; the window summary below stays scoped.
+  const entryTimes = new Map(allTrades.map((t) => [t.entryTime, t]));
+  const exitTimes = new Map(allTrades.map((t) => [t.exitTime, t]));
 
-  for (const s of slots) {
+  const startMin = parseHhmm(testCase.startEt);
+  const endMin = parseHhmm(testCase.endEt);
+  let wasInWindow = false;
+
+  for (const s of allSlots) {
+    const nowInWindow = s.etMinutes >= startMin && s.etMinutes <= endMin;
+    if (nowInWindow && !wasInWindow) {
+      console.log(`  ${'▶'.repeat(3)} window start ${testCase.startEt} ET ${'▶'.repeat(3)}`);
+    } else if (!nowInWindow && wasInWindow) {
+      console.log(`  ${'◀'.repeat(3)} window end ${testCase.endEt} ET ${'◀'.repeat(3)}`);
+    }
+    wasInWindow = nowInWindow;
+
     const tick = s.isTick ? ' ·tick' : '';
     const line =
-      `  ${s.etLabel}${tick}  spot=${s.spot.toFixed(1)}  ` +
-      `z=${fmtSigned(s.composite)}  gexZ=${fmtSigned(s.gexZ)} dGamZ=${fmtSigned(s.dGammaZ)}  ` +
+      `  ${nowInWindow ? '|' : ' '} ${s.etLabel}${tick}  spot=${s.spot.toFixed(1)}  ` +
+      `z=${fmtSigned(s.composite)}  gexZ=${fmtSigned(s.gexZ)} dGamZ=${fmtSigned(s.dGammaZ)} ` +
+      `posZ=${fmtSigned(s.positionsZ)} dPosZ=${fmtSigned(s.dPositionsZ)}  ` +
       `cone=${padState(s.coneState)}${s.coneCrossed ? `/${s.coneCrossed}` : ''}  → ${s.action.toUpperCase()}`;
     console.log(line);
 
@@ -384,6 +410,10 @@ function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
         );
       }
     }
+  }
+
+  if (wasInWindow) {
+    console.log(`  ${'◀'.repeat(3)} window end ${testCase.endEt} ET ${'◀'.repeat(3)}`);
   }
 
   console.log(
