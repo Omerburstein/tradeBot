@@ -318,6 +318,17 @@ export interface AlgoConfig {
   zClamp: number;
 
   /**
+   * Coefficient-of-variation floor on the z-score denominator. Early in the
+   * session the rolling lookback holds only a handful of tightly-clustered
+   * samples, so the sample std is near zero and any deviation explodes into a
+   * huge z (a warm-up artifact, not a real move). The std used for each factor's
+   * z is floored at `zStdFloorFrac × meanAbs(history)` — a fraction of the
+   * factor's own magnitude scale — so a degenerate spread can't produce a
+   * 50-sigma reading. `0` disables the floor (legacy behaviour).
+   */
+  zStdFloorFrac: number;
+
+  /**
    * Z-score threshold for entries taken OUTSIDE the cone (TODO #9). Applies when
    * price is above the cone with gamma pointing up (long) or below the cone with
    * gamma pointing down (short) — the gamma-aligned breakout case.
@@ -380,6 +391,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
 
   positionsGammaGate: 0.30,
   zClamp: 3.5,
+  zStdFloorFrac: 0.20,
 
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,

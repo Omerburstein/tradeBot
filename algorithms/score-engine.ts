@@ -165,10 +165,11 @@ export function computeScore(
   // reach back across a day boundary. Do not feed a cross-day history here.
   const lookback = history.slice(-config.zScoreLookback);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
-  const gexZ = clamp(zScore(gexRaw, lookback.map((h) => h.gexRaw)));
-  const dGammaZ = clamp(zScore(dGammaRaw, lookback.map((h) => h.dGammaRaw)));
-  const positionsZ = clamp(zScore(positionsRaw, lookback.map((h) => h.positionsRaw)));
-  const dPositionsZ = clamp(zScore(dPositionsRaw, lookback.map((h) => h.dPositionsRaw)));
+  const floorFrac = config.zStdFloorFrac;
+  const gexZ = clamp(zScore(gexRaw, lookback.map((h) => h.gexRaw), floorFrac));
+  const dGammaZ = clamp(zScore(dGammaRaw, lookback.map((h) => h.dGammaRaw), floorFrac));
+  const positionsZ = clamp(zScore(positionsRaw, lookback.map((h) => h.positionsRaw), floorFrac));
+  const dPositionsZ = clamp(zScore(dPositionsRaw, lookback.map((h) => h.dPositionsRaw), floorFrac));
 
   // Composite weighted score
   const composite =
@@ -207,8 +208,15 @@ function signedPow(value: number, exponent: number): number {
  *
  * With fewer than 3 data points, returns a clamped sign estimate
  * (the z-score would be unreliable with so little history).
+ *
+ * `stdFloorFrac` applies a coefficient-of-variation floor to the denominator:
+ * the std is floored at `stdFloorFrac × meanAbs(history)`. Early in the session
+ * the lookback holds only a few tightly-clustered samples, so the raw std is
+ * near zero and any deviation explodes into a huge z (a warm-up artifact). The
+ * floor caps that blow-up at a fraction of the factor's own magnitude scale.
+ * Pass `0` to disable (legacy behaviour).
  */
-function zScore(value: number, history: number[]): number {
+function zScore(value: number, history: number[], stdFloorFrac = 0): number {
   if (history.length < 3) {
     // Not enough data for meaningful statistics — return clamped sign
     return value > 0 ? 1 : value < 0 ? -1 : 0;
@@ -217,7 +225,15 @@ function zScore(value: number, history: number[]): number {
   const n = history.length;
   const mean = history.reduce((a, b) => a + b, 0) / n;
   const variance = history.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-  const std = Math.sqrt(variance);
+  let std = Math.sqrt(variance);
+
+  // Coefficient-of-variation floor: keep a degenerate (near-zero) early-session
+  // spread from producing an explosive z. Scale is the factor's own mean
+  // magnitude over the lookback, so the floor tracks each factor's units.
+  if (stdFloorFrac > 0) {
+    const scale = history.reduce((a, b) => a + Math.abs(b), 0) / n;
+    std = Math.max(std, stdFloorFrac * scale);
+  }
 
   // Avoid division by zero when all values are identical
   if (std < 1e-10) return 0;

@@ -339,7 +339,11 @@ function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
   );
   console.log(
     `Timeline: FULL day from the open — factors computed exactly as the tuner does; ` +
-      `the ${testCase.startEt}–${testCase.endEt} ET window is bracketed by ▶/◀.\n`,
+      `the ${testCase.startEt}–${testCase.endEt} ET window is bracketed by ▶/◀.`,
+  );
+  console.log(
+    'Each slot also prints its reason with the concrete factor values that drove ' +
+      'it (e.g. a below-cone hold shows spot vs the cone band at that minute).\n',
   );
 
   // Annotate entries/exits across the whole day (not just the window) so the
@@ -368,47 +372,26 @@ function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
       `cone=${padState(s.coneState)}${s.coneCrossed ? `/${s.coneCrossed}` : ''}  → ${s.action.toUpperCase()}`;
     console.log(line);
 
+    // Reason + the concrete values it hinges on, on EVERY slot. `relevantFactors`
+    // tailors the numbers to the reason text (cone band + spot for a cone hold,
+    // gexZ for a gamma-direction veto, composite vs thresholds for a fade, etc.).
+    console.log(`       why: ${s.reason}`);
+    console.log(`            ${relevantFactors(s, config)}`);
+
     const entry = entryTimes.get(s.capturedAt);
     const exit = exitTimes.get(s.capturedAt);
-    const missed =
-      s.action === 'hold' &&
-      (s.coneCrossed === 'up' || s.coneCrossed === 'down' || s.reason.includes('GEX TP'));
-
-    if (entry || exit || missed) {
-      console.log(`       why: ${s.reason}`);
+    if (entry) {
       console.log(
-        `       factors: composite z=${fmtSigned(s.composite)} ` +
-          `(needs >${config.entryThreshold} long / <${-config.entryThreshold} short; ` +
-          `strong ±${config.strongEntryThreshold} when no cone pass)`,
+        `       >>> ENTER ${entry.direction.toUpperCase()} ${entry.contracts} @ spx ${entry.entryPrice.toFixed(2)} ` +
+          `stop=${entry.stopPrice.toFixed(2)} tgt=${entry.targetPrice.toFixed(2)} ` +
+          `(GEX TP ${Math.abs(entry.targetPrice - entry.entryPrice).toFixed(1)}pts)`,
       );
+    }
+    if (exit) {
       console.log(
-        `                gexZ=${fmtSigned(s.gexZ)} dGammaZ=${fmtSigned(s.dGammaZ)} ` +
-          `posZ=${fmtSigned(s.positionsZ)} dPosZ=${fmtSigned(s.dPositionsZ)}`,
+        `       <<< EXIT  ${exit.direction.toUpperCase()} @ spx ${exit.exitPrice.toFixed(2)} ` +
+          `pnl=${fmtUsd(exit.pnl)}  (${exit.reason})`,
       );
-      console.log(
-        `                cone=${s.coneState}${s.coneCrossed ? ` (crossed ${s.coneCrossed})` : ''} ` +
-          `bands [${s.coneLower.toFixed(1)}, ${s.coneUpper.toFixed(1)}]`,
-      );
-      const gate =
-        s.gexTpPoints >= config.risk.minGexTakeProfitPoints
-          ? 'clears gate'
-          : `BELOW ${config.risk.minGexTakeProfitPoints} → entry skipped`;
-      console.log(
-        `                GEX TP=${s.gexTpPoints.toFixed(1)}pts (gamma-center distance; ${gate})`,
-      );
-      if (entry) {
-        console.log(
-          `       >>> ENTER ${entry.direction.toUpperCase()} ${entry.contracts} @ spx ${entry.entryPrice.toFixed(2)} ` +
-            `stop=${entry.stopPrice.toFixed(2)} tgt=${entry.targetPrice.toFixed(2)} ` +
-            `(GEX TP ${Math.abs(entry.targetPrice - entry.entryPrice).toFixed(1)}pts)`,
-        );
-      }
-      if (exit) {
-        console.log(
-          `       <<< EXIT  ${exit.direction.toUpperCase()} @ spx ${exit.exitPrice.toFixed(2)} ` +
-            `pnl=${fmtUsd(exit.pnl)}  (${exit.reason})`,
-        );
-      }
     }
   }
 
@@ -423,6 +406,68 @@ function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
         : ''),
   );
   if (svgPath) console.log(`Graph: ${svgPath}`);
+}
+
+/**
+ * The concrete factor values behind a slot's `reason`, so the log shows the
+ * numbers each decision actually hinged on rather than just the prose. The
+ * reason text is matched by keyword and only the factors it references are
+ * emitted (an "all relevant factors" view, not a fixed dump):
+ *   - cone reasons        → spot vs the cone band [lower, upper] at that minute
+ *   - gamma-direction     → gexZ (the sign that gates a breakout side)
+ *   - threshold / fade /  → composite z against the entry/strong/exit bars
+ *     reversal / entry
+ *   - GEX-TP gate         → gamma-center distance vs the minimum
+ * A slot whose reason references none of these still shows the composite z so
+ * no line is left context-free.
+ */
+function relevantFactors(s: SlotDiag, config: AlgoConfig): string {
+  const reason = s.reason.toLowerCase();
+  const bits: string[] = [];
+
+  if (reason.includes('cone')) {
+    const side =
+      s.coneState === 'above' ? 'above' : s.coneState === 'below' ? 'below' : 'inside';
+    bits.push(
+      `spot ${s.spot.toFixed(1)} ${side} cone [${s.coneLower.toFixed(1)}, ${s.coneUpper.toFixed(1)}]` +
+        (s.coneCrossed ? ` (crossed ${s.coneCrossed})` : ''),
+    );
+  }
+
+  // Gamma-direction gate: the breakout side is vetoed/confirmed by the sign of
+  // gexZ. Match the direction phrasing ("gamma up/down/not pointing", "gexZ="),
+  // NOT the GEX-TP gate's "gamma center" (that's a distance, handled below).
+  if (
+    reason.includes('gamma up') ||
+    reason.includes('gamma down') ||
+    reason.includes('gamma not pointing') ||
+    reason.includes('gexz')
+  ) {
+    bits.push(`gexZ=${fmtSigned(s.gexZ)}`);
+  }
+
+  if (
+    reason.includes('z-factor') ||
+    reason.includes('entry') ||
+    reason.includes('signal') ||
+    reason.includes('fade') ||
+    reason.includes('reversal')
+  ) {
+    const bars = [`entry ±${config.entryThreshold}`, `strong ±${config.strongEntryThreshold}`];
+    if (reason.includes('fade')) bars.push(`exitFade ${config.exitFadeThreshold}`);
+    if (reason.includes('reversal')) bars.push(`reversal ${config.reversalThreshold}`);
+    bits.push(`z=${fmtSigned(s.composite)} [${bars.join(', ')}]`);
+  }
+
+  if (reason.includes('gex tp') || reason.includes('gamma center')) {
+    bits.push(
+      `gexTP=${s.gexTpPoints.toFixed(1)}pts (min ${config.risk.minGexTakeProfitPoints})`,
+    );
+  }
+
+  if (bits.length === 0) bits.push(`z=${fmtSigned(s.composite)}`);
+
+  return bits.join('  ·  ');
 }
 
 function fmtSigned(n: number): string {
