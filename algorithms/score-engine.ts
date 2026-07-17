@@ -18,7 +18,9 @@
  *      delta of |gamma| is signed (its sign is momentum — a wall building vs
  *      bleeding, including a negative-gamma strike shrinking toward zero), then
  *      pointed by the strike's side of spot.
- *   4. dPositions/dt — rate of change of net MM positions (same gating, signed)
+ *   4. dPositions/dt — rate of change of net MM positions *magnitude*
+ *      (|positions|, same gating), matching the absolute positions LEVEL. The
+ *      delta of |positions| is signed momentum, then pointed by the side of spot.
  *   5. Distance weighting — further strikes contribute MORE score
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
@@ -156,7 +158,12 @@ export function computeScore(
         dGammaRaw += signedPow(deltaGamma, config.pDGamma) * sign * dWeight;
 
         if (positionsCounts) {
-          const deltaPositions = s.positions - prev.positions;
+          // Change in position *magnitude* (|positions|), mirroring the dGamma
+          // factor and the absolute positions LEVEL — a wall of MM positioning
+          // building vs bleeding, regardless of the raw position's own sign. The
+          // delta's sign is momentum (preserved through signedPow); `sign` then
+          // points it by the strike's side of spot.
+          const deltaPositions = Math.abs(s.positions) - Math.abs(prev.positions);
           dPositionsRaw += signedPow(deltaPositions, config.pDPositions) * gammaStrength * sign * dWeight;
         }
       }

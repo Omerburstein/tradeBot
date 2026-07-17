@@ -26,6 +26,10 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   Gamma should only act as a threshold (gate) for whether the positions factor
   applies at all, rather than being folded into the factor's value.
 
+- [x] **4. Align positions derivatives with the design roles.**
+  Change the positions derivatives so they match the roles defined in
+  `algorithms/ROLES.md`.
+
 ## Training / Backtesting
 
 - [ ] **2. Feed SPX price data from DB as the signal input for backtest and tune.**
