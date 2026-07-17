@@ -100,21 +100,21 @@
 <body data-palette="#2a78d6,#008300">
 <div class="viz-root">
 <div class="wrap">
-  <h1>Does the previous day's magnitude predict the next day's opening scale?</h1>
+  <h1>Can the previous day seed gamma's opening scale?</h1>
   <p class="sub">
-    Each factor is normalized by <code>meanAbs</code> of its recent history, which needs 3 fresh Greek ticks —
+    Gamma is normalized by <code>meanAbs</code> of its recent history, which needs 3 fresh Greek ticks —
     30 minutes of wall clock. Seeding that scale from the previous day would remove the warm-up, but only if the
-    previous day's magnitude actually predicts the next open. Each bar counts trading days whose ratio
+    previous day's gamma magnitude actually predicts the next open. Each bar counts trading days whose ratio
     (previous-day magnitude &divide; current-day opening magnitude) fell in that bin.
-    <b>1&times; is a perfect seed.</b> Bins are one doubling wide.
+    <b>1&times; is a perfect seed</b>; the gap between the <b>1&times;</b> line and the <b>typical</b> line is the
+    seed's bias. Bins are one doubling wide.
   </p>
   <p class="meta" id="meta"></p>
 
-  <div class="legend" id="legend"></div>
   <div class="grid" id="grid"></div>
 
   <details>
-    <summary>Table view — summary statistics and full bin counts</summary>
+    <summary>Table view — all four factors, summary statistics and full bin counts</summary>
     <div id="tables"></div>
   </details>
 </div>
@@ -122,35 +122,35 @@
 <div id="tt"></div>
 
 <script>
-const DATA = {"facets":[{"factor":"gexRaw","label":"GEX (gamma level)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,0,3,10,18,34,39,16,7,4,0,1,0],"stats":{"n":132,"p10":0.27206209152441957,"median":1.0284792182731413,"p90":3.579900499423264,"geomean":0.994014913329646,"within2x":0.553030303030303}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[0,0,0,1,5,9,29,34,24,17,11,2,0],"stats":{"n":132,"p10":0.7547677690055103,"median":2.949429267947415,"p90":14.56855983619434,"geomean":3.2435747199472615,"within2x":0.2878787878787879}}]},{"factor":"dGammaRaw","label":"dGamma (gamma momentum)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,0,5,8,22,30,31,25,8,3,0,0,0],"stats":{"n":132,"p10":0.2513434761773419,"median":1.0408544831245459,"p90":3.6625602469641185,"geomean":0.995120440763284,"within2x":0.4621212121212121}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[0,0,0,0,0,8,8,31,45,27,9,3,1],"stats":{"n":132,"p10":1.9060086605556235,"median":5.674574188559545,"p90":15.126851461116,"geomean":5.405504312481143,"within2x":0.12121212121212122}}]},{"factor":"positionsRaw","label":"Positions (level)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,1,0,3,28,34,41,19,3,2,0,1,0],"stats":{"n":132,"p10":0.31414372484479425,"median":1.019829464402474,"p90":2.790549579930233,"geomean":0.9876810329338503,"within2x":0.5681818181818182}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[1,2,11,29,39,32,12,5,1,0,0,0,0],"stats":{"n":132,"p10":0.12176941172289968,"median":0.3378467208310926,"p90":1.1329264637414604,"geomean":0.3767026171110138,"within2x":0.3333333333333333}}]},{"factor":"dPositionsRaw","label":"dPositions (momentum)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,0,2,4,29,26,45,17,6,1,2,0,0],"stats":{"n":132,"p10":0.323370222174644,"median":1.113445199910094,"p90":3.1277359020837143,"geomean":0.9947124409466807,"within2x":0.5378787878787878}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[0,0,0,1,24,39,46,13,7,1,1,0,0],"stats":{"n":132,"p10":0.369657076918544,"median":1.017376925086267,"p90":2.81862431574113,"geomean":1.0389002303011319,"within2x":0.6439393939393939}}]}],"meta":{"days":133,"firstDate":"2025-12-29","lastDate":"2026-07-16","pairs":528,"skipped":0,"binMin":-6,"binMax":7,"edgeTicks":3}};
+const DATA = {"facets":[{"factor":"gexRaw","label":"GEX (gamma level)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,0,3,10,18,34,39,16,7,4,0,1,0],"stats":{"n":132,"p10":0.27206209152441957,"median":1.0284792182731413,"p90":3.579900499423264,"geomean":0.994014913329646,"within2x":0.553030303030303}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[0,0,0,1,5,9,29,34,24,17,11,2,0],"stats":{"n":132,"p10":0.7547677690055103,"median":2.949429267947415,"p90":14.56855983619434,"geomean":3.2435747199472615,"within2x":0.2878787878787879}}]},{"factor":"dGammaRaw","label":"dGamma (gamma momentum)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,0,5,8,22,30,31,25,8,3,0,0,0],"stats":{"n":132,"p10":0.2513434761773419,"median":1.0408544831245459,"p90":3.6625602469641185,"geomean":0.995120440763284,"within2x":0.4621212121212121}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[0,0,0,0,0,8,8,31,45,27,9,3,1],"stats":{"n":132,"p10":1.9060086605556235,"median":5.674574188559545,"p90":15.126851461116,"geomean":5.405504312481143,"within2x":0.12121212121212122}}]},{"factor":"positionsRaw","label":"Positions (level)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,1,0,3,28,34,41,19,3,2,0,1,0],"stats":{"n":132,"p10":0.31414372484479425,"median":1.019829464402474,"p90":2.790549579930233,"geomean":0.9876810329338503,"within2x":0.5681818181818182}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[1,2,11,29,39,32,12,5,1,0,0,0,0],"stats":{"n":132,"p10":0.12176941172289968,"median":0.3378467208310926,"p90":1.1329264637414604,"geomean":0.3767026171110138,"within2x":0.3333333333333333}}]},{"factor":"dPositionsRaw","label":"dPositions (momentum)","series":[{"key":"ratioFirst","label":"Previous day's first 3 ticks","bins":[0,0,2,4,29,26,45,17,6,1,2,0,0],"stats":{"n":132,"p10":0.323370222174644,"median":1.113445199910094,"p90":3.1277359020837143,"geomean":0.9947124409466807,"within2x":0.5378787878787878}},{"key":"ratioLast","label":"Previous day's last 3 ticks","bins":[0,0,0,1,24,39,46,13,7,1,1,0,0],"stats":{"n":132,"p10":0.369657076918544,"median":1.017376925086267,"p90":2.81862431574113,"geomean":1.0389002303011319,"within2x":0.6439393939393939}}]}],"meta":{"days":133,"firstDate":"2025-12-29","lastDate":"2026-07-16","pairs":528,"skipped":0,"binMin":-6,"binMax":7,"edgeTicks":3,"chartFactor":"gexRaw","chartFactorLabel":"GEX (gamma level)"}};
 const COLORS = ['var(--series-1)', 'var(--series-2)'];
-const W = 540, H = 282, M = { top: 28, right: 12, bottom: 42, left: 38 };
+const W = 540, H = 300, M = { top: 46, right: 14, bottom: 42, left: 38 };
 const PW = W - M.left - M.right, PH = H - M.top - M.bottom;
 
 const meta = DATA.meta;
 document.getElementById('meta').textContent =
   meta.days + ' trading days (' + meta.firstDate + ' \u2192 ' + meta.lastDate + ') \u00b7 ' +
-  meta.pairs + ' factor-day pairs \u00b7 comparing the first/last ' + meta.edgeTicks +
+  'charts show ' + meta.chartFactorLabel + ' only \u00b7 comparing the first/last ' + meta.edgeTicks +
   ' fresh Greek ticks of each day';
-
-document.getElementById('legend').innerHTML = DATA.facets[0].series.map((s, i) =>
-  '<span class="lg"><span class="sw" style="background:' + COLORS[i] + '"></span>' + s.label + '</span>'
-).join('') + '<span class="lg" style="color:var(--text-muted)">Bars right of 1\u00d7 = previous day ran larger</span>';
 
 const fmtRatio = (k) => k < 0 ? '1/' + Math.pow(2, -k) + '\u00d7' : Math.pow(2, k) + '\u00d7';
 const nBins = meta.binMax - meta.binMin;
 
-function facetSvg(fc) {
-  const maxCount = Math.max(1, ...fc.series.flatMap(s => s.bins));
+/** One single-series histogram. si picks the palette slot (0 = open, 1 = close). */
+function chartSvg(ser, si) {
+  const maxCount = Math.max(1, ...ser.bins);
   // Round up to a multiple of 4 gridline steps so every tick is a whole day
   // (max/10 gave ticks like 12.5 days, which is not a thing).
   const yTop = Math.max(4, Math.ceil(maxCount / 8) * 8);
   const x = (b) => M.left + (b / nBins) * PW;
   const y = (c) => M.top + PH - (c / yTop) * PH;
-  const bw = PW / nBins;
   const gap = 2;                       // surface gap between adjacent fills
-  const barW = (bw - gap * 2) / 2;
+  const barW = PW / nBins - gap;
   let s = '';
+
+  // "Within 2x" band — the usable-seed zone the stat line quotes.
+  s += '<rect x="' + x(-1 - meta.binMin) + '" y="' + M.top + '" width="' + (2 * PW / nBins) +
+       '" height="' + PH + '" fill="var(--grid)" opacity="0.5"/>';
 
   // Horizontal gridlines — solid hairlines, one shade off the surface.
   for (let g = 0; g <= 4; g++) {
@@ -159,26 +159,39 @@ function facetSvg(fc) {
          '" stroke="var(--grid)" stroke-width="1"/>' +
          '<text class="tick" x="' + (M.left - 7) + '" y="' + (y(c) + 3.5) + '" text-anchor="end">' + c + '</text>';
   }
-  // Bars, grouped per bin.
-  fc.series.forEach((ser, si) => {
-    ser.bins.forEach((c, b) => {
-      const bx = x(b) + gap / 2 + si * (barW + gap);
-      if (c > 0) {
-        const h = Math.max(2, M.top + PH - y(c));
-        s += '<rect class="bar" x="' + bx.toFixed(2) + '" y="' + y(c).toFixed(2) + '" width="' + barW.toFixed(2) +
-             '" height="' + h.toFixed(2) + '" rx="3" fill="' + COLORS[si] + '"/>';
-      }
-      // Hit target spans the full bar column height (>= 24px) regardless of value.
-      s += '<rect class="hit" x="' + (bx - gap / 2).toFixed(2) + '" y="' + M.top + '" width="' + (barW + gap).toFixed(2) +
-           '" height="' + PH + '" data-s="' + si + '" data-b="' + b + '" data-f="' + fc.factor + '"/>';
-    });
+  ser.bins.forEach((c, b) => {
+    const bx = x(b) + gap / 2;
+    if (c > 0) {
+      const h = Math.max(2, M.top + PH - y(c));
+      s += '<rect class="bar" x="' + bx.toFixed(2) + '" y="' + y(c).toFixed(2) + '" width="' + barW.toFixed(2) +
+           '" height="' + h.toFixed(2) + '" rx="4" fill="' + COLORS[si] + '"/>';
+    }
+    // Hit target spans the full column height (>= 24px) regardless of value.
+    s += '<rect class="hit" x="' + (bx - gap / 2).toFixed(2) + '" y="' + M.top + '" width="' + (barW + gap).toFixed(2) +
+         '" height="' + PH + '" data-s="' + si + '" data-b="' + b + '"/>';
   });
-  // Reference line at 1x (log2 = 0) — a real threshold, not a gridline. Its
-  // label sits ABOVE the plot so it can never collide with a tall bar.
+
+  // Two reference lines: 1x (perfect seed) and the actual geomean. The GAP
+  // between them is the seed's bias — the point of the chart. Labels are
+  // stacked at different heights above the plot so they stay readable even
+  // when the two lines coincide (the open seed sits at 0.99x, i.e. on 1x).
+  const clampX = (px, w) => Math.max(M.left, Math.min(px, M.left + PW - w));
   const zx = x(-meta.binMin);
-  s += '<line x1="' + zx + '" x2="' + zx + '" y1="' + (M.top - 8) + '" y2="' + (M.top + PH) +
-       '" stroke="var(--text-secondary)" stroke-width="1.5"/>';
-  s += '<text class="tick" x="' + (zx + 5) + '" y="' + (M.top - 12) + '" fill="var(--text-secondary)">1\u00d7 perfect seed</text>';
+  const gx = x(Math.log2(ser.stats.geomean) - meta.binMin);
+  // Each rule gets a surface ring so it stays legible where it crosses bars —
+  // the geomean line is the series' own hue and would otherwise vanish into them.
+  const rule = (px, color) =>
+    '<line x1="' + px + '" x2="' + px + '" y1="' + (M.top - 8) + '" y2="' + (M.top + PH) +
+    '" stroke="var(--surface-1)" stroke-width="4.5"/>' +
+    '<line x1="' + px + '" x2="' + px + '" y1="' + (M.top - 8) + '" y2="' + (M.top + PH) +
+    '" stroke="' + color + '" stroke-width="1.5"/>';
+  s += rule(zx.toFixed(2), 'var(--text-secondary)');
+  s += '<text class="tick" x="' + clampX(zx + 5, 74) + '" y="' + (M.top - 26) +
+       '" fill="var(--text-secondary)">1\u00d7 perfect seed</text>';
+  s += rule(gx.toFixed(2), COLORS[si]);
+  s += '<text class="tick" x="' + clampX(gx + 5, 84).toFixed(2) + '" y="' + (M.top - 12) + '" fill="' + COLORS[si] +
+       '">' + ser.stats.geomean.toFixed(2) + '\u00d7 typical</text>';
+
   // Baseline + x ticks (every 2nd boundary keeps labels from colliding).
   s += '<line x1="' + M.left + '" x2="' + (M.left + PW) + '" y1="' + (M.top + PH) + '" y2="' + (M.top + PH) +
        '" stroke="var(--axis)" stroke-width="1"/>';
@@ -187,19 +200,26 @@ function facetSvg(fc) {
     s += '<text class="tick" x="' + px + '" y="' + (M.top + PH + 15) + '" text-anchor="middle">' + fmtRatio(k) + '</text>';
   }
   s += '<text class="tick" x="' + (M.left + PW / 2) + '" y="' + (M.top + PH + 34) +
-       '" text-anchor="middle">previous-day magnitude \u00f7 current-day opening magnitude</text>';
+       '" text-anchor="middle">previous-day gamma \u00f7 current-day opening gamma</text>';
   // y-axis title, clear of the topmost tick label.
   s += '<text class="tick" x="' + (M.left - 30) + '" y="' + (M.top - 12) + '" text-anchor="start">days</text>';
   return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img">' + s + '</svg>';
 }
 
-document.getElementById('grid').innerHTML = DATA.facets.map(fc => {
-  // Direct-label the number that decides the question, per facet.
-  const note = fc.series.map((s, i) =>
-    '<b style="color:' + COLORS[i] + '">' + s.stats.geomean.toFixed(2) + '\u00d7</b> typical, ' +
-    Math.round(s.stats.within2x * 100) + '% within 2\u00d7'
-  ).join(' &nbsp;\u00b7&nbsp; ');
-  return '<div class="card"><h2>' + fc.label + '</h2><p class="note">' + note + '</p>' + facetSvg(fc) + '</div>';
+// Two charts, gamma only: one seeded from the previous day's open, one from its
+// close. Single series each, so no legend box — the card title names it.
+const CHARTS = [
+  { si: 0, title: "Seeded from the previous day's OPEN", sub: 'first 3 fresh ticks of the previous session' },
+  { si: 1, title: "Seeded from the previous day's CLOSE", sub: 'last 3 fresh ticks of the previous session' },
+];
+const gamma = DATA.facets.find(f => f.factor === meta.chartFactor);
+document.getElementById('grid').innerHTML = CHARTS.map(c => {
+  const ser = gamma.series[c.si];
+  const note = '<b style="color:' + COLORS[c.si] + '">' + ser.stats.geomean.toFixed(2) + '\u00d7</b> typical &nbsp;\u00b7&nbsp; ' +
+    '<b>' + Math.round(ser.stats.within2x * 100) + '%</b> within 2\u00d7 &nbsp;\u00b7&nbsp; ' +
+    'p10\u2013p90 ' + ser.stats.p10.toFixed(2) + '\u00d7 to ' + ser.stats.p90.toFixed(2) + '\u00d7 &nbsp;\u00b7&nbsp; n=' + ser.stats.n;
+  return '<div class="card"><h2>' + c.title + '</h2><p class="note">' + c.sub + '</p><p class="note">' + note + '</p>' +
+    chartSvg(ser, c.si) + '</div>';
 }).join('');
 
 // Tooltip — enhances; every value is also in the table view below.
@@ -207,9 +227,8 @@ const tt = document.getElementById('tt');
 document.getElementById('grid').addEventListener('mousemove', (e) => {
   const h = e.target.closest('.hit');
   if (!h) { tt.style.opacity = 0; return; }
-  const fc = DATA.facets.find(f => f.factor === h.dataset.f);
   const si = +h.dataset.s, b = +h.dataset.b;
-  const ser = fc.series[si];
+  const ser = gamma.series[si];
   const lo = meta.binMin + b, count = ser.bins[b];
   tt.innerHTML = '<div class="t">' + fmtRatio(lo) + ' \u2013 ' + fmtRatio(lo + 1) + '</div>' +
     '<div class="r"><span class="sw" style="background:' + COLORS[si] + '"></span>' + ser.label + '</div>' +
