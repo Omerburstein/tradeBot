@@ -85,5 +85,19 @@ function resolveBackfillStepMin(): number {
 }
 export const BACKFILL_STEP_MIN = resolveBackfillStepMin();
 
+/**
+ * Minute step for PRE-MARKET (before 09:30 ET) backfill slot selection.
+ * Pre-open frames are sparse and low-signal, so the default samples every
+ * 5 minutes even when the RTH step (BACKFILL_STEP_MIN) is 1. Only relevant
+ * when the backfill window starts before 09:30 AND pre-market retention is
+ * enabled (PREMARKET_GREEKS=true) — otherwise the selected pre-open slots
+ * are dropped by the retention gate at insert time.
+ */
+function resolvePremarketStepMin(): number {
+  const raw = Number.parseInt((process.env.PREMARKET_STEP_MIN ?? '').trim(), 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5;
+}
+export const PREMARKET_STEP_MIN = resolvePremarketStepMin();
+
 // Re-exported so index.ts can keep its old single-import shape.
 export { isInActivePollingWindow } from './dates.js';

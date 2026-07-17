@@ -105,6 +105,28 @@ export const MARKET_OPEN_MIN = 9 * 60 + 30;
  *  (ends 09:40+) all still pass. */
 export const FIRST_GREEK_SLOT_END_MIN = 9 * 60 + 31;
 
+/** ET pre-market lower bound (09:00) — 30 minutes before the 09:30 bell.
+ *  Used for the Greek/position retention gate ONLY when pre-market capture
+ *  is enabled (see `greekLowerBoundMin`). Spot / Market Tide never use this. */
+export const PREMARKET_GREEK_MIN = 9 * 60;
+
+/**
+ * Resolve the Greek/position retention lower bound (minutes since ET
+ * midnight). When the env flag `PREMARKET_GREEKS=true` is set — the
+ * staging pre-market backfill switch — retention drops to 09:00 so the
+ * 09:00–09:30 pre-open frames are kept; otherwise the normal 09:31
+ * first-post-bell bound applies. Read from process.env at CALL time (not
+ * module load) so a run or a test can toggle it without re-importing, and
+ * so dates.ts stays free of the config.ts import that would boot env
+ * validation. Only the Greek/position gate (`isRthRow` → default bound)
+ * is affected; spot / Market Tide pass `MARKET_OPEN_MIN` explicitly and so
+ * remain gated at 09:30.
+ */
+function greekLowerBoundMin(): number {
+  const on = (process.env.PREMARKET_GREEKS ?? '').trim().toLowerCase() === 'true';
+  return on ? PREMARKET_GREEK_MIN : FIRST_GREEK_SLOT_END_MIN;
+}
+
 /**
  * Returns true when a captured slot's END time (its captured_at instant)
  * belongs to the data we persist: Mon-Fri, up to 16:00 ET inclusive,
@@ -112,7 +134,8 @@ export const FIRST_GREEK_SLOT_END_MIN = 9 * 60 + 31;
  *
  *   - Greeks / positions (1-min snapshots, captured_at = minute END) →
  *     09:31, excluding the opening minute that straddles the bell. This is
- *     the default (`FIRST_GREEK_SLOT_END_MIN`).
+ *     the default (`FIRST_GREEK_SLOT_END_MIN`), or 09:00 when the
+ *     `PREMARKET_GREEKS` env flag is set (see `greekLowerBoundMin`).
  *   - Spot / Market Tide (5-min instants) → pass `MARKET_OPEN_MIN` (09:30) so
  *     the 09:30 and 09:35 points are kept — they're real prices at the bell,
  *     not a straddling slot.
@@ -122,7 +145,7 @@ export const FIRST_GREEK_SLOT_END_MIN = 9 * 60 + 31;
  */
 export function isPersistableSlot(
   d: Date,
-  lowerBoundMin: number = FIRST_GREEK_SLOT_END_MIN,
+  lowerBoundMin: number = greekLowerBoundMin(),
 ): boolean {
   const { weekday, minutesSinceMidnight } = etParts(d);
   if (weekday === 'Sat' || weekday === 'Sun') return false;

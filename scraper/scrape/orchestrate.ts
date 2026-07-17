@@ -6,7 +6,8 @@
  * one place. (The `discoverEndpoints` dev helper lives in discovery.ts.)
  */
 import { type Page } from 'playwright';
-import { BACKFILL_STEP_MIN, UW_PERISCOPE_URL } from '../core/config.js';
+import { BACKFILL_STEP_MIN, PREMARKET_STEP_MIN, UW_PERISCOPE_URL } from '../core/config.js';
+import { MARKET_OPEN_MIN } from '../core/dates.js';
 import {
   insertSnapshots,
   insertPositions,
@@ -123,12 +124,20 @@ async function scrapeAndStoreDay(
   // and the next trading day (1DTE). Any failure is NON-FATAL: the per-date
   // Market Tide / spot / Cone (captured above + stored below) don't depend
   // on the Greeks, so we log, skip, and still persist those datasets.
-  const stepMin = BACKFILL_STEP_MIN;
+  // Two cadences: PRE-MARKET (before 09:30 ET) samples every PREMARKET_STEP_MIN
+  // (default 5), RTH (09:30 onward) samples every BACKFILL_STEP_MIN. This keeps
+  // pre-open frames sparse while allowing full 1-min resolution during the
+  // session. Pre-open slots are still dropped by the retention gate at insert
+  // time unless PREMARKET_GREEKS=true — this only governs which instants are
+  // fetched, not which are kept.
+  const rthStepMin = BACKFILL_STEP_MIN;
+  const premarketStepMin = PREMARKET_STEP_MIN;
   try {
     const stamps = await fetchPeriscopeTimestamps(page, caps, date);
 
     // Select the instants to capture: within the requested ET window and on
-    // the step grid (e.g. step 10 → :00/:10/:20/… boundaries only).
+    // the step grid (e.g. step 10 → :00/:10/:20/… boundaries only), with the
+    // step depending on whether the minute is pre-open or in-session.
     const slots: Array<{ iso: string; ms: number }> = [];
     for (const s of stamps) {
       const ms = Date.parse(s);
@@ -137,11 +146,12 @@ async function scrapeAndStoreDay(
       if (hhmm < startNorm || hhmm > endNorm) continue;
       const totalMin =
         Number.parseInt(hhmm.slice(0, 2), 10) * 60 + Number.parseInt(hhmm.slice(3), 10);
+      const stepMin = totalMin < MARKET_OPEN_MIN ? premarketStepMin : rthStepMin;
       if (totalMin % stepMin !== 0) continue;
       slots.push({ iso: new Date(ms).toISOString(), ms });
     }
     logger.info(
-      { date, stepMin, publishedMinutes: stamps.length, slotsSelected: slots.length },
+      { date, rthStepMin, premarketStepMin, publishedMinutes: stamps.length, slotsSelected: slots.length },
       'scrapeAndStoreDay: slot instants resolved',
     );
 

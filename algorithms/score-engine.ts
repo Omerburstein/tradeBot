@@ -7,20 +7,23 @@
  *      same-direction pressure (no netting between opposite-sign strikes);
  *      direction comes from the strike's position vs spot. Positive gamma is
  *      weighted slightly higher than negative via positiveGammaBias.
- *   2. Net MM positions — directional positioning pressure per strike, but
- *      only where gamma is strong at the SAME strike. The positions LEVEL is
- *      taken as a RAW absolute magnitude (no netting, no per-strike power) —
- *      exactly like gamma's level; the only compression is the log applied at
- *      the normalize step. Direction comes from position vs spot (no positive
- *      bias — gamma only).
+ *   2. Net MM positions — directional positioning pressure per strike, gated
+ *      by gamma: a strike's positions count only where its gamma is strong at
+ *      the SAME strike (a THRESHOLD, not a multiplier — once the gate passes,
+ *      positions enter at full magnitude with no gamma-strength weighting). The
+ *      positions LEVEL is taken as a RAW absolute magnitude (no netting, no
+ *      per-strike power) — exactly like gamma's level; the only compression is
+ *      the log applied at the normalize step. Direction comes from position vs
+ *      spot (no positive bias — gamma only).
  *   3. dGamma/dt — rate of change of gamma *magnitude* (|gamma|) across
  *      successive snapshots, matching the absolute-magnitude GEX level. The
  *      delta of |gamma| is signed (its sign is momentum — a wall building vs
  *      bleeding, including a negative-gamma strike shrinking toward zero), then
  *      pointed by the strike's side of spot.
  *   4. dPositions/dt — rate of change of net MM positions *magnitude*
- *      (|positions|, same gating), matching the absolute positions LEVEL. The
- *      delta of |positions| is signed momentum, then pointed by the side of spot.
+ *      (|positions|, same gamma gate — threshold only, no gamma-strength
+ *      weighting), matching the absolute positions LEVEL. The delta of
+ *      |positions| is signed momentum, then pointed by the side of spot.
  *   5. Distance weighting — further strikes contribute MORE score
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
@@ -127,10 +130,13 @@ export function computeScore(
     const gammaBias = s.gamma >= 0 ? config.positiveGammaBias : 1.0;
     gexRaw += Math.pow(Math.abs(s.gamma), config.pGamma) * gammaBias * sign * dWeight;
 
-    // Factor 2: Net MM positions exposure — gated and weighted by gamma.
-    // A strike's positions only count when its gamma is strong relative to
-    // the window max. The per-strike magnitude is taken RAW (linear, no power) —
-    // like gamma's level, the only compression is the log at the normalize step
+    // Factor 2: Net MM positions exposure — GATED by gamma, not weighted by it.
+    // A strike's positions count only when its gamma is strong relative to the
+    // window max (|gamma| ≥ positionsGammaGate·maxAbsGamma); gamma is a pure
+    // threshold here — once the gate passes, the strike's positions enter at
+    // full magnitude, with no gamma-strength multiplier folded into the value.
+    // The per-strike magnitude is taken RAW (linear, no power) — like gamma's
+    // level, the only compression is the log at the normalize step
     // (normalizeToScale), so a large print is tamed at the aggregate scale
     // rather than saturated strike-by-strike.
     const gammaStrength = maxAbsGamma > 0 ? Math.abs(s.gamma) / maxAbsGamma : 0;
@@ -140,7 +146,7 @@ export function computeScore(
       // Absolute magnitude (no netting): position size adds pressure regardless
       // of its own sign; direction comes from `sign`. No positive bias here —
       // the bias is gamma-only.
-      positionsRaw += Math.abs(s.positions) * gammaStrength * sign * dWeight;
+      positionsRaw += Math.abs(s.positions) * sign * dWeight;
     }
 
     // Factors 3 & 4: rate-of-change of gamma and positions across snapshots
@@ -164,7 +170,7 @@ export function computeScore(
           // delta's sign is momentum (preserved through signedPow); `sign` then
           // points it by the strike's side of spot.
           const deltaPositions = Math.abs(s.positions) - Math.abs(prev.positions);
-          dPositionsRaw += signedPow(deltaPositions, config.pDPositions) * gammaStrength * sign * dWeight;
+          dPositionsRaw += signedPow(deltaPositions, config.pDPositions) * sign * dWeight;
         }
       }
     }

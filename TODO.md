@@ -21,7 +21,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   per slot and down-weight (most faithful) vs. score the two expiries separately
   and blend composites.
 
-- [ ] **3. Positions factor: use gamma as a threshold, not a multiplier.**
+- [x] **3. Positions factor: use gamma as a threshold, not a multiplier.**
   Change the positions factor so it no longer calculates the factor *with* gamma.
   Gamma should only act as a threshold (gate) for whether the positions factor
   applies at all, rather than being folded into the factor's value.
@@ -39,6 +39,13 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   input). The loader should query SPX rows aligned to each snapshot's
   `captured_at` slot so the algo can evaluate conditions at the moment of
   decision without look-ahead.
+
+- [ ] **5. Measure correlation between the 30 min pre-open window and the first 10 min after open.**
+  Check the correlation between the 30 minutes before market open (the pre-bell
+  active polling window, ~09:00–09:30 ET) and the 10 minutes after the open
+  (~09:30–09:40 ET). Determine whether pre-open Greek/positioning signals predict
+  the opening move, so we know if the early window carries usable signal for the
+  algo.
 
 ## Data
 

@@ -132,6 +132,22 @@ check('persist: 08:00 premarket excluded', !isPersistableSlot(monWinter('08:00:0
 check('persist: Saturday excluded', !isPersistableSlot(saturday('12:30:00')));
 check('persist: DST summer 10:00 EDT included', isPersistableSlot(monSummer('10:00:00')));
 
+// 2c. Pre-market gate — PREMARKET_GREEKS=true drops the Greek/position lower
+//     bound to 09:00 (staging pre-open capture). Toggled via process.env and
+//     read at call time; restore after so later checks see the default.
+{
+  const prev = process.env.PREMARKET_GREEKS;
+  process.env.PREMARKET_GREEKS = 'true';
+  check('premarket ON: 09:00 (30 min pre-bell) included', isPersistableSlot(monWinter('09:00:00')));
+  check('premarket ON: 09:29 pre-open minute included', isPersistableSlot(monWinter('09:29:00')));
+  check('premarket ON: 08:59 (before window) excluded', !isPersistableSlot(monWinter('08:59:00')));
+  check('premarket ON: Saturday 09:15 still excluded', !isPersistableSlot(saturday('09:15:00')));
+  process.env.PREMARKET_GREEKS = 'false';
+  check('premarket OFF: 09:00 excluded (default 09:31 bound)', !isPersistableSlot(monWinter('09:00:00')));
+  if (prev === undefined) delete process.env.PREMARKET_GREEKS;
+  else process.env.PREMARKET_GREEKS = prev;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // 3. 10-min slot end — expectedWindowEnd (which closed slot to expect)
 // ─────────────────────────────────────────────────────────────────────
