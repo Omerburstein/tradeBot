@@ -279,9 +279,11 @@ export interface AlgoConfig {
   wDPositions: number;
 
   // ── Non-linearity (powers) ──
-  // Each factor input is passed through a sign-preserving power
-  // (signedPow(x, p) = sign(x)·|x|^p) before aggregation. p > 1 emphasizes
-  // large readings, p < 1 saturates them. Nothing is left exactly linear.
+  // Gamma and the two rate-of-change factors are passed through a sign-preserving
+  // power (signedPow(x, p) = sign(x)·|x|^p) before aggregation. p > 1 emphasizes
+  // large readings, p < 1 saturates them. The positions LEVEL is the exception:
+  // it is aggregated RAW (linear), with compression left to the log at the
+  // normalize step — mirroring how gamma's level is handled.
 
   /** Exponent on per-strike gamma. */
   pGamma: number;
@@ -293,8 +295,6 @@ export interface AlgoConfig {
   positiveGammaBias: number;
   /** Exponent on per-strike gamma change (dGamma/dt). */
   pDGamma: number;
-  /** Exponent on per-strike net positions (saturating, < 1). */
-  pPositions: number;
   /** Exponent on per-strike positions change (dPositions/dt). */
   pDPositions: number;
   /** Exponent on normalized strike distance in the distance-weight ramp. */
@@ -373,7 +373,6 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   pGamma: 1.2,
   positiveGammaBias: 1.1,
   pDGamma: 1.1,
-  pPositions: 0.5,
   pDPositions: 0.5,
   pDistance: 1.5,
   distanceWeightSpan: 2.0,

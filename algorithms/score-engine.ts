@@ -8,10 +8,11 @@
  *      direction comes from the strike's position vs spot. Positive gamma is
  *      weighted slightly higher than negative via positiveGammaBias.
  *   2. Net MM positions — directional positioning pressure per strike, but
- *      only where gamma is strong at the SAME strike, and compressed
- *      non-linearly so an extremely large position print can't dominate. The
- *      positions LEVEL is also taken as an absolute magnitude (no netting);
- *      direction comes from position vs spot (no positive bias — gamma only).
+ *      only where gamma is strong at the SAME strike. The positions LEVEL is
+ *      taken as a RAW absolute magnitude (no netting, no per-strike power) —
+ *      exactly like gamma's level; the only compression is the log applied at
+ *      the normalize step. Direction comes from position vs spot (no positive
+ *      bias — gamma only).
  *   3. dGamma/dt — rate of change of gamma *magnitude* (|gamma|) across
  *      successive snapshots, matching the absolute-magnitude GEX level. The
  *      delta of |gamma| is signed (its sign is momentum — a wall building vs
@@ -126,9 +127,10 @@ export function computeScore(
 
     // Factor 2: Net MM positions exposure — gated and weighted by gamma.
     // A strike's positions only count when its gamma is strong relative to
-    // the window max; positions are shaped by pPositions (saturating < 1) so
-    // an extremely large print doesn't dominate (size beyond a point adds
-    // little signal).
+    // the window max. The per-strike magnitude is taken RAW (linear, no power) —
+    // like gamma's level, the only compression is the log at the normalize step
+    // (normalizeToScale), so a large print is tamed at the aggregate scale
+    // rather than saturated strike-by-strike.
     const gammaStrength = maxAbsGamma > 0 ? Math.abs(s.gamma) / maxAbsGamma : 0;
     const positionsCounts = gammaStrength >= config.positionsGammaGate;
 
@@ -136,7 +138,7 @@ export function computeScore(
       // Absolute magnitude (no netting): position size adds pressure regardless
       // of its own sign; direction comes from `sign`. No positive bias here —
       // the bias is gamma-only.
-      positionsRaw += Math.pow(Math.abs(s.positions), config.pPositions) * gammaStrength * sign * dWeight;
+      positionsRaw += Math.abs(s.positions) * gammaStrength * sign * dWeight;
     }
 
     // Factors 3 & 4: rate-of-change of gamma and positions across snapshots

@@ -21,6 +21,11 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   per slot and down-weight (most faithful) vs. score the two expiries separately
   and blend composites.
 
+- [ ] **3. Positions factor: use gamma as a threshold, not a multiplier.**
+  Change the positions factor so it no longer calculates the factor *with* gamma.
+  Gamma should only act as a threshold (gate) for whether the positions factor
+  applies at all, rather than being folded into the factor's value.
+
 ## Training / Backtesting
 
 - [ ] **2. Feed SPX price data from DB as the signal input for backtest and tune.**

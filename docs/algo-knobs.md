@@ -43,7 +43,6 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `pGamma` | `1.2` | Exponent on per-strike gamma (>1 emphasizes big readings) |
 | `positiveGammaBias` | `1.1` | Extra weight on positive gamma vs negative |
 | `pDGamma` | `1.1` | Exponent on gamma change |
-| `pPositions` | `0.5` | Exponent on positions (<1 saturates) |
 | `pDPositions` | `0.5` | Exponent on positions change |
 | `pDistance` | `1.5` | Exponent on strike distance in the distance-weight ramp |
 | `distanceWeightSpan` | `2.0` | Span of the distance-weight ramp |

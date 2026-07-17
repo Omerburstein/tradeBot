@@ -74,12 +74,17 @@ meaningful gamma (≥ 30 % of the window's peak), and is then scaled by
 to hedge there — so they are dropped entirely.
 
 ### Non-linear shaping (`^p` / `signedPow`)
-Each raw input is passed through a power so nothing is purely linear:
+Gamma level, gamma momentum, and positions momentum are passed through a power:
 - `p > 1` **emphasizes** large readings (gamma level, gamma momentum).
-- `p < 1` **saturates** them (position size — beyond a point, more size adds
+- `p < 1` **saturates** them (position *change* — beyond a point, more adds
   little extra signal).
 - `signedPow(x, p) = sign(x)·|x|^p` preserves the sign for the *change* factors,
   because there the sign is the momentum and must be kept.
+
+The positions **level** is the exception: it is aggregated **raw** (linear,
+no per-strike power), exactly like the gamma level. Its only compression is the
+log at the normalize step (§4), which tames a monster print at the aggregate
+scale rather than saturating it strike-by-strike.
 
 ---
 
@@ -121,16 +126,18 @@ dGammaRaw += signedPow(|gamma| − |prevGamma|, pDGamma) · sign · dWeight
 
 ### 3.3 Net MM positions  →  `positionsZ` (weight `wPositions`, default **0.18**)
 ```
-positionsRaw += |positions|^pPositions · gammaStrength · sign · dWeight   (gated)
+positionsRaw += |positions| · gammaStrength · sign · dWeight   (gated)
 ```
 - **Represents:** net market-maker contracts stacked at each strike — a second,
   independent read on where dealers are exposed.
 - **Why chosen:** it confirms or tempers the gamma read; when big positions sit
   on the same gamma walls, conviction rises. Weighted below gamma (0.18) because
   it is noisier and only meaningful near gamma.
-- **How computed:** absolute position size **saturated** by `pPositions = 0.5`
-  (a monster print is not 10× the signal of a large one), gated + scaled by
-  `gammaStrength`, directioned and distance-weighted.
+- **How computed:** **raw** absolute position size (linear, no per-strike power —
+  mirroring the gamma level), gated + scaled by `gammaStrength`, directioned and
+  distance-weighted. Compression is left to the log at the normalize step
+  (§4), so a monster print is tamed at the aggregate scale rather than
+  saturated strike-by-strike.
 
 ### 3.4 dPositions/dt — positions momentum  →  `dPositionsZ` (weight `wDPositions`, default **0.12**)
 ```
@@ -232,7 +239,6 @@ The composite is a **conviction gate**, not a standalone trigger:
 | `pGamma` | 1.2 | emphasize large gamma |
 | `positiveGammaBias` | 1.1 | slight boost to positive gamma |
 | `pDGamma` | 1.1 | emphasize large gamma change |
-| `pPositions` | 0.5 | saturate position size |
 | `pDPositions` | 0.5 | saturate position change |
 | `pDistance` | 1.5 | curvature of the distance ramp |
 | `distanceWeightSpan` | 2.0 | edge weighs up to 3× ATM |
