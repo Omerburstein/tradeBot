@@ -86,6 +86,12 @@ db/                       # Neon Postgres persistence layer (repo-root sibling o
 - Gamma is still the **anchor for persistence**: a strike's Charm/Vanna rows are kept only when that strike's |gamma| clears the threshold (see `db/snapshots.ts` `filterInsertable` and `exposuresToRows`)
 - `delta` arrives from the new endpoint but is NOT persisted (DB `panel` CHECK allows gamma/charm/vanna)
 
+### Greek-Frame Sanity (stale-underlying defect)
+- **UW occasionally serves Greeks computed against a STALE underlying** — for the first ~2h of 2026-05-26 (long-weekend gap-up), gamma was priced off the prior close (~7480) while spot was ~7515. Live/evolving frames, correct minute+expiry, **positions matched byte-for-byte** — only the Greeks were wrong. Silent, plausible, self-consistent. The morning-block cases cluster on post-long-weekend gap-ups (2026-01-20 post-MLK, 02-17 post-Presidents', 05-26 post-Memorial); isolated single slots occur on ordinary days too.
+- **Repaired 2026-07-17**: full-history audit found 56 corrupt slots across 15 days (2026-01 → 2026-06). Days still inside UW's periscope history floor were re-backfilled (UW recomputes the frames after the fact → a re-fetch returns correct data); days UW no longer serves, or specific slots UW still serves stale (06-09/10/11), were **deleted as gaps** — a gap is strictly better than a corrupt frame the algo would train on. Any re-tune must post-date this cleanup.
+- **Invariant used to detect it** (`scraper/core/frame-quality.ts`): per-CONTRACT gamma (`|gamma| / |net position|`) peaks at the money for any expiry/IV/skew — a Black-Scholes kernel property. Gamma *exposure* alone can't check this (open interest piles up anywhere); dividing by net position cancels positioning and recovers the kernel, whose peak must sit within ~25 pts of an INDEPENDENT spot (spot_prices / cone apex — never the frame). Do NOT use "max-|gamma| strike near spot": it both misses the defect and false-positives on healthy data.
+- Scan stored history any time with `npm run audit:frames` (read-only, exits 1 on any corrupt slot). Regression fixtures + threshold calibration live in `scraper/tests/frame-quality.test.ts` (pre-push gate).
+
 ### Scraping Path Consistency
 
 All scraping paths — the live tick (`panels.ts`) and every backfill path (`orchestrate.ts`: single-date, range, walk-back) — **must behave identically** for any shared concern. This is enforced structurally:
