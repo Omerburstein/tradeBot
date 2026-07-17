@@ -94,7 +94,6 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   // Gates / clamps.
   positionsGammaGate: { min: 0.10, max: 0.60 },
   zClamp: { min: 2.0, max: 5.0 },
-  zStdFloorFrac: { min: 0.0, max: 0.5 },
 
   // Signal thresholds.
   entryThreshold: { min: 0.8, max: 2.5 },

@@ -48,7 +48,7 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `pDistance` | `1.5` | Exponent on strike distance in the distance-weight ramp |
 | `distanceWeightSpan` | `2.0` | Span of the distance-weight ramp |
 | `positionsGammaGate` | `0.30` | Min gamma strength (0–1) for a strike's positions to count |
-| `zClamp` | `3.5` | Hard cap on each factor z-score (and the composite) |
+| `zClamp` | `3.5` | Hard cap on each normalized factor (and the composite). Backstop — binds only past ~10.3× typical magnitude |
 
 ### Entry / exit thresholds (`DEFAULT_CONFIG`)
 | Knob | Current | Meaning |
@@ -75,7 +75,15 @@ bar the composite z must clear.
 | Knob | Current | Meaning |
 |------|---------|---------|
 | `strikeWindow` | `120` | Only consider strikes within ±this many pts of spot |
-| `zScoreLookback` | `20` | Number of past snapshots for the z-score baseline |
+| `zScoreLookback` | `20` | Number of past same-day snapshots defining each factor's magnitude scale |
+
+**Factor normalization is not a z-score.** Each factor is `sign(r)·log2(1+|r|)`
+where `r = raw / meanAbs(recent raws)` — history sets the **scale** only and never
+re-centers the reading, so a factor keeps its raw sign and reads as "times the
+day's typical magnitude" (1.0 = typical, 3.46 = 10×). See
+[composite-score.md](composite-score.md) §4. The old `zStdFloorFrac` knob is gone
+(it floored a standard deviation that no longer exists), and thresholds tuned
+under the previous mean-centered scheme need re-tuning.
 
 ### Cone-breakout mode (`DEFAULT_CONFIG.coneBreakout`)
 A distinct entry/exit regime, **off by default**. When `enabled`, it *replaces*

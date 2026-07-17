@@ -146,25 +146,54 @@ dPositionsRaw += signedPow(positions − prevPositions, pDPositions) · gammaStr
 
 ---
 
-## 4. From raw factors to z-scores (normalization)
+## 4. From raw factors to normalized factors
 
 Raw factor sums are not comparable across days or across the session (their
 scale drifts with total open interest, spot level, etc.). So each raw is
-converted to a **z-score against its own recent history**:
+measured against the **typical magnitude of its own recent history**, then
+log-compressed:
 
 ```
-z = (raw − mean(recent raws)) / std(recent raws)
+scale = meanAbs(recent raws)                 // the factor's typical size
+ratio = raw / scale                          // "how many times typical"
+z     = sign(ratio) · log2(1 + |ratio|)      // compressed, then clamped
 ```
+
+> **This is NOT a statistical z-score.** Standard deviation plays no part. The
+> `gexZ` / `dGammaZ` / `positionsZ` / `dPositionsZ` names are retained for
+> continuity, but they mean *"how many times the day's typical magnitude, and in
+> which direction"* — not *"how many sigma from the day's mean"*.
+
+**Why not `(raw − mean) / std`?** Mean-centering measures deviation from the
+day's average, which **discards the raw factor's own sign**. On 2026-05-19 gamma
+sat persistently negative (gexRaw ≈ −1.1e5 all morning); at 13:00 a merely
+*less* negative reading of −4.9e4 scored **+2.14** — the composite turned bullish
+and cleared `entryThreshold` while gamma pressure was still bearish. Under
+scale normalization that same snapshot reads **−0.52**: still negative (gamma is
+bearish), at 0.44× the day's typical magnitude. Sign now tracks the market, and a
+10× spike reads as a 10× spike regardless of whether the day ran quiet or busy.
+
+**Why log-compress?** A plain ratio needs a large `zClamp` to let a 10× spike
+read as 10, and such a spike then swamps the other three factors. Compression
+keeps a 10× (→3.46) clearly above a 4× (→2.32) while both sit inside the ±3.5
+clamp. A reading at exactly the day's typical magnitude maps to exactly **1.0**,
+so the entry thresholds stay in a familiar range.
+
+| ratio (× typical) | 0.44 | 1.0 | 2.0 | 4.0 | 10.0 | 50.0 |
+|---|---|---|---|---|---|---|
+| normalized | 0.53 | 1.00 | 1.58 | 2.32 | 3.46 | 3.50 (clamped) |
 
 - **Rolling, same-day window.** The history is the `SignalGenerator`'s per-day
   `scoreHistory`, sliced to the last `zScoreLookback` (**20**) snapshots. A fresh
-  generator is created for every trading day, so the mean/std are **always** from
+  generator is created for every trading day, so the scale is **always** from
   the same day — never across a day boundary. (Do not feed a cross-day history.)
-- **Cold start.** With fewer than 3 samples the z-score is unreliable, so the
+- **Cold start.** With fewer than 3 samples there is no reliable scale, so the
   engine returns a clamped **sign estimate** (`+1` / `-1` / `0`) instead.
-- **Anomaly clamp.** Every z-score is hard-clamped to `±zClamp` (**±3.5**) so a
-  single freak snapshot cannot blow one factor out to z=10 and dominate the
-  composite.
+- **Degenerate history.** If every recent raw is ~0 there is no scale to measure
+  against, so the factor returns **0** rather than turning noise into a ±1 signal.
+- **Anomaly clamp.** Every factor is hard-clamped to `±zClamp` (**±3.5**). With
+  log compression this only binds past ~10.3× typical, so it is a backstop
+  rather than a routine limiter.
 
 ---
 
@@ -176,8 +205,9 @@ composite = 0.45·gexZ + 0.25·dGammaZ + 0.18·positionsZ + 0.12·dPositionsZ
 
 The weights (sum ≈ 1.0) encode the priority order established above:
 **gamma level ≫ gamma momentum > positions level > positions momentum.** Because
-each term is a clamped z-score in `[−3.5, +3.5]`, the composite lives roughly in
-`[−3.5, +3.5]` too, in σ-like units, with sign = direction.
+each term is clamped to `[−3.5, +3.5]`, the composite lives roughly in
+`[−3.5, +3.5]` too — in units of "times the day's typical magnitude" (log-compressed),
+with sign = direction.
 
 ### How it is consumed (see `algorithms/signal-generator.ts`)
 The composite is a **conviction gate**, not a standalone trigger:
@@ -207,9 +237,16 @@ The composite is a **conviction gate**, not a standalone trigger:
 | `pDistance` | 1.5 | curvature of the distance ramp |
 | `distanceWeightSpan` | 2.0 | edge weighs up to 3× ATM |
 | `positionsGammaGate` | 0.30 | min gamma strength for positions to count |
-| `zClamp` | 3.5 | per-factor / composite z-score clamp |
+| `zClamp` | 3.5 | per-factor / composite clamp (backstop; binds past ~10.3× typical) |
 | `strikeWindow` | 120 | ± SPX pts around spot considered |
-| `zScoreLookback` | 20 | trailing same-day snapshots for z-score |
+| `zScoreLookback` | 20 | trailing same-day snapshots defining each factor's scale |
 
 All are tuned via backtest (`npm run tune`); treat the defaults as a starting
 point, not gospel.
+
+> **Re-tune after the normalization change.** Every threshold (`entryThreshold`,
+> `strongEntryThreshold`, `exitFadeThreshold`, `reversalThreshold`) was fitted
+> when the factors meant "sigma from the day's mean". They now mean "times the
+> day's typical magnitude", so the tuned values do not transfer — run
+> `npm run tune` before trusting any stored model. The `zStdFloorFrac` knob was
+> removed: it floored a standard deviation that no longer exists.

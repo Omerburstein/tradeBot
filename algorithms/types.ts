@@ -311,22 +311,11 @@ export interface AlgoConfig {
   positionsGammaGate: number;
 
   /**
-   * Hard cap on the absolute value of every factor z-score (and therefore the
-   * composite). A one-off anomaly can't produce z=10 and dominate — it's
-   * clamped to ±zClamp.
+   * Hard cap on the absolute value of every normalized factor (and therefore the
+   * composite). Backstop only: `normalizeToScale` log-compresses, so a ratio has
+   * to exceed ~10.3× the day's typical magnitude before this binds.
    */
   zClamp: number;
-
-  /**
-   * Coefficient-of-variation floor on the z-score denominator. Early in the
-   * session the rolling lookback holds only a handful of tightly-clustered
-   * samples, so the sample std is near zero and any deviation explodes into a
-   * huge z (a warm-up artifact, not a real move). The std used for each factor's
-   * z is floored at `zStdFloorFrac × meanAbs(history)` — a fraction of the
-   * factor's own magnitude scale — so a degenerate spread can't produce a
-   * 50-sigma reading. `0` disables the floor (legacy behaviour).
-   */
-  zStdFloorFrac: number;
 
   /**
    * Z-score threshold for entries taken OUTSIDE the cone (TODO #9). Applies when
@@ -365,7 +354,7 @@ export interface AlgoConfig {
 
   /** Only consider strikes within this many points of spot. */
   strikeWindow: number;
-  /** Number of past ScoreComponents snapshots for z-score lookback. */
+  /** Number of past ScoreComponents snapshots used to derive each factor's scale. */
   zScoreLookback: number;
 
   /** Cone-breakout entry/exit mode (TODO #8). Off by default. */
@@ -391,7 +380,6 @@ export const DEFAULT_CONFIG: AlgoConfig = {
 
   positionsGammaGate: 0.30,
   zClamp: 3.5,
-  zStdFloorFrac: 0.20,
 
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,

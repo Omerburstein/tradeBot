@@ -25,6 +25,13 @@
  * from the composite score; the signal is built from gamma and net
  * market-maker positions and their respective rates of change.
  *
+ * NORMALIZATION IS NOT A Z-SCORE. Every factor is divided by the mean absolute
+ * magnitude of its own recent history and log-compressed — history sets the
+ * SCALE only, and never re-centers the reading (see normalizeToScale). The
+ * `…Z` field names are retained for continuity but no standard deviation is
+ * involved. Each normalized value therefore keeps its raw factor's sign, and
+ * reads roughly as "how many times the day's typical magnitude is this".
+ *
  * For a from-scratch explanation of what each of the four contributors means,
  * why it was chosen, how it is computed, and how the weights combine into the
  * composite, see docs/composite-score.md.
@@ -154,22 +161,23 @@ export function computeScore(
     }
   }
 
-  // Z-score normalization using a rolling lookback, hard-clamped to ±zClamp so
-  // a single anomalous snapshot can't blow the score out to z=10.
+  // Magnitude-ratio normalization using a rolling lookback, hard-clamped to
+  // ±zClamp. History supplies only the SCALE each factor is measured against —
+  // it never re-centers the reading, so the normalized value keeps the raw
+  // factor's own sign and direction (see normalizeToScale).
   //
   // SAME-DAY INVARIANT: `history` is the SignalGenerator's per-day scoreHistory,
   // and a fresh generator is created for every trading day (see backtest.ts).
-  // The mean/std are therefore always computed from the SAME day's snapshots —
+  // The scale is therefore always computed from the SAME day's snapshots —
   // never from prior days' "historical" data. The slice below is a trailing
   // window WITHIN that day; since history starts empty each day it can never
   // reach back across a day boundary. Do not feed a cross-day history here.
   const lookback = history.slice(-config.zScoreLookback);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
-  const floorFrac = config.zStdFloorFrac;
-  const gexZ = clamp(zScore(gexRaw, lookback.map((h) => h.gexRaw), floorFrac));
-  const dGammaZ = clamp(zScore(dGammaRaw, lookback.map((h) => h.dGammaRaw), floorFrac));
-  const positionsZ = clamp(zScore(positionsRaw, lookback.map((h) => h.positionsRaw), floorFrac));
-  const dPositionsZ = clamp(zScore(dPositionsRaw, lookback.map((h) => h.dPositionsRaw), floorFrac));
+  const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexRaw)));
+  const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaRaw)));
+  const positionsZ = clamp(normalizeToScale(positionsRaw, lookback.map((h) => h.positionsRaw)));
+  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, lookback.map((h) => h.dPositionsRaw)));
 
   // Composite weighted score
   const composite =
@@ -204,39 +212,46 @@ function signedPow(value: number, exponent: number): number {
 }
 
 /**
- * Compute z-score of a value against a history array.
+ * Normalize a raw factor against the magnitude SCALE of its recent history,
+ * log-compressed. This is deliberately NOT a statistical z-score — despite the
+ * `…Z` field names it produces, standard deviation plays no part.
  *
- * With fewer than 3 data points, returns a clamped sign estimate
- * (the z-score would be unreliable with so little history).
+ *   scale = meanAbs(history)                    // the factor's typical size
+ *   ratio = value / scale                       // "how many times typical"
+ *   out   = sign(ratio) · log2(1 + |ratio|)     // compressed
  *
- * `stdFloorFrac` applies a coefficient-of-variation floor to the denominator:
- * the std is floored at `stdFloorFrac × meanAbs(history)`. Early in the session
- * the lookback holds only a few tightly-clustered samples, so the raw std is
- * near zero and any deviation explodes into a huge z (a warm-up artifact). The
- * floor caps that blow-up at a fraction of the factor's own magnitude scale.
- * Pass `0` to disable (legacy behaviour).
+ * WHY NOT (value − mean) / std: mean-centering measures *deviation from the
+ * day's average*, which discards the raw factor's own sign. On a day where
+ * gamma sits persistently negative, a reading that is merely LESS negative than
+ * average scores POSITIVE — the composite turns bullish while gamma pressure is
+ * still bearish. Dividing by scale instead keeps the raw sign (negative gamma →
+ * negative score) and asks only "how large is this relative to the day's normal
+ * size", which is what the factor weights are meant to express.
+ *
+ * WHY LOG-COMPRESS: a plain ratio needs a big `zClamp` to let a 10× spike read
+ * as 10, and such a spike then swamps the other three factors. Compressing
+ * keeps a 10× (→3.46) clearly above a 4× (→2.32) while both stay inside the
+ * ±3.5 clamp, so genuine outliers remain distinguishable without dominating.
+ * A typical reading (ratio 1.0) maps to exactly 1.0, keeping the entry
+ * thresholds in a familiar range.
+ *
+ * With fewer than 3 data points there is no reliable scale yet, so a clamped
+ * sign estimate is returned (unchanged from the previous z-score behaviour).
  */
-function zScore(value: number, history: number[], stdFloorFrac = 0): number {
+function normalizeToScale(value: number, history: number[]): number {
   if (history.length < 3) {
-    // Not enough data for meaningful statistics — return clamped sign
+    // Not enough data for a meaningful scale — return clamped sign
     return value > 0 ? 1 : value < 0 ? -1 : 0;
   }
 
   const n = history.length;
-  const mean = history.reduce((a, b) => a + b, 0) / n;
-  const variance = history.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-  let std = Math.sqrt(variance);
+  const scale = history.reduce((a, b) => a + Math.abs(b), 0) / n;
 
-  // Coefficient-of-variation floor: keep a degenerate (near-zero) early-session
-  // spread from producing an explosive z. Scale is the factor's own mean
-  // magnitude over the lookback, so the floor tracks each factor's units.
-  if (stdFloorFrac > 0) {
-    const scale = history.reduce((a, b) => a + Math.abs(b), 0) / n;
-    std = Math.max(std, stdFloorFrac * scale);
-  }
+  // Degenerate history (every reading ~0): no scale to measure against. Falling
+  // back to a sign estimate here would turn numerical noise into a ±1 signal,
+  // so report "nothing to see" instead.
+  if (scale < 1e-10) return 0;
 
-  // Avoid division by zero when all values are identical
-  if (std < 1e-10) return 0;
-
-  return (value - mean) / std;
+  const ratio = value / scale;
+  return Math.sign(ratio) * Math.log2(1 + Math.abs(ratio));
 }

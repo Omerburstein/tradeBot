@@ -123,6 +123,118 @@ check(
   computeScore(snap([strike(6010, 80)]), null, [], DEFAULT_CONFIG).dGammaRaw === 0,
 );
 
+// ── 6. Normalization is magnitude-ratio, NOT a z-score ──
+// History supplies only the SCALE; it never re-centers the reading. These pin
+// the properties that distinguish normalizeToScale from (x − mean) / std.
+
+/** gexZ for `gamma` at a strike above spot, against a history of `hist` gexRaws. */
+function gexZAgainst(gamma: number, hist: number[]): number {
+  const history = hist.map((gexRaw) => ({
+    gexRaw,
+    gexZ: 0,
+    dGammaRaw: 0,
+    dGammaZ: 0,
+    positionsRaw: 0,
+    positionsZ: 0,
+    dPositionsRaw: 0,
+    dPositionsZ: 0,
+    composite: 0,
+  }));
+  return computeScore(snap([strike(6010, gamma)]), null, history, DEFAULT_CONFIG).gexZ;
+}
+
+// The regression this change exists to fix: on a persistently NEGATIVE-gamma
+// day, a merely less-negative reading must NOT read positive. Under the old
+// (x − mean) / std it scored ≈ +2.1 (bullish while gamma was still bearish).
+{
+  // Strike BELOW spot with positive gamma → negative gexRaw, like 2026-05-19.
+  const persistentlyNegative = [-9000, -10000, -11000, -10500, -9500];
+  const z = computeScore(
+    snap([strike(5990, 40)]), // small |gamma| → small negative gexRaw
+    null,
+    persistentlyNegative.map((gexRaw) => ({
+      gexRaw,
+      gexZ: 0,
+      dGammaRaw: 0,
+      dGammaZ: 0,
+      positionsRaw: 0,
+      positionsZ: 0,
+      dPositionsRaw: 0,
+      dPositionsZ: 0,
+      composite: 0,
+    })),
+    DEFAULT_CONFIG,
+  ).gexZ;
+  check(
+    'negative gexRaw against a negative history → gexZ stays NEGATIVE (no mean-centering)',
+    z < 0,
+    `got ${z}`,
+  );
+}
+
+// Sign follows the raw factor, never the history's centre.
+check(
+  'positive gexRaw against a positive history → gexZ > 0',
+  gexZAgainst(100, [5000, 5000, 5000, 5000]) > 0,
+  `got ${gexZAgainst(100, [5000, 5000, 5000, 5000])}`,
+);
+
+// Scale-invariance: the SAME multiple of the day's typical magnitude gives the
+// SAME normalized value, whether the day runs small or large. This is the
+// property the change was requested for — the multiplication drives the score,
+// not the absolute gamma.
+{
+  // gexRaw is monotonic in gamma, so build each history from its own baseline.
+  const small = computeScore(snap([strike(6010, 100)]), null, [], DEFAULT_CONFIG).gexRaw;
+  const large = computeScore(snap([strike(6010, 1000)]), null, [], DEFAULT_CONFIG).gexRaw;
+  // A 10× spike relative to a quiet day vs. relative to a busy day.
+  const zSmallDay = gexZAgainst(100, [small / 10, small / 10, small / 10, small / 10]);
+  const zLargeDay = gexZAgainst(1000, [large / 10, large / 10, large / 10, large / 10]);
+  check(
+    'scale-invariant: a 10× spike scores the same on a quiet day as on a busy day',
+    Math.abs(zSmallDay - zLargeDay) < 1e-9,
+    `got ${zSmallDay} vs ${zLargeDay}`,
+  );
+  // log2(1 + 10) ≈ 3.459 — the 10× case from the design discussion.
+  check(
+    '10× typical magnitude → gexZ ≈ log2(11) ≈ 3.46',
+    Math.abs(zSmallDay - Math.log2(11)) < 0.02,
+    `got ${zSmallDay}, want ≈ ${Math.log2(11)}`,
+  );
+}
+
+// A 10× spike must stay clearly ABOVE a 4× spike (the reason for log
+// compression rather than a raw ratio + clamp, which flattened both to 3.5).
+{
+  const base = computeScore(snap([strike(6010, 100)]), null, [], DEFAULT_CONFIG).gexRaw;
+  const z4 = gexZAgainst(100, Array(4).fill(base / 4));
+  const z10 = gexZAgainst(100, Array(4).fill(base / 10));
+  check('10× spike scores strictly above a 4× spike (not both clamped)', z10 > z4 + 0.5, `4×=${z4}, 10×=${z10}`);
+  check('both a 4× and 10× spike stay within ±zClamp', z4 < DEFAULT_CONFIG.zClamp && z10 < DEFAULT_CONFIG.zClamp, `4×=${z4}, 10×=${z10}`);
+}
+
+// A reading at exactly the day's typical magnitude reads 1.0 — keeps
+// entryThreshold (1.5) meaning "1.5× typical" and in a familiar range.
+{
+  const base = computeScore(snap([strike(6010, 100)]), null, [], DEFAULT_CONFIG).gexRaw;
+  const z = gexZAgainst(100, Array(4).fill(base));
+  check('a reading at exactly typical magnitude → gexZ === 1.0', Math.abs(z - 1.0) < 1e-9, `got ${z}`);
+}
+
+// Degenerate history (all ~zero) must report "nothing to see", not a ±1 sign.
+check(
+  'all-zero history → gexZ === 0 (noise never becomes a ±1 signal)',
+  gexZAgainst(100, [0, 0, 0, 0]) === 0,
+  `got ${gexZAgainst(100, [0, 0, 0, 0])}`,
+);
+
+// Cold start (<3 samples) still falls back to a clamped sign estimate.
+check(
+  'cold start (2 samples) → gexZ === +1 sign estimate',
+  gexZAgainst(100, [5000, 5000]) === 1,
+  `got ${gexZAgainst(100, [5000, 5000])}`,
+);
+
 // ─────────────────────────────────────────────────────────────────────
 logger.info('────────────────────────────────────────────');
 if (failures.length === 0) {
