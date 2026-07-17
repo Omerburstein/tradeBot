@@ -131,11 +131,14 @@ export function isPersistableSlot(
 
 /**
  * Returns true when the given UTC instant is inside the scraper's
- * active polling window: Mon-Fri, 09:21-16:14 ET. DST-aware.
+ * active polling window: Mon-Fri, 09:00-16:14 ET. DST-aware.
  *
  * Window bounds:
- *   - 09:21 ET — earliest a 10-min slot ending at 09:20 could appear
- *     in UW's "Latest" panel (publication lag is typically 1-3 min).
+ *   - 09:00 ET — 30 minutes before the 09:30 opening bell, so the
+ *     scraper is already awake and polling as the first pre-open
+ *     periscope frames publish. (The persistence gate still starts at
+ *     09:31 for Greeks / 09:30 for spot — see `isPersistableSlot` — so
+ *     pre-open ticks warm the loop without corrupting the retained set.)
  *   - 16:14 ET — latest tick that can still capture the debrief slot
  *     ("15:50 - 16:00") within the auto-playbook's 16:15 ET wallclock
  *     ceiling. Beyond this the scraper has nothing useful to do.
@@ -147,7 +150,7 @@ export function isInActivePollingWindow(d: Date): boolean {
   const { weekday, minutesSinceMidnight } = etParts(d);
   if (weekday === 'Sat' || weekday === 'Sun') return false;
   return (
-    minutesSinceMidnight >= 9 * 60 + 21 && minutesSinceMidnight <= 16 * 60 + 14
+    minutesSinceMidnight >= 9 * 60 && minutesSinceMidnight <= 16 * 60 + 14
   );
 }
 

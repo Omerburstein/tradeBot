@@ -81,11 +81,12 @@ const sunday = (hms: string) => new Date(`2026-01-11T${hms}-05:00`);
 logger.info('schedule.test: pure scheduling/calendar gates…');
 
 // ─────────────────────────────────────────────────────────────────────
-// 1. Active polling window — Mon-Fri 09:21-16:14 ET (inclusive bounds)
+// 1. Active polling window — Mon-Fri 09:00-16:14 ET (inclusive bounds)
 // ─────────────────────────────────────────────────────────────────────
 check('active: weekday inside window (12:00)', isInActivePollingWindow(monWinter('12:00:00')));
-check('active: lower bound 09:21 inclusive', isInActivePollingWindow(monWinter('09:21:00')));
-check('active: just before lower 09:20 excluded', !isInActivePollingWindow(monWinter('09:20:59')));
+check('active: lower bound 09:00 inclusive', isInActivePollingWindow(monWinter('09:00:00')));
+check('active: just before lower 08:59 excluded', !isInActivePollingWindow(monWinter('08:59:59')));
+check('active: pre-open 09:20 inside window', isInActivePollingWindow(monWinter('09:20:59')));
 check('active: upper bound 16:14 inclusive', isInActivePollingWindow(monWinter('16:14:00')));
 check('active: just after upper 16:15 excluded', !isInActivePollingWindow(monWinter('16:15:00')));
 

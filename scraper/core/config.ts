@@ -67,7 +67,7 @@ export const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
  * 1 minute between tick wake-ups.
  *
  * UW publishes a snapshot per minute (2026-07 redesign), so inside the
- * active polling window (09:21-16:14 ET) nearly every tick scrapes the
+ * active polling window (09:00-16:14 ET) nearly every tick scrapes the
  * newest minute; the tick is only a no-op when the current minute was
  * already captured or outside the window. See `runTick` in index.ts and
  * `expectedWindowEnd` in dates.ts.

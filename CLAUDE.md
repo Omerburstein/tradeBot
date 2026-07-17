@@ -203,7 +203,7 @@ Always run this after editing TypeScript files. The project has no automated tes
 
 ## Deployment (Railway)
 
-- Runs as `npm start` → continuous 1-min polling loop during active window (Mon–Fri 09:21–16:14 ET)
+- Runs as `npm start` → continuous 1-min polling loop during active window (Mon–Fri 09:00–16:14 ET)
 - Fires one tick immediately on boot to avoid missing data after container restart
 - SIGTERM handler flushes Sentry then exits cleanly (Railway restart-safe)
 - Observability: Sentry for errors + pino JSON logs to stdout (Railway log pipeline)

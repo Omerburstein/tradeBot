@@ -20,7 +20,7 @@
  *   runs every minute and captures price + tide along the way.
  *
  * Schedule-aware dedup:
- *   - The scraper wakes every minute during 09:21-16:14 ET (Mon-Fri).
+ *   - The scraper wakes every minute during 09:00-16:14 ET (Mon-Fri).
  *   - `lastFullWindowEnd` tracks the end-time (e.g. "10:07") of the last
  *     1-min snapshot captured. When the current minute's snapshot is
  *     already captured, the tick is a no-op; when UW hasn't published the
