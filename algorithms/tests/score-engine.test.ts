@@ -187,30 +187,37 @@ check(
   // gexRaw is monotonic in gamma, so build each history from its own baseline.
   const small = computeScore(snap([strike(6010, 100)]), null, [], DEFAULT_CONFIG).gexRaw;
   const large = computeScore(snap([strike(6010, 1000)]), null, [], DEFAULT_CONFIG).gexRaw;
-  // A 10× spike relative to a quiet day vs. relative to a busy day.
-  const zSmallDay = gexZAgainst(100, [small / 10, small / 10, small / 10, small / 10]);
-  const zLargeDay = gexZAgainst(1000, [large / 10, large / 10, large / 10, large / 10]);
+  // A 4× spike (kept under zClamp so the LOG SHAPE — not the clamp — is what's
+  // tested) relative to a quiet day vs. relative to a busy day.
+  const zSmallDay = gexZAgainst(100, Array(4).fill(small / 4));
+  const zLargeDay = gexZAgainst(1000, Array(4).fill(large / 4));
   check(
-    'scale-invariant: a 10× spike scores the same on a quiet day as on a busy day',
+    'scale-invariant: a 4× spike scores the same on a quiet day as on a busy day',
     Math.abs(zSmallDay - zLargeDay) < 1e-9,
     `got ${zSmallDay} vs ${zLargeDay}`,
   );
-  // log2(1 + 10) ≈ 3.459 — the 10× case from the design discussion.
+  // out = sign(r)·log2(1 + |r|^pGamma): the shaping exponent is applied to the
+  // whole factor's ratio at normalize (R5). r = 4 → log2(1 + 4^1.2) ≈ 2.65.
+  const want = Math.log2(1 + Math.pow(4, DEFAULT_CONFIG.pGamma));
   check(
-    '10× typical magnitude → gexZ ≈ log2(11) ≈ 3.46',
-    Math.abs(zSmallDay - Math.log2(11)) < 0.02,
-    `got ${zSmallDay}, want ≈ ${Math.log2(11)}`,
+    '4× typical magnitude → gexZ === log2(1 + 4^pGamma)',
+    Math.abs(zSmallDay - want) < 1e-9,
+    `got ${zSmallDay}, want ${want}`,
   );
 }
 
-// A 10× spike must stay clearly ABOVE a 4× spike (the reason for log
-// compression rather than a raw ratio + clamp, which flattened both to 3.5).
+// The exponent-in-log stays distinguishable across spike sizes without both
+// flattening to the same value (the reason for log compression). A 6× spike
+// scores clearly above a 3× spike, and both stay under the ±zClamp backstop.
 {
   const base = computeScore(snap([strike(6010, 100)]), null, [], DEFAULT_CONFIG).gexRaw;
-  const z4 = gexZAgainst(100, Array(4).fill(base / 4));
-  const z10 = gexZAgainst(100, Array(4).fill(base / 10));
-  check('10× spike scores strictly above a 4× spike (not both clamped)', z10 > z4 + 0.5, `4×=${z4}, 10×=${z10}`);
-  check('both a 4× and 10× spike stay within ±zClamp', z4 < DEFAULT_CONFIG.zClamp && z10 < DEFAULT_CONFIG.zClamp, `4×=${z4}, 10×=${z10}`);
+  const z3 = gexZAgainst(100, Array(4).fill(base / 3));
+  const z6 = gexZAgainst(100, Array(4).fill(base / 6));
+  check('6× spike scores strictly above a 3× spike (log stays distinguishable)', z6 > z3 + 0.5, `3×=${z3}, 6×=${z6}`);
+  check('both a 3× and 6× spike stay within ±zClamp', z3 < DEFAULT_CONFIG.zClamp && z6 < DEFAULT_CONFIG.zClamp, `3×=${z3}, 6×=${z6}`);
+  // A genuinely huge spike still binds the clamp — the backstop for outliers.
+  const z20 = gexZAgainst(100, Array(4).fill(base / 20));
+  check('a 20× spike binds the ±zClamp backstop', Math.abs(z20 - DEFAULT_CONFIG.zClamp) < 1e-9, `20×=${z20}`);
 }
 
 // A reading at exactly the day's typical magnitude reads 1.0 — keeps

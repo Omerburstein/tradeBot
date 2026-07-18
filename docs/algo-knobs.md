@@ -40,10 +40,11 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 ### Non-linearity / shaping (`DEFAULT_CONFIG`)
 | Knob | Current | Meaning |
 |------|---------|---------|
-| `pGamma` | `1.2` | Exponent on per-strike gamma (>1 emphasizes big readings) |
-| `positiveGammaBias` | `1.1` | Extra weight on positive gamma vs negative |
-| `pDGamma` | `1.1` | Exponent on gamma change |
-| `pDPositions` | `0.5` | Exponent on positions change |
+| `pGamma` | `1.2` | Normalize-step exponent on the gamma factor (>1 emphasizes big readings) |
+| `positiveGammaBias` | `1.1` | Per-strike multiplier — extra weight on positive gamma vs negative |
+| `pDGamma` | `1.1` | Normalize-step exponent on the gamma-change factor |
+| `pPositions` | `0.5` | Normalize-step exponent on the positions factor (<1 saturates) |
+| `pDPositions` | `0.5` | Normalize-step exponent on the positions-change factor |
 | `pDistance` | `1.5` | Exponent on strike distance in the distance-weight ramp |
 | `distanceWeightSpan` | `2.0` | Span of the distance-weight ramp |
 | `positionsGammaGate` | `0.30` | Min gamma strength (0–1) for a strike's positions to count |

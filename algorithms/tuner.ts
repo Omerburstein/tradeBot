@@ -82,10 +82,11 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   wPositions: { min: 0.02, max: 0.35 },
   wDPositions: { min: 0.02, max: 0.30 },
 
-  // Non-linearity powers (never exactly 1).
+  // Normalize-step shaping exponents (applied to the whole factor's ratio).
   pGamma: { min: 0.8, max: 1.8 },
-  positiveGammaBias: { min: 1.0, max: 1.3 },
+  positiveGammaBias: { min: 1.0, max: 1.3 }, // per-strike multiplier, not an exponent
   pDGamma: { min: 0.8, max: 1.8 },
+  pPositions: { min: 0.3, max: 0.9 },
   pDPositions: { min: 0.3, max: 0.9 },
   pDistance: { min: 0.8, max: 2.5 },
   distanceWeightSpan: { min: 0.5, max: 4.0 },

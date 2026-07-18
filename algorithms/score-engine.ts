@@ -32,11 +32,18 @@
  * market-maker positions and their respective rates of change.
  *
  * NORMALIZATION IS NOT A Z-SCORE. Every factor is divided by the mean absolute
- * magnitude of its own recent history and log-compressed — history sets the
- * SCALE only, and never re-centers the reading (see normalizeToScale). The
- * `…Z` field names are retained for continuity but no standard deviation is
- * involved. Each normalized value therefore keeps its raw factor's sign, and
- * reads roughly as "how many times the day's typical magnitude is this".
+ * magnitude of its own recent history, shaped by its exponent, and log-compressed
+ * — history sets the SCALE only, and never re-centers the reading (see
+ * normalizeToScale). The `…Z` field names are retained for continuity but no
+ * standard deviation is involved. Each normalized value therefore keeps its raw
+ * factor's sign, and reads roughly as "how many times the day's typical
+ * magnitude is this".
+ *
+ * ALL NON-LINEARITY LIVES AT NORMALIZE (R5/R6). Per-strike accumulation is
+ * linear in the data (abs + the geometric weights sign/dWeight, plus gammaBias
+ * on gamma). Each factor's shaping exponent — pGamma, pDGamma, pPositions,
+ * pDPositions — is applied once, to the whole aggregated factor, inside the log
+ * at the normalize step, NOT per strike.
  *
  * For a from-scratch explanation of what each of the four contributors means,
  * why it was chosen, how it is computed, and how the weights combine into the
@@ -126,19 +133,22 @@ export function computeScore(
     // Absolute magnitude: + and - gamma both add same-direction pressure (no
     // netting between opposite-sign strikes); direction comes from `sign`
     // (strike position vs spot). Positive gamma is weighted slightly higher
-    // than negative via positiveGammaBias. Magnitude shaped non-linearly by pGamma.
+    // than negative via positiveGammaBias. The per-strike term is LINEAR in the
+    // gamma magnitude (R6) — only `Math.abs` plus the multiplicative geometric
+    // factors (gammaBias, sign, dWeight). Non-linear shaping is deferred to the
+    // normalize step, where `pGamma` is applied to the whole aggregated factor.
     const gammaBias = s.gamma >= 0 ? config.positiveGammaBias : 1.0;
-    gexRaw += Math.pow(Math.abs(s.gamma), config.pGamma) * gammaBias * sign * dWeight;
+    gexRaw += Math.abs(s.gamma) * gammaBias * sign * dWeight;
 
     // Factor 2: Net MM positions exposure — GATED by gamma, not weighted by it.
     // A strike's positions count only when its gamma is strong relative to the
     // window max (|gamma| ≥ positionsGammaGate·maxAbsGamma); gamma is a pure
     // threshold here — once the gate passes, the strike's positions enter at
     // full magnitude, with no gamma-strength multiplier folded into the value.
-    // The per-strike magnitude is taken RAW (linear, no power) — like gamma's
-    // level, the only compression is the log at the normalize step
-    // (normalizeToScale), so a large print is tamed at the aggregate scale
-    // rather than saturated strike-by-strike.
+    // The per-strike magnitude is taken RAW (linear, no power) — like every
+    // factor (R6). Shaping (its `pPositions` exponent) and compression (the log)
+    // happen together at the normalize step (normalizeToScale), so a large print
+    // is tamed at the aggregate scale rather than saturated strike-by-strike.
     const gammaStrength = maxAbsGamma > 0 ? Math.abs(s.gamma) / maxAbsGamma : 0;
     const positionsCounts = gammaStrength >= config.positionsGammaGate;
 
@@ -158,19 +168,20 @@ export function computeScore(
         // growing) is positive momentum; a wall bleeding off (|gamma| shrinking)
         // is negative — including a NEGATIVE gamma position shrinking toward
         // zero, which is a fade of that strike's pressure, so the delta is
-        // negative. The delta's own sign is still momentum (preserved through
-        // signedPow); `sign` then points it by the strike's side of spot.
+        // negative. The delta is already signed (its sign is momentum); the raw
+        // term is LINEAR in it (R6) — `sign` then points it by the strike's side
+        // of spot. `pDGamma` shaping is deferred to the normalize step.
         const deltaGamma = Math.abs(s.gamma) - Math.abs(prev.gamma);
-        dGammaRaw += signedPow(deltaGamma, config.pDGamma) * sign * dWeight;
+        dGammaRaw += deltaGamma * sign * dWeight;
 
         if (positionsCounts) {
           // Change in position *magnitude* (|positions|), mirroring the dGamma
           // factor and the absolute positions LEVEL — a wall of MM positioning
           // building vs bleeding, regardless of the raw position's own sign. The
-          // delta's sign is momentum (preserved through signedPow); `sign` then
-          // points it by the strike's side of spot.
+          // delta is already signed momentum; the raw term is LINEAR in it (R6),
+          // pointed by `sign`. `pDPositions` shaping is deferred to normalize.
           const deltaPositions = Math.abs(s.positions) - Math.abs(prev.positions);
-          dPositionsRaw += signedPow(deltaPositions, config.pDPositions) * sign * dWeight;
+          dPositionsRaw += deltaPositions * sign * dWeight;
         }
       }
     }
@@ -189,10 +200,10 @@ export function computeScore(
   // reach back across a day boundary. Do not feed a cross-day history here.
   const lookback = history.slice(-config.zScoreLookback);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
-  const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexRaw)));
-  const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaRaw)));
-  const positionsZ = clamp(normalizeToScale(positionsRaw, lookback.map((h) => h.positionsRaw)));
-  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, lookback.map((h) => h.dPositionsRaw)));
+  const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexRaw), config.pGamma));
+  const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaRaw), config.pDGamma));
+  const positionsZ = clamp(normalizeToScale(positionsRaw, lookback.map((h) => h.positionsRaw), config.pPositions));
+  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, lookback.map((h) => h.dPositionsRaw), config.pDPositions));
 
   // Composite weighted score
   const composite =
@@ -215,25 +226,23 @@ export function computeScore(
 }
 
 /**
- * Sign-preserving power transform: sign(x)·|x|^exponent.
- *
- * Used to shape every factor input non-linearly. exponent > 1 emphasizes
- * large readings; exponent < 1 saturates them (e.g. a huge position print
- * adds progressively less signal). exponent = 1 would be linear — by design
- * no factor uses exactly 1.
- */
-function signedPow(value: number, exponent: number): number {
-  return Math.sign(value) * Math.pow(Math.abs(value), exponent);
-}
-
-/**
  * Normalize a raw factor against the magnitude SCALE of its recent history,
- * log-compressed. This is deliberately NOT a statistical z-score — despite the
- * `…Z` field names it produces, standard deviation plays no part.
+ * shaped by `exponent` and log-compressed. This is deliberately NOT a
+ * statistical z-score — despite the `…Z` field names it produces, standard
+ * deviation plays no part.
  *
- *   scale = meanAbs(history)                    // the factor's typical size
- *   ratio = value / scale                       // "how many times typical"
- *   out   = sign(ratio) · log2(1 + |ratio|)     // compressed
+ *   scale = meanAbs(history)                          // the factor's typical size
+ *   ratio = value / scale                             // "how many times typical"
+ *   out   = sign(ratio) · log2(1 + |ratio|^exponent)  // shaped + compressed
+ *
+ * This is the SOLE non-linear transform in the score pipeline (R5). Per-strike
+ * accumulation is linear (R6); the factor's shaping exponent — `pGamma`,
+ * `pDGamma`, `pPositions`, `pDPositions` — is applied HERE, once, to the whole
+ * aggregated raw factor's ratio, not per strike. `exponent` > 1 emphasizes
+ * large readings, < 1 saturates them (e.g. a huge position print adds
+ * progressively less signal). The anchor `ratio = 1` maps to `log2(2) = 1.0`
+ * for ANY exponent, so a reading at the day's typical magnitude always reads
+ * 1.0 and the entry thresholds keep a familiar range.
  *
  * WHY NOT (value − mean) / std: mean-centering measures *deviation from the
  * day's average*, which discards the raw factor's own sign. On a day where
@@ -245,15 +254,13 @@ function signedPow(value: number, exponent: number): number {
  *
  * WHY LOG-COMPRESS: a plain ratio needs a big `zClamp` to let a 10× spike read
  * as 10, and such a spike then swamps the other three factors. Compressing
- * keeps a 10× (→3.46) clearly above a 4× (→2.32) while both stay inside the
- * ±3.5 clamp, so genuine outliers remain distinguishable without dominating.
- * A typical reading (ratio 1.0) maps to exactly 1.0, keeping the entry
- * thresholds in a familiar range.
+ * keeps a 10× clearly above a 4× while both stay near the ±3.5 clamp, so genuine
+ * outliers remain distinguishable without dominating.
  *
  * With fewer than 3 data points there is no reliable scale yet, so a clamped
  * sign estimate is returned (unchanged from the previous z-score behaviour).
  */
-function normalizeToScale(value: number, history: number[]): number {
+function normalizeToScale(value: number, history: number[], exponent: number): number {
   if (history.length < 3) {
     // Not enough data for a meaningful scale — return clamped sign
     return value > 0 ? 1 : value < 0 ? -1 : 0;
@@ -268,5 +275,5 @@ function normalizeToScale(value: number, history: number[]): number {
   if (scale < 1e-10) return 0;
 
   const ratio = value / scale;
-  return Math.sign(ratio) * Math.log2(1 + Math.abs(ratio));
+  return Math.sign(ratio) * Math.log2(1 + Math.pow(Math.abs(ratio), exponent));
 }

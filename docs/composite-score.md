@@ -73,18 +73,20 @@ meaningful gamma (≥ 30 % of the window's peak), and is then scaled by
 `gammaStrength`. Positions far from any gamma are noise — dealers are not forced
 to hedge there — so they are dropped entirely.
 
-### Non-linear shaping (`^p` / `signedPow`)
-Gamma level, gamma momentum, and positions momentum are passed through a power:
-- `p > 1` **emphasizes** large readings (gamma level, gamma momentum).
-- `p < 1` **saturates** them (position *change* — beyond a point, more adds
-  little extra signal).
-- `signedPow(x, p) = sign(x)·|x|^p` preserves the sign for the *change* factors,
-  because there the sign is the momentum and must be kept.
+### Non-linear shaping (exponents, applied at normalize)
+Every raw factor is aggregated **linearly** in the per-strike data (R6) — the
+per-strike term is just `|value|` times the geometric weights (`sign`, `dWeight`,
+and `gammaBias` on gamma). No per-strike power is applied.
 
-The positions **level** is the exception: it is aggregated **raw** (linear,
-no per-strike power), exactly like the gamma level. Its only compression is the
-log at the normalize step (§4), which tames a monster print at the aggregate
-scale rather than saturating it strike-by-strike.
+Each factor's non-linear shaping instead lives at the **normalize step** (§4),
+applied **once, to the whole aggregated factor's ratio, inside the log** (R5):
+`out = sign(r)·log2(1 + |r|^p)`, with a per-factor exponent
+(`pGamma` / `pDGamma` / `pPositions` / `pDPositions`):
+- `p > 1` **emphasizes** large readings (e.g. gamma level, gamma momentum).
+- `p < 1` **saturates** them (e.g. position level/change — beyond a point, more
+  adds little extra signal).
+- the anchor `r = 1 → 1.0` holds for any `p`, so a reading at the day's typical
+  magnitude always reads 1.0.
 
 ---
 
@@ -96,7 +98,7 @@ individually z-scored (Section 4) into `gexZ`, `dGammaZ`, `positionsZ`,
 
 ### 3.1 GEX — gamma exposure  →  `gexZ` (weight `wGex`, default **0.45**)
 ```
-gexRaw += |gamma|^pGamma · gammaBias · sign · dWeight
+gexRaw += |gamma| · gammaBias · sign · dWeight       (linear; shaped at normalize by pGamma)
 gammaBias = positiveGammaBias (1.1) if gamma ≥ 0, else 1.0
 ```
 - **Represents:** where the standing dealer gamma wall sits relative to spot —
@@ -104,13 +106,14 @@ gammaBias = positiveGammaBias (1.1) if gamma ≥ 0, else 1.0
   below-spot → downside.
 - **Why chosen / weighted highest:** gamma positioning is the strongest and most
   persistent driver of intraday SPX drift; it gets the largest weight (0.45).
-- **How computed:** absolute gamma, shaped by `pGamma = 1.2` (big walls count
-  more than linearly), nudged up for positive gamma via `positiveGammaBias`,
-  directioned by `sign`, and distance-weighted.
+- **How computed:** absolute gamma (linear), nudged up for positive gamma via
+  `positiveGammaBias`, directioned by `sign`, and distance-weighted. The whole
+  factor is then shaped at normalize by `pGamma = 1.2` (big walls count more than
+  linearly — §4).
 
 ### 3.2 dGamma/dt — gamma momentum  →  `dGammaZ` (weight `wDGamma`, default **0.25**)
 ```
-dGammaRaw += signedPow(|gamma| − |prevGamma|, pDGamma) · sign · dWeight
+dGammaRaw += (|gamma| − |prevGamma|) · sign · dWeight   (linear; shaped at normalize by pDGamma)
 ```
 - **Represents:** how the gamma landscape is *shifting* between snapshots —
   gamma building above spot (or draining below) is fresh directional momentum.
@@ -121,35 +124,37 @@ dGammaRaw += signedPow(|gamma| − |prevGamma|, pDGamma) · sign · dWeight
   a wall building is positive momentum and a wall bleeding off (including a
   *negative* gamma strike shrinking toward zero) is negative. A 5-minute price
   tick contributes a zero delta by design (Greeks unchanged). The |gamma| delta
-  is sign-preserved through `pDGamma = 1.1`, directioned by `sign` and
-  distance-weighted. Requires a previous snapshot; it is 0 on the day's first.
+  keeps its own sign (the momentum), directioned by `sign` and distance-weighted
+  (all linear), then shaped at normalize by `pDGamma = 1.1`. Requires a previous
+  snapshot; it is 0 on the day's first.
 
 ### 3.3 Net MM positions  →  `positionsZ` (weight `wPositions`, default **0.18**)
 ```
-positionsRaw += |positions| · gammaStrength · sign · dWeight   (gated)
+positionsRaw += |positions| · sign · dWeight   (gated; shaped at normalize by pPositions)
 ```
 - **Represents:** net market-maker contracts stacked at each strike — a second,
   independent read on where dealers are exposed.
 - **Why chosen:** it confirms or tempers the gamma read; when big positions sit
   on the same gamma walls, conviction rises. Weighted below gamma (0.18) because
   it is noisier and only meaningful near gamma.
-- **How computed:** **raw** absolute position size (linear, no per-strike power —
-  mirroring the gamma level), gated + scaled by `gammaStrength`, directioned and
-  distance-weighted. Compression is left to the log at the normalize step
-  (§4), so a monster print is tamed at the aggregate scale rather than
-  saturated strike-by-strike.
+- **How computed:** **raw** absolute position size (linear), counted only where
+  the strike's gamma clears the `positionsGammaGate` (a boolean gate — gamma is a
+  threshold here, not a multiplier), directioned and distance-weighted. The whole
+  factor is then shaped at normalize by `pPositions = 0.5` (saturating — a monster
+  print is tamed at the aggregate scale rather than strike-by-strike, §4).
 
 ### 3.4 dPositions/dt — positions momentum  →  `dPositionsZ` (weight `wDPositions`, default **0.12**)
 ```
-dPositionsRaw += signedPow(positions − prevPositions, pDPositions) · gammaStrength · sign · dWeight  (gated)
+dPositionsRaw += (|positions| − |prevPositions|) · sign · dWeight  (gated; shaped at normalize by pDPositions)
 ```
 - **Represents:** dealers actively adding or pulling positions at a strike
   between snapshots — the freshest, fastest-moving read on positioning.
 - **Why chosen:** earliest warning that positioning is changing; smallest weight
   (0.12) because it is the noisiest of the four.
-- **How computed:** per-strike position delta vs. the previous Greek snapshot,
-  saturated by `pDPositions = 0.5`, under the **same gamma gate** as the level,
-  directioned and distance-weighted.
+- **How computed:** per-strike change in position **magnitude** vs. the previous
+  Greek snapshot (linear), under the **same boolean gamma gate** as the level,
+  directioned and distance-weighted, then shaped at normalize by
+  `pDPositions = 0.5` (saturating).
 
 ---
 
@@ -161,10 +166,17 @@ measured against the **typical magnitude of its own recent history**, then
 log-compressed:
 
 ```
-scale = meanAbs(recent raws)                 // the factor's typical size
-ratio = raw / scale                          // "how many times typical"
-z     = sign(ratio) · log2(1 + |ratio|)      // compressed, then clamped
+scale = meanAbs(recent raws)                    // the factor's typical size
+ratio = raw / scale                             // "how many times typical"
+z     = sign(ratio) · log2(1 + |ratio|^p)       // shaped by the factor's exponent p,
+                                                //   compressed, then clamped
 ```
+
+`p` is the factor's own exponent (`pGamma` / `pDGamma` / `pPositions` /
+`pDPositions`) — the **only** place the factors are shaped non-linearly (the raw
+sums in §3 are linear). `p = 1` is the pure-log baseline tabulated below; `p > 1`
+steepens large ratios, `p < 1` flattens them. The anchor `ratio = 1 → 1.0` holds
+for every `p`.
 
 > **This is NOT a statistical z-score.** Standard deviation plays no part. The
 > `gexZ` / `dGammaZ` / `positionsZ` / `dPositionsZ` names are retained for
@@ -182,13 +194,16 @@ bearish), at 0.44× the day's typical magnitude. Sign now tracks the market, and
 
 **Why log-compress?** A plain ratio needs a large `zClamp` to let a 10× spike
 read as 10, and such a spike then swamps the other three factors. Compression
-keeps a 10× (→3.46) clearly above a 4× (→2.32) while both sit inside the ±3.5
-clamp. A reading at exactly the day's typical magnitude maps to exactly **1.0**,
-so the entry thresholds stay in a familiar range.
+keeps a 10× clearly above a 4× while both stay near the ±3.5 clamp. A reading at
+exactly the day's typical magnitude maps to exactly **1.0**, so the entry
+thresholds stay in a familiar range. (The exponent `p` shapes this further —
+`p > 1` reaches the clamp sooner, `p < 1` later.)
+
+Baseline mapping at `p = 1` (pure log):
 
 | ratio (× typical) | 0.44 | 1.0 | 2.0 | 4.0 | 10.0 | 50.0 |
 |---|---|---|---|---|---|---|
-| normalized | 0.53 | 1.00 | 1.58 | 2.32 | 3.46 | 3.50 (clamped) |
+| normalized (p=1) | 0.53 | 1.00 | 1.58 | 2.32 | 3.46 | 3.50 (clamped) |
 
 - **Rolling, same-day window.** The history is the `SignalGenerator`'s per-day
   `scoreHistory`, sliced to the last `zScoreLookback` (**20**) snapshots. A fresh
@@ -199,7 +214,8 @@ so the entry thresholds stay in a familiar range.
 - **Degenerate history.** If every recent raw is ~0 there is no scale to measure
   against, so the factor returns **0** rather than turning noise into a ±1 signal.
 - **Anomaly clamp.** Every factor is hard-clamped to `±zClamp` (**±3.5**). With
-  log compression this only binds past ~10.3× typical, so it is a backstop
+  log compression this only binds past ~10.3× typical at `p = 1` (sooner for
+  `p > 1`, e.g. ~6.9× at `pGamma = 1.2`; later for `p < 1`), so it is a backstop
   rather than a routine limiter.
 
 ---
@@ -236,10 +252,11 @@ The composite is a **conviction gate**, not a standalone trigger:
 | `wDGamma` | 0.25 | weight — gamma momentum |
 | `wPositions` | 0.18 | weight — positions level |
 | `wDPositions` | 0.12 | weight — positions momentum |
-| `pGamma` | 1.2 | emphasize large gamma |
-| `positiveGammaBias` | 1.1 | slight boost to positive gamma |
-| `pDGamma` | 1.1 | emphasize large gamma change |
-| `pDPositions` | 0.5 | saturate position change |
+| `pGamma` | 1.2 | normalize exponent — emphasize large gamma |
+| `positiveGammaBias` | 1.1 | per-strike multiplier — slight boost to positive gamma |
+| `pDGamma` | 1.1 | normalize exponent — emphasize large gamma change |
+| `pPositions` | 0.5 | normalize exponent — saturate large positions |
+| `pDPositions` | 0.5 | normalize exponent — saturate position change |
 | `pDistance` | 1.5 | curvature of the distance ramp |
 | `distanceWeightSpan` | 2.0 | edge weighs up to 3× ATM |
 | `positionsGammaGate` | 0.30 | min gamma strength for positions to count |

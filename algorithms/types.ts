@@ -278,24 +278,27 @@ export interface AlgoConfig {
   /** Weight for net MM positions rate-of-change. */
   wDPositions: number;
 
-  // ── Non-linearity (powers) ──
-  // Gamma and the two rate-of-change factors are passed through a sign-preserving
-  // power (signedPow(x, p) = sign(x)·|x|^p) before aggregation. p > 1 emphasizes
-  // large readings, p < 1 saturates them. The positions LEVEL is the exception:
-  // it is aggregated RAW (linear), with compression left to the log at the
-  // normalize step — mirroring how gamma's level is handled.
+  // ── Non-linearity (exponents) ──
+  // All four factors are aggregated RAW (linear) per strike (R6); each factor's
+  // shaping exponent is applied ONCE, to the whole aggregated factor, inside the
+  // log at the normalize step (normalizeToScale — R5): out = sign(r)·log2(1 +
+  // |r|^p), where r is the factor's scale-ratio. p > 1 emphasizes large readings,
+  // p < 1 saturates them; the anchor r = 1 → 1.0 holds for any p.
 
-  /** Exponent on per-strike gamma. */
+  /** Normalize-step exponent on the gamma-level factor (gexZ). */
   pGamma: number;
   /**
    * Multiplier applied to positive per-strike gamma (negative gamma uses 1.0).
    * Slightly > 1 makes positive gamma marginally more influential than negative
-   * gamma in the GEX score. Gamma-only — positions are not biased.
+   * gamma in the GEX score. This is a per-strike MULTIPLICATIVE factor on the raw
+   * gamma (R6-permitted), not an exponent. Gamma-only — positions are not biased.
    */
   positiveGammaBias: number;
-  /** Exponent on per-strike gamma change (dGamma/dt). */
+  /** Normalize-step exponent on the gamma-change factor (dGammaZ). */
   pDGamma: number;
-  /** Exponent on per-strike positions change (dPositions/dt). */
+  /** Normalize-step exponent on the positions-level factor (positionsZ). */
+  pPositions: number;
+  /** Normalize-step exponent on the positions-change factor (dPositionsZ). */
   pDPositions: number;
   /** Exponent on normalized strike distance in the distance-weight ramp. */
   pDistance: number;
@@ -373,6 +376,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   pGamma: 1.2,
   positiveGammaBias: 1.1,
   pDGamma: 1.1,
+  pPositions: 0.5,
   pDPositions: 0.5,
   pDistance: 1.5,
   distanceWeightSpan: 2.0,
