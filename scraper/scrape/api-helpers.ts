@@ -19,6 +19,7 @@ import {
   parseStraddle,
   netFlowToTideRows,
   candles5mToSpotRowsByDate,
+  candles1mToSpotRowsByDate,
   dailyCloseSpotRow,
   type SpotRow,
 } from './api-transforms.js';
@@ -350,6 +351,55 @@ export async function fetchSpotCandles5m(
 }
 
 /**
+ * Fetch intraday 1-MIN SPX candles (index_candles/SPX/1m) ONCE and bucket them
+ * into clean per-minute spot rows per ET date. This is the PREFERRED intraday
+ * spot source (accurate minute-close, matches TradingView) — see
+ * `candles1mToSpotRowsByDate` for why the 5m series can't be trusted. The 1m
+ * endpoint is server row-capped (~2500 rows ⇒ only ~6 trading days back), so
+ * days older than that come back empty and the caller falls back to the 5m /
+ * daily-close tiers. Same origin-reuse + non-blocking contract as the 5m fetch.
+ */
+export async function fetchSpotCandles1m(
+  page: Page,
+  originUrl: string | undefined,
+  lookbackDays = 40,
+): Promise<Map<string, SpotRow[]>> {
+  const empty = new Map<string, SpotRow[]>();
+  if (!originUrl) {
+    logger.warn('no candles origin URL — cannot fetch intraday 1m spot candles');
+    return empty;
+  }
+  let origin: string;
+  try {
+    origin = new URL(originUrl).origin;
+  } catch {
+    return empty;
+  }
+  const url = `${origin}/api/index_candles/SPX/1m?interval=${lookbackDays}d`;
+  try {
+    const resp = await page.request.get(url);
+    if (!resp.ok()) {
+      logger.warn({ status: resp.status() }, 'index_candles 1m non-OK — no 1-min spot');
+      return empty;
+    }
+    const body = (await resp.json()) as { data?: ApiIntradayCandle[] };
+    const map = candles1mToSpotRowsByDate(body.data ?? []);
+    const dates = [...map.keys()].sort();
+    logger.info(
+      { days: map.size, from: dates[0] ?? null, to: dates[dates.length - 1] ?? null },
+      'intraday 1-min spot candles fetched (recent window)',
+    );
+    return map;
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'index_candles 1m fetch failed — non-blocking',
+    );
+    return empty;
+  }
+}
+
+/**
  * Resolve the bsoc/SPX/straddle URL template used to re-fetch the Cone's ATM
  * straddle per backfill day: prefer a template observed on page load, else
  * synthesize it from the net-flow-ticks origin (same phx API host, stable
@@ -474,12 +524,15 @@ export async function storeMarketTide(
 }
 
 /**
- * Persist the intraday SPX spot series for `date`. UW exposes only two usable
- * spot sources, so there are two tiers:
+ * Persist the intraday SPX spot series for `date`. UW exposes a few usable
+ * spot sources, tried best-first:
  *
- *  1. Real 5-min index candles (true SPX scale) — but `index_candles/SPX/5m`
- *     caps at ~30 trading days back, pre-fetched into `intradaySpotByDate`.
- *     Gives genuine 5-min spot, used for recent days.
+ *  0. Real 1-min index candles (`index_candles/SPX/1m`) — the most accurate:
+ *     clean minute-close, matches TradingView. Server row-capped to ~6 trading
+ *     days back, pre-fetched into `intradaySpot1mByDate`. Preferred when present.
+ *  1. Real 5-min index candles — `index_candles/SPX/5m` reaches ~30 days back,
+ *     but its OHLC is misaligned to the bar label (see candles5mToSpotRowsByDate),
+ *     so it's only a fallback for days beyond the 1m window.
  *  2. Else a single daily-close row from the 1d candles (full history). For
  *     days older than the 5m window this is ALL UW has — there is no historical
  *     intraday price endpoint (net-flow-ticks, the Market Tide source, ignores
@@ -493,8 +546,22 @@ export async function storeSpot(
   caps: ApiCaptures,
   date: string,
   intradaySpotByDate: Map<string, SpotRow[]>,
+  intradaySpot1mByDate?: Map<string, SpotRow[]>,
 ): Promise<number> {
   try {
+    // Tier 0: real intraday 1-min SPX candles (recent ~6 trading days) — the
+    // most accurate source (clean minute-close, TradingView-aligned).
+    const intraday1m = intradaySpot1mByDate?.get(date) ?? [];
+    if (intraday1m.length > 0) {
+      logger.info(
+        { date, source: '1m-candles', rows: intraday1m.length, sample: intraday1m.slice(0, 2) },
+        'storeSpot: candidate spot rows',
+      );
+      const inserted = await insertSpotPrices(intraday1m);
+      logger.info({ date, inserted }, 'spot stored (intraday 1-min candles)');
+      return inserted;
+    }
+
     // Tier 1: real intraday 5-min SPX candles (recent ~30 trading days).
     const intraday = intradaySpotByDate.get(date) ?? [];
     if (intraday.length > 0) {

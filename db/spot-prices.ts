@@ -2,19 +2,19 @@ import { getDb, isRthInstant, MAX_ROWS_PER_INSERT } from './client.js';
 import { logger } from '../scraper/core/logger.js';
 
 /**
- * Master kill-switch for spot writes — DISABLED for now.
+ * Master kill-switch for spot writes. Defaults ON; set SCRAPER_SPOT_WRITES=false
+ * to disable at the process level.
  *
- * UW's API exposes no historical intraday SPX that matches the Periscope price
- * chart for a backfilled date: the only date-respecting source
- * (index_candles/SPX/5m?interval) is a coarser, time-shifted series whose
- * open/close don't equal the chart's, and every 1-minute / date-param endpoint
- * ignores the requested day and returns only the live session. So backfilled
- * spot can't be made chart-accurate. Until we decide how to handle that, skip
- * spot writes entirely (the insert logic below is intact — flip this to `true`
- * to re-enable). Live-tick spot reads the page header, which DOES match the
- * chart, so this can be re-enabled for live-only capture later.
+ * Use the OFF switch for a backfill run whose spot comes from the exact I:SPX
+ * ingest (scripts/fetch_spx.py → ingest-spx.ts): that pipeline owns spot for
+ * historical days, so the scraper's own (UW-derived) spot would just clobber
+ * the ingested I:SPX rows on upsert. Turning it off there leaves the I:SPX rows
+ * authoritative while the walk-back still writes Greeks/positions. The live
+ * tick — a separate process — keeps the default ON and writes its page-header
+ * spot, which matches the chart.
  */
-const SPOT_WRITES_ENABLED = true;
+const SPOT_WRITES_ENABLED =
+  (process.env.SCRAPER_SPOT_WRITES ?? 'true').trim().toLowerCase() !== 'false';
 
 const CREATE_SPOT_PRICES_TABLE =
   `CREATE TABLE IF NOT EXISTS spot_prices (` +

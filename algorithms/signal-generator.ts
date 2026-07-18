@@ -53,6 +53,16 @@ import type {
   TradeState,
 } from './types.js';
 
+// ── Confidence tiers (assessConfidence) ──
+// Composite |z| and dGamma |z| bars that upgrade a signal's confidence label.
+// Labels are advisory (logged / reported); they do not gate entries.
+/** |composite z| above this, with a cone breach and strong dGamma, reads 'high'. */
+const HIGH_CONFIDENCE_Z = 2.5;
+/** |dGamma z| required alongside {@link HIGH_CONFIDENCE_Z} for a 'high' label. */
+const HIGH_CONFIDENCE_DGAMMA_Z = 1.0;
+/** |composite z| above this (or any cone breach) reads at least 'medium'. */
+const MEDIUM_CONFIDENCE_Z = 2.0;
+
 /**
  * Stateful signal generator for a single trading day.
  * Create a new instance for each day.
@@ -445,12 +455,12 @@ export class SignalGenerator {
     const absZ = Math.abs(score.composite);
 
     // High confidence: cone breach + extreme z-score + strong dGamma
-    if (coneTrigger && absZ > 2.5 && Math.abs(score.dGammaZ) > 1.0) {
+    if (coneTrigger && absZ > HIGH_CONFIDENCE_Z && Math.abs(score.dGammaZ) > HIGH_CONFIDENCE_DGAMMA_Z) {
       return 'high';
     }
 
     // Medium confidence: either cone breach or strong signal, but not both extreme
-    if (coneTrigger || absZ > 2.0) {
+    if (coneTrigger || absZ > MEDIUM_CONFIDENCE_Z) {
       return 'medium';
     }
 

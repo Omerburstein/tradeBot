@@ -11,6 +11,7 @@
 
 import pino from 'pino';
 import { loadDateRange, getAvailableDates } from './data-loader.js';
+import { formatEtDateTime } from './et-time.js';
 import { SignalGenerator } from './signal-generator.js';
 import type {
   AlgoConfig,
@@ -23,6 +24,9 @@ import type {
 import { DEFAULT_CONFIG, DEFAULT_EQUITY } from './types.js';
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
+
+/** Trading days per year — annualization factor for the Sharpe ratio. */
+const TRADING_DAYS_PER_YEAR = 252;
 
 export interface BacktestOptions {
   startDate: string;
@@ -231,8 +235,8 @@ function computeSharpe(dailyPnls: number[]): number {
 
   if (std < 1e-10) return 0;
 
-  // Annualize: multiply by sqrt(252 trading days)
-  return (mean / std) * Math.sqrt(252);
+  // Annualize: multiply by sqrt(trading days per year)
+  return (mean / std) * Math.sqrt(TRADING_DAYS_PER_YEAR);
 }
 
 function emptyResult(equity: EquitySettings = DEFAULT_EQUITY): BacktestResult {
@@ -258,26 +262,6 @@ function emptyResult(equity: EquitySettings = DEFAULT_EQUITY): BacktestResult {
 /** Format a signed dollar amount, e.g. `+$1500.00` / `-$500.00`. */
 function fmtUsd(n: number): string {
   return n >= 0 ? `+$${n.toFixed(2)}` : `-$${Math.abs(n).toFixed(2)}`;
-}
-
-/**
- * Render a UTC instant as Eastern Time wall-clock ("YYYY-MM-DD HH:MM ET"),
- * matching the trading time the UW dashboard shows. Display-only — the stored
- * entry/exit times stay absolute UTC (the look-ahead guard + time-gates rely
- * on that). Offset is resolved per-instant via Intl, so DST is handled.
- */
-function fmtEt(utcIso: string): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(new Date(utcIso));
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
-  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} ET`;
 }
 
 /**
@@ -309,7 +293,7 @@ export function printTradeLog(trades: TradeRecord[], title = 'TRADE LOG'): void 
     // SPX entry/exit drive the signal + stop/target; the ES fills (es=…) are
     // what realized P&L is computed from (TODO #3).
     console.log(
-      `  ${fmtEt(t.entryTime)} → ${fmtEt(t.exitTime)}  ${dir}  ${qty}` +
+      `  ${formatEtDateTime(t.entryTime)} → ${formatEtDateTime(t.exitTime)}  ${dir}  ${qty}` +
         `spx=${t.entryPrice.toFixed(2)}→${t.exitPrice.toFixed(2)} ` +
         `es=${t.entryFill.toFixed(2)}→${t.exitFill.toFixed(2)} ` +
         `stop=${t.stopPrice.toFixed(2)} tgt=${t.targetPrice.toFixed(2)} gexTp=${gexTp.toFixed(1)}pts ` +

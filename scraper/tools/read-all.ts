@@ -18,6 +18,8 @@
  *   READ_ALL_END        slot-start HH:MM ET (default 15:50)
  *   READ_ALL_MAX_EMPTY  stop after N consecutive empty/failed days (default 3)
  *   READ_ALL_FLOOR      hard lower-bound date YYYY-MM-DD (optional safety stop)
+ *   READ_ALL_START_DATE newest day to start from YYYY-MM-DD (default: latest
+ *                       trading day; set to yesterday to exclude today)
  *
  * Inserts are per-day and idempotent (ON CONFLICT DO NOTHING), so a kill
  * mid-walk leaves prior days durably in the DB and a re-run just
@@ -69,10 +71,13 @@ const maxConsecutiveEmpty =
     ? Number(maxEmptyRaw)
     : 3;
 const floorDate = (process.env.READ_ALL_FLOOR ?? '').trim() || undefined;
+// Newest day to start the walk from (default: latest trading day). Set this to
+// yesterday to EXCLUDE an in-progress today from the pull.
+const startDate = (process.env.READ_ALL_START_DATE ?? '').trim() || undefined;
 
 logger.info(
-  { startHhmm, endHhmm, maxConsecutiveEmpty, floorDate: floorDate ?? null },
-  'read-all: starting walk-back from latest trading day',
+  { startHhmm, endHhmm, maxConsecutiveEmpty, floorDate: floorDate ?? null, startDate: startDate ?? null },
+  'read-all: starting walk-back',
 );
 
 const startedAt = Date.now();
@@ -82,6 +87,7 @@ try {
     endHhmm,
     maxConsecutiveEmpty,
     floorDate,
+    startDate,
   });
   logger.info(
     { ...summary, totalMs: Date.now() - startedAt },

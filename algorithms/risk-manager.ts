@@ -3,6 +3,7 @@
  * daily limits, and time-based exit gates.
  */
 
+import { etMinutesSinceMidnight } from './et-time.js';
 import type {
   AlgoConfig,
   Direction,
@@ -11,6 +12,11 @@ import type {
   StrikeData,
   TradeState,
 } from './types.js';
+
+/** Full base size once a signal clears `strongEntryThreshold`. */
+const FULL_SIZE_SCALAR = 1.0;
+/** Reduced base size for a signal below `strongEntryThreshold`. */
+const WEAK_SIGNAL_SIZE_SCALAR = 0.5;
 
 /**
  * Compute position size in contracts based on risk parameters and
@@ -32,7 +38,7 @@ export function computePositionSize(
 
   // Signal strength scalar: full size only for very strong signals
   const absZ = Math.abs(compositeZ);
-  const signalScalar = absZ >= config.strongEntryThreshold ? 1.0 : 0.5;
+  const signalScalar = absZ >= config.strongEntryThreshold ? FULL_SIZE_SCALAR : WEAK_SIGNAL_SIZE_SCALAR;
 
   const contracts = Math.max(1, Math.floor(baseContracts * signalScalar));
   return Math.min(contracts, risk.maxPositionSize);
@@ -202,7 +208,7 @@ export function checkTimeGates(
   capturedAtUtc: string,
   config: AlgoConfig,
 ): { blockNewEntries: boolean; forceExit: boolean } {
-  const etMinutes = getEtMinutesSinceMidnight(capturedAtUtc);
+  const etMinutes = etMinutesSinceMidnight(capturedAtUtc);
   const noEntryMinutes = parseHhmm(config.risk.noNewTradesAfterET);
   const forceExitMinutes = parseHhmm(config.risk.forcedExitByET);
 
@@ -314,37 +320,18 @@ export function recordExit(
   const pnlPoints = (exitFill - state.entryFill) * direction;
   const realizedPnl = pnlPoints * pointValue * state.contracts;
 
+  // Flatten via the single flat-state source, carrying the day's running
+  // PnL/trade tally forward (createFlatState zeroes those for start-of-day).
   const newState: TradeState = {
-    position: 'flat',
-    entryPrice: null,
-    entryFill: null,
-    entryTime: null,
-    entryScore: null,
-    contracts: 0,
-    unrealizedPnl: 0,
+    ...createFlatState(),
     dailyPnl: state.dailyPnl + realizedPnl,
     dailyTradeCount: state.dailyTradeCount + 1,
-    highWaterMark: 0,
-    gexTpPoints: null,
   };
 
   return { newState, realizedPnl, exitFill };
 }
 
 // ── Helpers ──
-
-function getEtMinutesSinceMidnight(utcIso: string): number {
-  const d = new Date(utcIso);
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(d);
-  const get = (t: string) =>
-    Number.parseInt(parts.find((p) => p.type === t)?.value ?? '0', 10);
-  return get('hour') * 60 + get('minute');
-}
 
 function parseHhmm(hhmm: string): number {
   const [h, m] = hhmm.split(':').map((s) => Number.parseInt(s, 10));

@@ -15,6 +15,7 @@
  */
 
 import { getDb } from '../db/index.js';
+import { CAPTURED_AT_ET_DATE, CAPTURED_AT_UTC_ISO } from './db-sql.js';
 import type { ConeEndpoints, Snapshot, StrikeData } from './types.js';
 
 /**
@@ -55,11 +56,11 @@ export async function loadDay(
   // captured_at instant lands on the same trading day as its prices. This drops
   // forward-expiry (1DTE+) captures whose captured_at is an earlier session.
   const rows = await sql(
-    `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at,
+    `SELECT ${CAPTURED_AT_UTC_ISO} AS captured_at,
             expiry::text AS expiry, panel, strike, value, timeframe
      FROM periscope_snapshots
      WHERE expiry = $1
-       AND (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+       AND ${CAPTURED_AT_ET_DATE} = $1::date
        AND panel IN ('gamma', 'charm', 'vanna')
      ORDER BY captured_at, strike`,
     [date],
@@ -304,8 +305,7 @@ async function loadSpotPrices(date: string): Promise<Map<string, number>> {
 
   try {
     const rows = await sql(
-      // Same captured_at rendering as loadDay so the join keys match exactly.
-      `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at, spot
+      `SELECT ${CAPTURED_AT_UTC_ISO} AS captured_at, spot
        FROM spot_prices
        WHERE date = $1
        ORDER BY captured_at`,
@@ -334,8 +334,7 @@ async function loadEsPrices(date: string): Promise<Map<string, number>> {
 
   try {
     const rows = await sql(
-      // Same captured_at rendering as loadDay so the join keys match exactly.
-      `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at, close
+      `SELECT ${CAPTURED_AT_UTC_ISO} AS captured_at, close
        FROM es_prices
        WHERE date = $1
        ORDER BY captured_at`,
@@ -371,12 +370,11 @@ async function loadPositions(
 
   try {
     const rows = await sql(
-      // Same captured_at rendering as loadDay so the join keys match exactly.
-      `SELECT to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS captured_at,
+      `SELECT ${CAPTURED_AT_UTC_ISO} AS captured_at,
               strike, call_qty, put_qty
        FROM positions
        WHERE expiry = $1
-         AND (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+         AND ${CAPTURED_AT_ET_DATE} = $1::date
        ORDER BY captured_at, strike`,
       [date],
     );
@@ -411,7 +409,7 @@ export async function loadCone(date: string): Promise<ConeEndpoints | null> {
     const rows = await sql(
       `SELECT spx_open, cone_upper, cone_lower
        FROM cone_snapshots
-       WHERE (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+       WHERE ${CAPTURED_AT_ET_DATE} = $1::date
        LIMIT 1`,
       [date],
     );
@@ -448,7 +446,7 @@ export async function loadDateRange(
      FROM periscope_snapshots
      WHERE expiry >= $1 AND expiry <= $2
        AND panel = 'gamma'
-       AND (captured_at AT TIME ZONE 'America/New_York')::date = expiry
+       AND ${CAPTURED_AT_ET_DATE} = expiry
      ORDER BY expiry`,
     [startDate, endDate],
   );
@@ -472,7 +470,7 @@ export async function getAvailableDates(): Promise<string[]> {
     `SELECT DISTINCT expiry::text AS expiry
      FROM periscope_snapshots
      WHERE panel = 'gamma'
-       AND (captured_at AT TIME ZONE 'America/New_York')::date = expiry
+       AND ${CAPTURED_AT_ET_DATE} = expiry
      ORDER BY expiry`,
   );
   return rows.map((r) => String(r.expiry));

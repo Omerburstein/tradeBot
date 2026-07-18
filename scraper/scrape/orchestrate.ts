@@ -32,6 +32,7 @@ import {
   storeCone,
   captureTideForDate,
   fetchSpotCandles5m,
+  fetchSpotCandles1m,
   captureStraddleForDate,
   resolveStraddleTemplate,
 } from './api-helpers.js';
@@ -89,6 +90,7 @@ async function scrapeAndStoreDay(
   tideUrlTemplate: string | undefined,
   straddleUrlTemplate: string | undefined,
   intradaySpotByDate: Map<string, SpotRow[]>,
+  intradaySpot1mByDate: Map<string, SpotRow[]>,
 ): Promise<DayStoreSummary> {
   // Drop any responses left over from the previous day so the `?? last`
   // fallbacks below can't read stale data for this date.
@@ -189,7 +191,7 @@ async function scrapeAndStoreDay(
   // ── Spot: real 5-min index_candles for recent days (within the ~30-day 5m
   // window), else a single daily close for older days. See storeSpot — UW has
   // no historical intraday price source beyond that window.
-  const spotsInserted = await storeSpot(caps, date, intradaySpotByDate);
+  const spotsInserted = await storeSpot(caps, date, intradaySpotByDate, intradaySpot1mByDate);
 
   // ── Market Tide: the per-date net-flow-ticks captured above (5-min slots).
   // Skipped for past days the endpoint can't serve (latest-session only).
@@ -216,8 +218,10 @@ interface DayRunContext {
   tideUrlTemplate: string | undefined;
   /** bsoc/SPX/straddle URL template (observed or synthesized from the tide origin). */
   straddleUrlTemplate: string | undefined;
-  /** ~30 trading days of 5-min spot rows, keyed by ET date. */
+  /** ~30 trading days of 5-min spot rows, keyed by ET date (fallback source). */
   intradaySpotByDate: Map<string, SpotRow[]>;
+  /** ~6 trading days of accurate 1-min spot rows, keyed by ET date (preferred). */
+  intradaySpot1mByDate: Map<string, SpotRow[]>;
 }
 
 /**
@@ -240,11 +244,10 @@ async function openDashboardAndResolveContext(
   await page.waitForTimeout(1_500);
   const tideUrlTemplate = caps.tide[caps.tide.length - 1]?.url;
   const straddleUrlTemplate = resolveStraddleTemplate(caps, tideUrlTemplate);
-  const intradaySpotByDate = await fetchSpotCandles5m(
-    page,
-    caps.candles[caps.candles.length - 1]?.url ?? tideUrlTemplate,
-  );
-  return { tideUrlTemplate, straddleUrlTemplate, intradaySpotByDate };
+  const candlesOrigin = caps.candles[caps.candles.length - 1]?.url ?? tideUrlTemplate;
+  const intradaySpotByDate = await fetchSpotCandles5m(page, candlesOrigin);
+  const intradaySpot1mByDate = await fetchSpotCandles1m(page, candlesOrigin);
+  return { tideUrlTemplate, straddleUrlTemplate, intradaySpotByDate, intradaySpot1mByDate };
 }
 
 /**
@@ -283,6 +286,7 @@ export async function scrapeBackfill(
       ctx.tideUrlTemplate,
       ctx.straddleUrlTemplate,
       ctx.intradaySpotByDate,
+      ctx.intradaySpot1mByDate,
     );
 
     logger.info({ targetDate, ...summary }, 'backfill: complete');
@@ -427,6 +431,7 @@ export async function scrapeBackfillDates(
           ctx.tideUrlTemplate,
           ctx.straddleUrlTemplate,
           ctx.intradaySpotByDate,
+          ctx.intradaySpot1mByDate,
         );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;
@@ -495,6 +500,13 @@ export async function scrapeWalkBack(opts: {
   endHhmm: string;
   maxConsecutiveEmpty?: number;
   floorDate?: string;
+  /**
+   * First (newest) trading day to scrape. Defaults to `latestTradingDay()`.
+   * Pass an explicit earlier date to EXCLUDE today (e.g. start at yesterday
+   * so an in-progress session isn't half-captured) — the walk still steps
+   * backwards from here to the history floor.
+   */
+  startDate?: string;
 }): Promise<{
   totalRowsInserted: number;
   daysScanned: number;
@@ -511,10 +523,17 @@ export async function scrapeWalkBack(opts: {
   return await withBrowser(async (_browser, page) => {
     const caps = attachApiCaptures(page);
 
-    const firstDate = latestTradingDay();
+    const firstDate = opts.startDate ?? latestTradingDay();
     logger.info(
-      { firstDate, startHhmm: startNorm, endHhmm: endNorm, maxEmpty, floorDate: opts.floorDate ?? null },
-      'walk-back: starting from latest trading day',
+      {
+        firstDate,
+        startDateOverride: opts.startDate ?? null,
+        startHhmm: startNorm,
+        endHhmm: endNorm,
+        maxEmpty,
+        floorDate: opts.floorDate ?? null,
+      },
+      'walk-back: starting',
     );
 
     const ctx = await openDashboardAndResolveContext(page, caps);
@@ -548,6 +567,7 @@ export async function scrapeWalkBack(opts: {
           ctx.tideUrlTemplate,
           ctx.straddleUrlTemplate,
           ctx.intradaySpotByDate,
+          ctx.intradaySpot1mByDate,
         );
         totalRowsInserted += summary.snapshotsInserted;
         daysScanned += 1;

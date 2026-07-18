@@ -13,8 +13,11 @@
  * - Price returning INSIDE the cone → exit (breakout failed)
  */
 
+import { etMinutesSinceMidnight } from './et-time.js';
 import type { ConeEndpoints, ConeInfo, ConeState } from './types.js';
 
+/** RTH close = 16:00 ET, in minutes since ET midnight. */
+const RTH_CLOSE_MINUTES = 16 * 60;
 /** RTH session length in minutes (09:30–16:00 ET). */
 const RTH_MINUTES = 390;
 
@@ -110,34 +113,9 @@ export class ConeTracker {
     return Math.min(1, Math.max(0, elapsed / RTH_MINUTES));
   }
 
-  /**
-   * Compute minutes until RTH close (16:00 ET) from a UTC timestamp.
-   *
-   * ET (America/New_York) is the pipeline's single wall-clock zone. Uses
-   * Intl.DateTimeFormat for DST-aware conversion (same approach as the
-   * scraper's dates.ts to avoid the container-TZ regression).
-   */
+  /** Minutes until RTH close (16:00 ET) from a UTC timestamp; 0 once past it. */
   private minutesUntilClose(capturedAtUtc: string): number {
-    const d = new Date(capturedAtUtc);
-
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York',
-      hour: '2-digit',
-      minute: '2-digit',
-      hourCycle: 'h23',
-    }).formatToParts(d);
-
-    const get = (t: string) =>
-      Number.parseInt(parts.find((p) => p.type === t)?.value ?? '0', 10);
-
-    const etHour = get('hour');
-    const etMinute = get('minute');
-    const etMinutesSinceMidnight = etHour * 60 + etMinute;
-
-    // RTH close = 16:00 ET = 960 minutes since midnight
-    const closeMinutes = 16 * 60;
-    const remaining = closeMinutes - etMinutesSinceMidnight;
-
+    const remaining = RTH_CLOSE_MINUTES - etMinutesSinceMidnight(capturedAtUtc);
     return Math.max(remaining, 0);
   }
 }

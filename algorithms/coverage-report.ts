@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import { getDb } from '../db/index.js';
 import { REQUIRED_SOURCES, SOURCE_SPECS } from './data-coverage.js';
+import { CAPTURED_AT_ET_DATE, CAPTURED_AT_UTC_ISO } from './db-sql.js';
 import type { DataSource } from './types.js';
 
 /** Coverage of one trading day's Greek decision slots. */
@@ -33,7 +34,7 @@ interface DayCoverage {
 }
 
 /** Render captured_at exactly as the loader keys its joins (no milliseconds). */
-const AS_KEY = `to_char(captured_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`;
+const AS_KEY = CAPTURED_AT_UTC_ISO;
 
 async function slotSet(query: string, params: unknown[]): Promise<Set<string>> {
   const sql = getDb();
@@ -51,13 +52,13 @@ async function loadDayCoverage(day: string): Promise<DayCoverage> {
   const gamma = await slotSet(
     `SELECT ${AS_KEY} AS t FROM periscope_snapshots
       WHERE expiry = $1 AND panel = 'gamma'
-        AND (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+        AND ${CAPTURED_AT_ET_DATE} = $1::date
       GROUP BY captured_at`,
     [day],
   );
   const positions = await slotSet(
     `SELECT ${AS_KEY} AS t FROM positions
-      WHERE expiry = $1 AND (captured_at AT TIME ZONE 'America/New_York')::date = $1::date
+      WHERE expiry = $1 AND ${CAPTURED_AT_ET_DATE} = $1::date
       GROUP BY captured_at`,
     [day],
   );
@@ -97,7 +98,7 @@ async function availableDays(start?: string, end?: string): Promise<string[]> {
   const rows = await sql(
     `SELECT DISTINCT expiry::text AS expiry FROM periscope_snapshots
       WHERE panel = 'gamma'
-        AND (captured_at AT TIME ZONE 'America/New_York')::date = expiry
+        AND ${CAPTURED_AT_ET_DATE} = expiry
         AND ($1::date IS NULL OR expiry >= $1)
         AND ($2::date IS NULL OR expiry <= $2)
       ORDER BY expiry`,

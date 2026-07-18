@@ -23,6 +23,7 @@ export interface SpotRow {
 }
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
+const ONE_MIN_MS = 60 * 1000;
 
 /** Greeks present in the API response, in capture order. `delta` also
  *  arrives from the new endpoint but is not persisted (DB `panel` CHECK). */
@@ -207,6 +208,57 @@ export function candles5mToSpotRowsByDate(
     slots.set(capturedAt, { capturedAt, expiry: date, spot });
   }
   // Flatten each date's slot map to a chronologically sorted row array.
+  const out = new Map<string, SpotRow[]>();
+  for (const [date, slots] of byDate) {
+    out.set(
+      date,
+      [...slots.values()].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt)),
+    );
+  }
+  return out;
+}
+
+/**
+ * Bucket intraday 1-MIN SPX index candles into per-minute spot rows, keyed by
+ * ET trading date. Unlike the 5-min series — whose OHLC is misaligned to its
+ * label (UW's 5m aggregation scrambles a bar's open/close across its window, so
+ * the stored open and close belong to different minutes) — the 1m candles are
+ * clean, on-grid, and match TradingView.
+ *
+ * Each row is keyed at the candle's START minute (how TradingView labels a bar)
+ * with value = the candle CLOSE (the minute's settle). That pairing is exactly
+ * what the algo's `spotAtClose` join wants: for a Greek slot ending at T it
+ * reads the spot row keyed at T−1min, i.e. the bar that CLOSES at T.
+ *
+ * This is only a FALLBACK for backfill spot: the authoritative source is the
+ * exact I:SPX index ingested by scripts/fetch_spx.py → ingest-spx.ts, which
+ * covers all history (this UW endpoint is server-capped to ~6 trading days
+ * back). Both use the identical bar-start/close convention, so they agree.
+ */
+export function candles1mToSpotRowsByDate(
+  candles: ReadonlyArray<ApiIntradayCandle>,
+): Map<string, SpotRow[]> {
+  const byDate = new Map<string, Map<string, SpotRow>>();
+
+  for (const c of candles) {
+    const t = new Date(c.start).getTime();
+    if (Number.isNaN(t)) continue; // skip unparseable timestamps
+    const close = Number.parseFloat(c.c); // `c` (close) = the minute's settle
+    if (!Number.isFinite(close) || close <= 0) continue; // skip junk prices
+    // 1m candles are already on the minute grid; snap defensively so a stray
+    // sub-minute offset can't spawn a duplicate off-grid key.
+    const snapped = new Date(Math.round(t / ONE_MIN_MS) * ONE_MIN_MS);
+    const capturedAt = snapped.toISOString();
+    const date = etDateOf(snapped);
+
+    let slots = byDate.get(date);
+    if (slots === undefined) {
+      slots = new Map<string, SpotRow>();
+      byDate.set(date, slots);
+    }
+    slots.set(capturedAt, { capturedAt, expiry: date, spot: close });
+  }
+
   const out = new Map<string, SpotRow[]>();
   for (const [date, slots] of byDate) {
     out.set(
