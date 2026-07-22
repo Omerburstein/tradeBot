@@ -1,4 +1,4 @@
-import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
+import { neon } from '@neondatabase/serverless';
 import { DATABASE_URL } from '../scraper/core/config.js';
 import { isPersistableSlot, MARKET_OPEN_MIN } from '../scraper/core/dates.js';
 
@@ -16,11 +16,34 @@ export function isRthInstant(capturedAt: string): boolean {
   return isPersistableSlot(new Date(capturedAt), MARKET_OPEN_MIN);
 }
 
-let client: NeonQueryFunction<false, false> | null = null;
+/**
+ * Driver-agnostic query surface: a parameterized SQL string in, an array of
+ * result rows out. This is the ONLY database contract the rest of the codebase
+ * (every db/ module + the algo data-loader + the tools/ scripts) depends on —
+ * no other file imports a Postgres driver.
+ *
+ * ┌─ TO SWAP POSTGRES PROVIDERS (Neon → node-postgres / CockroachDB / …) ──────┐
+ * │ Rewrite ONLY the body of getDb() below to return a function of this shape. │
+ * │ Nothing else in the repo needs to change. With a standard `pg` Pool:       │
+ * │   const pool = new Pool({ connectionString: DATABASE_URL });               │
+ * │   client = (text, params = []) => pool.query(text, params).then(r => r.rows); │
+ * │ (`pg` returns `{ rows }`; the .then(r => r.rows) is what re-pins the        │
+ * │ rows-array contract that Neon's query-function form gives us for free.)     │
+ * └────────────────────────────────────────────────────────────────────────────┘
+ */
+export type SqlClient = <T = Record<string, unknown>>(
+  text: string,
+  params?: unknown[],
+) => Promise<T[]>;
 
-export function getDb(): NeonQueryFunction<false, false> {
+let client: SqlClient | null = null;
+
+/** Lazily-initialized singleton query client. See {@link SqlClient}. */
+export function getDb(): SqlClient {
   if (client === null) {
-    client = neon(DATABASE_URL);
+    const neonSql = neon(DATABASE_URL);
+    client = <T = Record<string, unknown>>(text: string, params: unknown[] = []) =>
+      neonSql(text, params) as unknown as Promise<T[]>;
   }
   return client;
 }

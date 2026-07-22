@@ -1,4 +1,4 @@
-export { getDb } from './client.js';
+export { getDb, type SqlClient } from './client.js';
 export { filterInsertable, insertSnapshots } from './snapshots.js';
 export { insertSpotPrice, insertSpotPrices, deleteSpotPricesInRange } from './spot-prices.js';
 export { insertEsPrices, type EsPriceRow } from './es-prices.js';
