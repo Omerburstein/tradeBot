@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""fetch_es.py — pull ES (S&P 500 futures) 5-min bars from massive/Polygon and
-write a CSV the ES→SPX converter / ingest can read.
+"""fetch_es.py — pull ES (S&P 500 futures) 1-min bars from massive/Polygon and
+write a CSV the ES→SPX converter / ingest can read. massive serves the full
+history (no ~30-day 1-min floor like Yahoo), so this reaches the older tune days.
 
 NOT part of the scraper. Run on demand. Requires the `massive` SDK:
 
     pip install massive
-    MASSIVE_API_KEY=xxxxx python scripts/fetch_es.py --out docs/temp/es-front-month-5min.csv
+    MASSIVE_API_KEY=xxxxx python scripts/fetch_es.py --out docs/temp/es-front-month-1min.csv
+    # --resolution 5min for the legacy cadence.
 
 WHY "ROLLED" BY DEFAULT
 -----------------------
@@ -41,13 +43,13 @@ DEFAULT_CONTRACTS = ["ESH6", "ESM6", "ESU6"]  # Mar, Jun, Sep 2026
 DEFAULT_START = "2025-12-29"
 
 
-def fetch_contract(client: RESTClient, ticker: str, start: str):
+def fetch_contract(client: RESTClient, ticker: str, start: str, resolution: str = "1min"):
     """Return {(et_date, et_datetime_str, min_of_day): (o,h,l,c,v)} for one
     contract, stopping once we page past `start` (sorted desc)."""
     out = {}
     n = 0
     for a in client.list_futures_aggregates(
-        ticker=ticker, resolution="5min", sort="window_start.desc", limit=50000,
+        ticker=ticker, resolution=resolution, sort="window_start.desc", limit=50000,
     ):
         n += 1
         dt_utc = datetime.fromtimestamp(a.window_start / 1e9, tz=timezone.utc)
@@ -70,6 +72,11 @@ def main() -> None:
         default=None,
         help="Single contract (e.g. ESU6). Omit to roll the front month.",
     )
+    ap.add_argument(
+        "--resolution",
+        default="1min",
+        help="Bar resolution (default 1min to match the per-minute Greeks; 5min for the legacy cadence).",
+    )
     args = ap.parse_args()
 
     api_key = os.environ.get("MASSIVE_API_KEY")
@@ -84,7 +91,7 @@ def main() -> None:
     bars = {}
     rth_vol = {c: defaultdict(float) for c in contracts}
     for c in contracts:
-        bars[c] = fetch_contract(client, c, args.start)
+        bars[c] = fetch_contract(client, c, args.start, args.resolution)
         for (date_et, _, mind), (_o, _h, _l, _cl, v) in bars[c].items():
             if 9 * 60 + 30 <= mind <= 16 * 60:
                 rth_vol[c][date_et] += v or 0
