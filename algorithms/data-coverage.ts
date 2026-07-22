@@ -105,7 +105,7 @@ export interface DataGap {
   expiry: string;
   /** Sources missing for this slot. */
   missing: DataSource[];
-  /** True when the slot is an intermediate 5-min price tick, not a Greek slot. */
+  /** True when the slot is an intermediate price tick, not a real Greek slot. */
   isTick: boolean;
 }
 

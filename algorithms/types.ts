@@ -62,12 +62,14 @@ export interface Snapshot {
    */
   cone?: ConeEndpoints | null;
   /**
-   * True for an intermediate *price tick* the data-loader inserts between the
-   * 10-minute Greek slots so the algo can re-decide entry/exit every 5 minutes
-   * on the CURRENT stock price. Greeks (`strikes`) are unchanged from the slot
-   * that precedes the tick — only `spot`/`es` are refreshed — so the signal
-   * generator reuses the latest Greek score instead of recomputing it (and does
-   * NOT advance the z-score history). Absent/`false` = a real Greek snapshot.
+   * True for an intermediate *price tick* the data-loader inserts between Greek
+   * slots so the algo can re-decide entry/exit every minute on the CURRENT stock
+   * price, even when the Greek feed is coarser (10-min historical backfill).
+   * Greeks (`strikes`) are unchanged from the slot that precedes the tick — only
+   * `spot`/`es` are refreshed — so the signal generator reuses the latest Greek
+   * score instead of recomputing it (and does NOT advance the z-score history).
+   * When the Greek feed is already per-minute no ticks are inserted. Absent/
+   * `false` = a real Greek snapshot.
    */
   greeksStale?: boolean;
   /**
@@ -234,6 +236,14 @@ export interface RiskParams {
   slippagePerSide: number;
   /** SPX point value in USD (e.g. $50 for /ES, $100 for SPX options). */
   pointValue: number;
+  /**
+   * ET time before which no new entries are allowed (HH:MM). Pre-market Greek
+   * frames are loaded so the z-score history and cone/positioning warm up before
+   * the bell, but entries stay gated to regular trading hours — set to the 09:30
+   * open, thin pre-open SPX liquidity makes pre-bell fills untrustworthy. Exits
+   * are never blocked (a position can only exist once entries are allowed).
+   */
+  noNewTradesBeforeET: string;
   /** ET time after which no new entries allowed (HH:MM). */
   noNewTradesAfterET: string;
   /** ET time by which all positions must be flat (HH:MM). */
@@ -415,6 +425,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     maxTradesPerDay: 6,
     slippagePerSide: 0.50,
     pointValue: 50, // $50 P&L per 1.0 ES point, per contract (/ES e-mini)
+    noNewTradesBeforeET: '09:30', // first entry time — pre-market slots warm up only, no trades before the 09:30 bell
     noNewTradesAfterET: '14:00', // last entry time — no new trades at/after 14:00 ET
     forcedExitByET: '15:50', // was 14:50 CT — 10 min before the 16:00 ET close
   },

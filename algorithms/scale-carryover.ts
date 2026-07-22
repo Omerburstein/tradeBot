@@ -4,12 +4,14 @@
  *
  * `normalizeToScale` (score-engine.ts) divides each raw factor by
  * `meanAbs(recent raws)`. That scale needs 3 samples, and `scoreHistory` only
- * advances on FRESH Greek snapshots (signal-generator.ts) — which arrive every
- * 10 minutes. So the first ~30 minutes of every session run on a fabricated
- * ±1 sign estimate instead of a measured scale.
+ * advances on FRESH Greek snapshots (signal-generator.ts) — so the opening
+ * decisions of a session run on a fabricated ±1 sign estimate until enough
+ * frames accumulate. (Loading pre-market Greek frames as warm-up shortens this,
+ * and the per-minute feed warms it in ~3 minutes; the 10-min historical backfill
+ * still needs ~30.)
  *
- * Seeding the scale from the previous day would remove that warm-up — IF the
- * previous day's magnitude actually predicts the next day's opening magnitude.
+ * Seeding the scale from the previous day would remove that warm-up entirely —
+ * IF the previous day's magnitude actually predicts the next day's opening.
  * This report measures whether it does, per factor:
  *
  *   ratioFirst = meanAbs(prev day's FIRST 3 fresh ticks) / meanAbs(curr day's FIRST 3 fresh ticks)

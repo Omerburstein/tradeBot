@@ -16,6 +16,8 @@
 import { etMinutesSinceMidnight } from './et-time.js';
 import type { ConeEndpoints, ConeInfo, ConeState } from './types.js';
 
+/** RTH open = 09:30 ET (the cone apex), in minutes since ET midnight. */
+const RTH_OPEN_MINUTES = 9 * 60 + 30;
 /** RTH close = 16:00 ET, in minutes since ET midnight. */
 const RTH_CLOSE_MINUTES = 16 * 60;
 /** RTH session length in minutes (09:30–16:00 ET). */
@@ -54,6 +56,22 @@ export class ConeTracker {
       };
       this.previousState = 'inside';
       return info;
+    }
+
+    // Pre-market (before the 09:30 apex): the cone is not yet defined — it fans
+    // out FROM the open, so there is nothing to be inside/above/below yet. These
+    // warm-up slots must not establish a cone state, or a pre-open price sitting
+    // "above" the zero-width apex would swallow the first genuine RTH breakout
+    // crossing. Report a neutral unbounded 'inside' and leave previousState
+    // untouched so the first RTH slot sets the crossing baseline.
+    if (etMinutesSinceMidnight(capturedAtUtc) < RTH_OPEN_MINUTES) {
+      return {
+        upper: Number.POSITIVE_INFINITY,
+        lower: Number.NEGATIVE_INFINITY,
+        state: 'inside',
+        previousState: this.previousState,
+        crossed: null,
+      };
     }
 
     const { spxOpen, coneUpper, coneLower } = this.endpoints;

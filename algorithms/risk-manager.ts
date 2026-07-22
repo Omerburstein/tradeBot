@@ -209,11 +209,15 @@ export function checkTimeGates(
   config: AlgoConfig,
 ): { blockNewEntries: boolean; forceExit: boolean } {
   const etMinutes = etMinutesSinceMidnight(capturedAtUtc);
+  const openMinutes = parseHhmm(config.risk.noNewTradesBeforeET);
   const noEntryMinutes = parseHhmm(config.risk.noNewTradesAfterET);
   const forceExitMinutes = parseHhmm(config.risk.forcedExitByET);
 
   return {
-    blockNewEntries: etMinutes >= noEntryMinutes,
+    // Block new entries pre-market (before the open) and after the late cutoff.
+    // Pre-market Greek frames still warm the z-score/cone history upstream; they
+    // just never open a position (see RiskParams.noNewTradesBeforeET).
+    blockNewEntries: etMinutes < openMinutes || etMinutes >= noEntryMinutes,
     forceExit: etMinutes >= forceExitMinutes,
   };
 }

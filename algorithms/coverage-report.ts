@@ -25,7 +25,8 @@ import type { DataSource } from './types.js';
 /** Coverage of one trading day's Greek decision slots. */
 interface DayCoverage {
   day: string;
-  /** Number of distinct gamma (10-min) decision slots the day has. */
+  /** Number of distinct gamma decision slots the day has (at the feed's cadence
+   *  — per-minute live, 10-min historical backfill). */
   gammaSlots: number;
   /** Slots fully covered by all four sources. */
   fullyCovered: number;
@@ -47,8 +48,8 @@ async function slotSet(query: string, params: unknown[]): Promise<Set<string>> {
 }
 
 async function loadDayCoverage(day: string): Promise<DayCoverage> {
-  // Gamma slots are the 10-min decision anchors (spot/es are also required at the
-  // intermediate 5-min ticks, but a slot's Greeks/positions come from these).
+  // Gamma slots are the Greek decision anchors (spot/es are also required at the
+  // intermediate price ticks, but a slot's Greeks/positions come from these).
   const gamma = await slotSet(
     `SELECT ${AS_KEY} AS t FROM periscope_snapshots
       WHERE expiry = $1 AND panel = 'gamma'
@@ -145,8 +146,9 @@ function renderReport(days: DayCoverage[], start?: string, end?: string): string
     'A slot is **actionable** only when every row above is satisfied. The gate lives',
     'in `algorithms/data-coverage.ts` (`assessCoverage`) and is enforced in',
     '`algorithms/signal-generator.ts` (`processSnapshot`, step 0). Intermediate',
-    '5-minute price ticks additionally require a spot **and** ES bar at the tick',
-    'instant; their GEX/positions carry from the parent 10-minute Greek slot.',
+    'price ticks (inserted between Greek frames when the feed is coarser than',
+    'per-minute) additionally require a spot **and** ES bar at the tick instant;',
+    'their GEX/positions carry from the parent Greek slot.',
     '',
     '## Current coverage',
     '',

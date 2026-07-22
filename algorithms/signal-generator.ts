@@ -110,13 +110,14 @@ export class SignalGenerator {
   /**
    * Process a new snapshot and return a signal.
    *
-   * Called once per decision — every 5 minutes — in chronological order. Real
-   * Greek snapshots arrive every 10 minutes; the data-loader inserts an
-   * intermediate price tick (`greeksStale`) at each 5-minute mark so entry/exit
-   * is re-decided on the current stock price twice as often. On a price tick the
-   * Greeks are unchanged, so the latest Greek score is reused (and the z-score
-   * history is not advanced) while the cone/stop/target/entry checks below all
-   * run against the tick's current spot.
+   * Called once per decision — every minute — in chronological order. Real Greek
+   * snapshots arrive at the feed's own cadence (per-minute live, 10-min
+   * historical backfill); when it is coarser the data-loader inserts an
+   * intermediate price tick (`greeksStale`) at each minute so entry/exit is
+   * re-decided on the current stock price between Greek frames. On a price tick
+   * the Greeks are unchanged, so the latest Greek score is reused (and the
+   * z-score history is not advanced) while the cone/stop/target/entry checks
+   * below all run against the tick's current spot.
    *
    * Throws if a snapshot arrives out of order (look-ahead guard).
    */

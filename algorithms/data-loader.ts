@@ -19,20 +19,24 @@ import { CAPTURED_AT_ET_DATE, CAPTURED_AT_UTC_ISO } from './db-sql.js';
 import type { ConeEndpoints, Snapshot, StrikeData } from './types.js';
 
 /**
- * Cadence (minutes) of the Greek panels the scraper captures — one snapshot per
- * 10-minute slot. Used as the upper bound for how far a slot's Greeks may be
- * carried forward when densifying, so a missing slot never extrapolates Greeks
- * more than one slot ahead.
+ * Fallback Greek cadence (minutes) when a day is too short to measure its own
+ * (< 2 snapshots). The real cadence is detected per day by
+ * {@link detectCadenceMinutes} — 1 for the post-2026-07 per-minute periscope
+ * feed, 10 for the historical backfill — and used as the upper bound for how
+ * far a slot's Greeks may be carried forward when densifying, so a missing slot
+ * never extrapolates Greeks more than one cadence step ahead.
  */
-const GREEK_SLOT_MINUTES = 10;
+const FALLBACK_GREEK_CADENCE_MINUTES = 10;
 
 /**
- * How often the algo re-decides entry/exit. The Greeks only refresh every
- * {@link GREEK_SLOT_MINUTES}, but spot/ES prices exist at 1-minute granularity
- * (live Yahoo feed → spot_prices/es_prices), so we insert an intermediate
- * price tick at this spacing inside each slot. 5 → decide every 5 minutes.
+ * How often the algo re-decides entry/exit. The Greeks refresh at the data's own
+ * cadence (1-min live feed, 10-min historical backfill), but spot/ES prices can
+ * exist at finer granularity, so we insert an intermediate price tick at this
+ * spacing between Greek slots. 1 → decide every minute (full 1-min resolution);
+ * a tick is only added where a real price bar exists, so the effective cadence
+ * never outruns the price feed (a 5-min feed still decides every 5 minutes).
  */
-const DECISION_INTERVAL_MINUTES = 5;
+const DECISION_INTERVAL_MINUTES = 1;
 
 /**
  * Load snapshots for a single trading day, joining gamma/charm/vanna
@@ -184,10 +188,45 @@ export async function loadDay(
     (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
   );
 
-  // Densify to a 5-minute decision cadence using the live 1-minute price feed.
-  // Greeks stay keyed to their slot END (captured_at) — the instant UW actually
-  // publishes the frame — so a slot is only applied once it exists (no look-ahead).
-  return densifyDecisions(snapshots, spotRows, esRows, DECISION_INTERVAL_MINUTES);
+  // Densify to a per-minute decision cadence using the finer price feed. Greeks
+  // stay keyed to their slot END (captured_at) — the instant UW actually
+  // publishes the frame — so a slot is only applied once it exists (no
+  // look-ahead). The carry-forward bound is the day's own detected Greek cadence
+  // (1-min live, 10-min historical) so a slot's Greeks never extrapolate past the
+  // next expected frame.
+  const cadence = detectCadenceMinutes(snapshots);
+  return densifyDecisions(snapshots, spotRows, esRows, DECISION_INTERVAL_MINUTES, cadence);
+}
+
+/**
+ * Infer a day's Greek snapshot cadence (minutes) from the modal gap between
+ * consecutive real snapshots: 1 for the post-2026-07 per-minute periscope feed,
+ * 10 for the historical backfill. Falls back to
+ * {@link FALLBACK_GREEK_CADENCE_MINUTES} when a day has fewer than two snapshots
+ * (no gap to measure) — harmless, since such a day has nothing to densify.
+ *
+ * @param snapshots  Real Greek snapshots for one day, sorted ascending.
+ */
+function detectCadenceMinutes(snapshots: Snapshot[]): number {
+  if (snapshots.length < 2) return FALLBACK_GREEK_CADENCE_MINUTES;
+  const counts = new Map<number, number>();
+  for (let i = 1; i < snapshots.length; i++) {
+    const gapMin = Math.round(
+      (new Date(snapshots[i]!.capturedAt).getTime() -
+        new Date(snapshots[i - 1]!.capturedAt).getTime()) /
+        60_000,
+    );
+    if (gapMin > 0) counts.set(gapMin, (counts.get(gapMin) ?? 0) + 1);
+  }
+  let best = FALLBACK_GREEK_CADENCE_MINUTES;
+  let bestCount = 0;
+  for (const [gapMin, count] of counts) {
+    if (count > bestCount) {
+      best = gapMin;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 /** Render a UTC epoch (ms) as the `YYYY-MM-DDTHH:MM:SSZ` key the price maps use
@@ -226,32 +265,35 @@ function esAtClose(map: Map<string, number>, tMs: number): number | undefined {
 }
 
 /**
- * Expand 10-minute Greek snapshots into a finer decision cadence so the algo can
+ * Expand Greek snapshots into a finer decision cadence so the algo can
  * re-evaluate entry/exit on the CURRENT stock price every `intervalMin` minutes
  * (instead of only once per Greek slot).
  *
  * For each slot, an intermediate *price tick* is inserted at every `intervalMin`
- * offset up to the next snapshot (capped at one {@link GREEK_SLOT_MINUTES} slot
- * so a missing slot never extrapolates Greeks far ahead). A tick reuses the
- * preceding slot's Greeks (`strikes`/`cone`/`timeframe`) but takes the spot/ES
- * price at the tick instant — and only when a real price bar exists there (price
- * is never fabricated, matching the spot-join policy above). Ticks are flagged
+ * offset up to the next snapshot (capped at one `cadenceMin` step so a missing
+ * slot never extrapolates Greeks far ahead). A tick reuses the preceding slot's
+ * Greeks (`strikes`/`cone`/`timeframe`) but takes the spot/ES price at the tick
+ * instant — and only when a real price bar exists there (price is never
+ * fabricated, matching the spot-join policy above). Ticks are flagged
  * `greeksStale` so the signal generator reuses the latest Greek score rather
- * than recomputing it. With no 1-minute feed for a day, no ticks are added and
- * the day decides at the original 10-minute cadence.
+ * than recomputing it. When the Greek feed is already per-minute (`cadenceMin`
+ * = 1) the carry window collapses and no ticks are added — the day already
+ * decides every minute off its real snapshots.
  *
  * @param snapshots  Real Greek snapshots for one day, sorted ascending.
+ * @param cadenceMin The day's detected Greek cadence (carry-forward bound).
  */
 function densifyDecisions(
   snapshots: Snapshot[],
   spotMap: Map<string, number>,
   esMap: Map<string, number>,
   intervalMin: number,
+  cadenceMin: number,
 ): Snapshot[] {
   if (intervalMin <= 0 || snapshots.length === 0) return snapshots;
 
   const stepMs = intervalMin * 60_000;
-  const slotMs = GREEK_SLOT_MINUTES * 60_000;
+  const slotMs = cadenceMin * 60_000;
   const out: Snapshot[] = [];
 
   for (let i = 0; i < snapshots.length; i++) {
