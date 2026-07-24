@@ -25,6 +25,10 @@
  *      threshold only, no gamma-strength weighting), matching the absolute
  *      positions LEVEL, via the same {@link signedDelta}: flip-aware size,
  *      build-vs-bleed sign. Then pointed by the side of spot.
+ *
+ *      Both rate-of-change factors then carry momentum forward as an EWMA over
+ *      the day's earlier deltas (`dMomentumDecay`), so a wall building steadily
+ *      across several snapshots accumulates signal while a one-slot blip decays.
  *   5. Distance weighting — further strikes contribute MORE score
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
@@ -187,6 +191,31 @@ export function computeScore(
         }
       }
     }
+  }
+
+  // Momentum carry-over (factors 3 & 4). A one-step delta is a single noisy
+  // difference of two snapshots, so blend it with the previous step's CARRIED
+  // delta: a wall building steadily over several minutes accumulates signal,
+  // while a one-slot blip decays over ~1/(1 − decay) snapshots. Because the
+  // carried value is what gets stored in ScoreComponents, this recursion
+  // expands to the full geometric series over the day's earlier deltas.
+  //
+  // CONVEX, not `now + decay·prev`: the weights sum to 1, so a carried delta
+  // stays on the same scale as a single step. A plain sum ramps toward a
+  // 1/(1 − decay) steady-state gain — 5× at 0.8 — and while normalizeToScale
+  // divides a CONSTANT gain out, it cannot divide out the ramp itself, which
+  // lands squarely on the day's opening reads.
+  //
+  // SEEDING: history[0] is the day's first score, whose delta is 0 by
+  // construction (no previous snapshot to difference against). Blending against
+  // that zero would attenuate the first REAL delta by (1 − decay) and take
+  // ~1/(1 − decay) snapshots to recover — i.e. straight through the open. So the
+  // carry only starts once a real previous delta exists (history.length >= 2).
+  const carried = history[history.length - 1];
+  if (config.dMomentumDecay > 0 && carried && history.length >= 2) {
+    const d = config.dMomentumDecay;
+    dGammaRaw = (1 - d) * dGammaRaw + d * carried.dGammaRaw;
+    dPositionsRaw = (1 - d) * dPositionsRaw + d * carried.dPositionsRaw;
   }
 
   // Magnitude-ratio normalization using a rolling lookback, hard-clamped to

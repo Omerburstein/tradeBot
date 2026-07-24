@@ -317,6 +317,24 @@ export interface AlgoConfig {
   distanceWeightSpan: number;
 
   /**
+   * EWMA carry-over weight on the PREVIOUS step's rate-of-change, applied to
+   * both dGamma and dPositions (0–1):
+   *
+   *   carried = (1 − decay)·thisStep + decay·previousCarried
+   *
+   * A one-step delta is a single noisy difference of two snapshots. Carrying
+   * momentum forward lets a wall that builds steadily over several minutes
+   * accumulate signal, while a one-slot blip decays away over ~1/(1 − decay)
+   * snapshots. 0 disables the carry entirely (each step stands alone); 0.8
+   * gives a ~5-snapshot memory.
+   *
+   * CADENCE-SENSITIVE: the memory is counted in SNAPSHOTS, not minutes, so the
+   * same decay spans ~5 min on the 1-min live feed but ~50 min on a 10-min
+   * backfill. Tune against the cadence you intend to trade.
+   */
+  dMomentumDecay: number;
+
+  /**
    * Minimum gamma strength (a strike's |gamma| as a fraction of the window's
    * max |gamma|, 0–1) required for that strike's positions to count at all.
    * Positions where gamma is weak carry no signal regardless of size.
@@ -390,6 +408,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   pDPositions: 0.5,
   pDistance: 1.5,
   distanceWeightSpan: 2.0,
+  dMomentumDecay: 0.8,
 
   positionsGammaGate: 0.30,
   zClamp: 3.5,

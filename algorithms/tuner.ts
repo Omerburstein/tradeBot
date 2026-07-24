@@ -91,6 +91,11 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   pDistance: { min: 0.8, max: 2.5 },
   distanceWeightSpan: { min: 0.5, max: 4.0 },
 
+  // EWMA carry-over on both rate-of-change factors. 0 = each step stands alone
+  // (the pre-carry behaviour); 0.9 = ~10-snapshot memory. Capped below 1.0 —
+  // at exactly 1.0 the current step drops out entirely and the factor freezes.
+  dMomentumDecay: { min: 0.0, max: 0.9 },
+
   // Gates / clamps.
   positionsGammaGate: { min: 0.10, max: 0.60 },
   zClamp: { min: 2.0, max: 5.0 },

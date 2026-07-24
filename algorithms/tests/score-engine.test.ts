@@ -24,7 +24,7 @@
 import pino from 'pino';
 import { computeScore } from '../score-engine.js';
 import { DEFAULT_CONFIG } from '../types.js';
-import type { Snapshot, StrikeData } from '../types.js';
+import type { ScoreComponents, Snapshot, StrikeData } from '../types.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
@@ -177,6 +177,87 @@ check(
   'unchanged gamma still 0 despite the +1 direction default',
   dGammaRaw(-80, -80) === 0,
   `got ${dGammaRaw(-80, -80)}`,
+);
+
+// ── 5c. Momentum carry-over (dMomentumDecay) ──
+// A one-step delta is one noisy difference. The carried value is a convex EWMA:
+//   carried = (1 − decay)·thisStep + decay·previousCarried
+// Because the carried value is what lands in ScoreComponents, the recursion
+// expands to the full geometric series over the day's earlier deltas.
+
+/** A ScoreComponents history entry carrying `dGammaRaw` (other fields inert). */
+function histEntry(dGammaRaw: number): ScoreComponents {
+  return {
+    gexRaw: 0, gexZ: 0,
+    dGammaRaw, dGammaZ: 0,
+    positionsRaw: 0, positionsZ: 0,
+    dPositionsRaw: 0, dPositionsZ: 0,
+    composite: 0,
+  };
+}
+
+/** dGammaRaw for one strike pair, against a history of prior carried deltas. */
+function dGammaCarried(
+  prevGamma: number,
+  currGamma: number,
+  hist: number[],
+  decay: number,
+): number {
+  return computeScore(
+    snap([strike(6010, currGamma)]),
+    snap([strike(6010, prevGamma)]),
+    hist.map(histEntry),
+    { ...DEFAULT_CONFIG, dMomentumDecay: decay },
+  ).dGammaRaw;
+}
+
+// decay = 0 reproduces the pre-carry behaviour exactly — each step stands alone.
+check(
+  'carry: decay 0 === single-step delta (carry disabled)',
+  dGammaCarried(50, 100, [0, 999], 0) === dGammaRaw(50, 100),
+  `got ${dGammaCarried(50, 100, [0, 999], 0)} vs ${dGammaRaw(50, 100)}`,
+);
+
+// With a real previous delta the blend is exactly convex.
+{
+  const step = dGammaRaw(50, 100); // this step's uncarried delta
+  const prevCarried = 400;
+  const got = dGammaCarried(50, 100, [0, prevCarried], 0.8);
+  const want = 0.2 * step + 0.8 * prevCarried;
+  check(
+    'carry: decay 0.8 blends (1−d)·step + d·prevCarried',
+    Math.abs(got - want) < 1e-9,
+    `got ${got}, want ${want}`,
+  );
+}
+
+// SEEDING: history[0] is the day's first score, whose delta is 0 by construction.
+// The first REAL delta must NOT be attenuated against that zero, or the open is
+// damped for ~1/(1−d) snapshots.
+check(
+  'carry: first real delta is unattenuated (not blended with the seed 0)',
+  dGammaCarried(50, 100, [0], 0.8) === dGammaRaw(50, 100),
+  `got ${dGammaCarried(50, 100, [0], 0.8)} vs ${dGammaRaw(50, 100)}`,
+);
+
+// A one-slot blip decays: with no fresh momentum this step, the carried value is
+// just the decayed previous one — smaller, same sign, never erased outright.
+{
+  const got = dGammaCarried(80, 80, [0, 500], 0.8); // unchanged gamma → step = 0
+  check(
+    'carry: a blip decays toward zero rather than vanishing',
+    got > 0 && got < 500,
+    `got ${got}`,
+  );
+  check('carry: decayed blip === d·prevCarried', Math.abs(got - 400) < 1e-9, `got ${got}`);
+}
+
+// A steady build accumulates: repeated same-sign deltas exceed one step alone.
+check(
+  'carry: a steady build exceeds a single isolated step',
+  dGammaCarried(50, 100, [0, dGammaRaw(50, 100)], 0.8) > 0 &&
+    dGammaCarried(50, 100, [0, dGammaRaw(50, 100)], 0.8) === dGammaRaw(50, 100),
+  `steady state of a constant delta is that same delta`,
 );
 
 // ── 6. Normalization is magnitude-ratio, NOT a z-score ──
