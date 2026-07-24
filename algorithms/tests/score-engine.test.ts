@@ -252,13 +252,30 @@ check(
   check('carry: decayed blip === d·prevCarried', Math.abs(got - 400) < 1e-9, `got ${got}`);
 }
 
-// A steady build accumulates: repeated same-sign deltas exceed one step alone.
-check(
-  'carry: a steady build exceeds a single isolated step',
-  dGammaCarried(50, 100, [0, dGammaRaw(50, 100)], 0.8) > 0 &&
-    dGammaCarried(50, 100, [0, dGammaRaw(50, 100)], 0.8) === dGammaRaw(50, 100),
-  `steady state of a constant delta is that same delta`,
-);
+// NO DRIFT: the weights sum to 1, so a repeated delta converges to that delta
+// rather than accumulating. This is the property that keeps the factor from
+// ramping up over the course of a day (a `now + d·prev` sum would land at 5×).
+{
+  const step = dGammaRaw(50, 100);
+  check(
+    'carry: a constant delta is its own steady state (no intraday ramp)',
+    dGammaCarried(50, 100, [0, step], 0.8) === step,
+    `got ${dGammaCarried(50, 100, [0, step], 0.8)}, want ${step}`,
+  );
+  // Iterate a full session's worth of snapshots to show it stays put, and that
+  // no input sequence can push the carried value past its own largest step.
+  let y = step;
+  let maxSeen = Math.abs(y);
+  for (let i = 0; i < 390; i++) {
+    y = dGammaCarried(50, 100, [0, y], 0.8);
+    maxSeen = Math.max(maxSeen, Math.abs(y));
+  }
+  check(
+    'carry: 390 snapshots of a constant delta never exceed that delta',
+    Math.abs(maxSeen - Math.abs(step)) < 1e-9,
+    `max |carried| ${maxSeen} vs step ${Math.abs(step)}`,
+  );
+}
 
 // ── 6. Normalization is magnitude-ratio, NOT a z-score ──
 // History supplies only the SCALE; it never re-centers the reading. These pin
