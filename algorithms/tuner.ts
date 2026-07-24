@@ -47,7 +47,7 @@
  *   TUNE_SIGMA=0.3          initial CMA-ES step size in normalized space (default 0.3)
  *   TUNE_OBJECTIVE=totalPnl sharpe | totalPnl | profitFactor (default totalPnl)
  *   TUNE_TRAIN_FRAC=0.7     fraction of days used for training (default 0.7)
- *   TUNE_MIN_TRADES=15      configs with fewer train trades are rejected
+ *   TUNE_MIN_TRADES=10      configs with fewer train trades are rejected
  *   TUNE_SEED=42            reproducible runs (default: time-seeded)
  *   INITIAL_CAPITAL=100000  seed capital for each run (default 100000)
  *   EQUITY_FLOOR=98000      hard equity floor; runs that hit it fail (default 98000)
@@ -183,7 +183,7 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
   // TUNE_ITERS / TUNE_REFINE keep controlling total compute.
   const totalBudget = (opts.iterations ?? 300) + (opts.refineIterations ?? 100);
   const trainFraction = opts.trainFraction ?? 0.7;
-  const minTrades = opts.minTrades ?? 15;
+  const minTrades = opts.minTrades ?? 10;
   const space = opts.space ?? DEFAULT_SEARCH_SPACE;
   const equity = opts.equity ?? DEFAULT_EQUITY;
   const sigma0 = opts.sigma0 ?? 0.3;
@@ -650,7 +650,7 @@ if (isMain) {
     sigma0: num(process.env.TUNE_SIGMA, 0.3),
     objective,
     trainFraction: num(process.env.TUNE_TRAIN_FRAC, 0.7),
-    minTrades: num(process.env.TUNE_MIN_TRADES, 15),
+    minTrades: num(process.env.TUNE_MIN_TRADES, 10),
     seed: process.env.TUNE_SEED ? Number(process.env.TUNE_SEED) : undefined,
     equity: {
       initialCapital: num(process.env.INITIAL_CAPITAL, DEFAULT_EQUITY.initialCapital),
