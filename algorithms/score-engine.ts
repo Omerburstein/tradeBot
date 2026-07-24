@@ -15,15 +15,16 @@
  *      per-strike power) — exactly like gamma's level; the only compression is
  *      the log applied at the normalize step. Direction comes from position vs
  *      spot (no positive bias — gamma only).
- *   3. dGamma/dt — rate of change of gamma *magnitude* (|gamma|) across
- *      successive snapshots, matching the absolute-magnitude GEX level. The
- *      delta of |gamma| is signed (its sign is momentum — a wall building vs
- *      bleeding, including a negative-gamma strike shrinking toward zero), then
- *      pointed by the strike's side of spot.
- *   4. dPositions/dt — rate of change of net MM positions *magnitude*
- *      (|positions|, same gamma gate — threshold only, no gamma-strength
- *      weighting), matching the absolute positions LEVEL. The delta of
- *      |positions| is signed momentum, then pointed by the side of spot.
+ *   3. dGamma/dt — rate of change of gamma across successive snapshots, matching
+ *      the absolute-magnitude GEX level. Its SIZE is the distance the value
+ *      actually travelled (|Δgamma|, so a sign flip counts as the full trip
+ *      through zero) and its SIGN is momentum — a wall building vs bleeding,
+ *      including a negative-gamma strike shrinking toward zero. See
+ *      {@link signedDelta}. Then pointed by the strike's side of spot.
+ *   4. dPositions/dt — rate of change of net MM positions (same gamma gate —
+ *      threshold only, no gamma-strength weighting), matching the absolute
+ *      positions LEVEL, via the same {@link signedDelta}: flip-aware size,
+ *      build-vs-bleed sign. Then pointed by the side of spot.
  *   5. Distance weighting — further strikes contribute MORE score
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
@@ -163,24 +164,25 @@ export function computeScore(
     if (previous) {
       const prev = prevByStrike.get(s.strike);
       if (prev) {
-        // Change in gamma *magnitude* (|gamma|), to match the GEX level factor
-        // which treats gamma as an absolute pressure. A wall building (|gamma|
-        // growing) is positive momentum; a wall bleeding off (|gamma| shrinking)
-        // is negative — including a NEGATIVE gamma position shrinking toward
-        // zero, which is a fade of that strike's pressure, so the delta is
-        // negative. The delta is already signed (its sign is momentum); the raw
-        // term is LINEAR in it (R6) — `sign` then points it by the strike's side
-        // of spot. `pDGamma` shaping is deferred to the normalize step.
-        const deltaGamma = Math.abs(s.gamma) - Math.abs(prev.gamma);
+        // Change in gamma, to match the GEX level factor which treats gamma as
+        // an absolute pressure. A wall building is positive momentum; a wall
+        // bleeding off is negative — including a NEGATIVE gamma position
+        // shrinking toward zero, which is a fade of that strike's pressure. See
+        // {@link signedDelta} for how a sign FLIP is accounted for. The delta is
+        // already signed (its sign is momentum); the raw term is LINEAR in it
+        // (R6) — `sign` then points it by the strike's side of spot. `pDGamma`
+        // shaping is deferred to the normalize step.
+        const deltaGamma = signedDelta(s.gamma, prev.gamma);
         dGammaRaw += deltaGamma * sign * dWeight;
 
         if (positionsCounts) {
-          // Change in position *magnitude* (|positions|), mirroring the dGamma
-          // factor and the absolute positions LEVEL — a wall of MM positioning
-          // building vs bleeding, regardless of the raw position's own sign. The
-          // delta is already signed momentum; the raw term is LINEAR in it (R6),
-          // pointed by `sign`. `pDPositions` shaping is deferred to normalize.
-          const deltaPositions = Math.abs(s.positions) - Math.abs(prev.positions);
+          // Change in net MM positioning, mirroring the dGamma factor and the
+          // absolute positions LEVEL — a wall of MM positioning building vs
+          // bleeding, regardless of the raw position's own sign, via the same
+          // {@link signedDelta}. The delta is already signed momentum; the raw
+          // term is LINEAR in it (R6), pointed by `sign`. `pDPositions` shaping
+          // is deferred to normalize.
+          const deltaPositions = signedDelta(s.positions, prev.positions);
           dPositionsRaw += deltaPositions * sign * dWeight;
         }
       }
@@ -223,6 +225,38 @@ export function computeScore(
     dPositionsZ,
     composite,
   };
+}
+
+/**
+ * Signed rate-of-change of a per-strike quantity (gamma or net MM positions)
+ * between two successive Greek snapshots. Shared by factors 3 and 4 so both
+ * rates of change speak exactly the same language.
+ *
+ *   size = |curr − prev|                 // how far the value actually travelled
+ *   dir  = sign(|curr| − |prev|)         // did the wall build (+) or bleed (−)
+ *   out  = dir · size
+ *
+ * WHY NOT |curr| − |prev|: differencing the magnitudes alone sees only the two
+ * endpoint magnitudes, so every sign FLIP is invisible — +100 → −50 scored
+ * identically to +100 → +50 (both −50), even though the first destroyed a wall
+ * and rebuilt an opposite one while the second merely decayed. Taking |curr −
+ * prev| as the size restores that: the flip travels 150, the decay 50.
+ *
+ * WHY NOT |curr − prev| ALONE: an unsigned size is always ≥ 0, which erases the
+ * factor's whole point — a wall building and a wall bleeding off would both read
+ * positive (+100 → +50 and +100 → +150 would both be 50). The magnitude change
+ * supplies the direction, so pressure growing is + and pressure fading is −.
+ *
+ * SIGN-INDEPENDENT by construction: negating BOTH inputs leaves `size` and `dir`
+ * unchanged, so dGamma(+100→+50) === dGamma(−100→−50) and dGamma(+100→−50) ===
+ * dGamma(−100→+50) — the invariant the level factor depends on.
+ *
+ * EDGE CASE — an exact sign flip with no magnitude change (+100 → −100) returns
+ * 0: `dir` is sign(0) = 0. The pressure magnitude genuinely did not change, which
+ * is what this factor measures; the flip itself is left to the LEVEL factors.
+ */
+function signedDelta(curr: number, prev: number): number {
+  return Math.sign(Math.abs(curr) - Math.abs(prev)) * Math.abs(curr - prev);
 }
 
 /**

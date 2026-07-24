@@ -1,13 +1,15 @@
 /**
  * Unit test — score engine dGamma momentum (NO network, NO DB, NO browser).
  *
- * Pins the invariant that dGamma acts on the *magnitude* of gamma (|gamma|),
+ * Pins the invariant that dGamma is a magnitude-directed change in gamma,
  * matching the absolute-magnitude GEX level factor. The key cases:
  *
  *   - a gamma wall building (|gamma| growing) is positive momentum;
  *   - a wall bleeding off (|gamma| shrinking) is negative — INCLUDING a
  *     negative-gamma strike shrinking toward zero (the regression this guards);
  *   - identical |Δgamma| gives identical dGamma regardless of gamma's sign;
+ *   - a sign FLIP is distinguished from a same-sign move of the same endpoint
+ *     magnitudes, because the delta's size is the trip through zero;
  *   - the strike's side of spot points the momentum (above = +, below = −);
  *   - unchanged Greeks (or no previous snapshot) → zero dGamma.
  *
@@ -121,6 +123,47 @@ check('unchanged gamma → dGamma === 0', dGammaRaw(80, 80) === 0, `got ${dGamma
 check(
   'no previous snapshot → dGamma === 0',
   computeScore(snap([strike(6010, 80)]), null, [], DEFAULT_CONFIG).dGammaRaw === 0,
+);
+
+// ── 5b. A sign FLIP is distinguished from a same-sign move ──
+// Differencing |gamma| alone saw only the endpoint magnitudes, so +100 → −50
+// scored identically to +100 → +50 (both −50) even though the first destroyed a
+// wall and rebuilt an opposite one. The delta's SIZE is now |Δgamma| (the full
+// trip through zero), so the flip reads as a strictly larger move.
+check(
+  'flip: dGamma(+100→−50) !== dGamma(+100→+50)',
+  dGammaRaw(100, -50) !== dGammaRaw(100, 50),
+  `got ${dGammaRaw(100, -50)} vs ${dGammaRaw(100, 50)}`,
+);
+check(
+  'flip: |dGamma(+100→−50)| > |dGamma(+100→+50)| (travelled through zero)',
+  Math.abs(dGammaRaw(100, -50)) > Math.abs(dGammaRaw(100, 50)),
+  `got ${dGammaRaw(100, -50)} vs ${dGammaRaw(100, 50)}`,
+);
+// Both are still a FADE of that strike's pressure (100 → 50 in magnitude).
+check(
+  'flip: dGamma(+100→−50) < 0 (pressure still shrank)',
+  dGammaRaw(100, -50) < 0,
+  `got ${dGammaRaw(100, -50)}`,
+);
+// A flip into a BIGGER opposite wall is pressure growing → positive momentum.
+check(
+  'flip: dGamma(+100→−150) > 0 (bigger opposite wall)',
+  dGammaRaw(100, -150) > 0,
+  `got ${dGammaRaw(100, -150)}`,
+);
+// The sign-independence invariant survives the flip-aware size.
+check(
+  'flip sign-independent: dGamma(+100→−50) === dGamma(−100→+50)',
+  dGammaRaw(100, -50) === dGammaRaw(-100, 50),
+  `got ${dGammaRaw(100, -50)} vs ${dGammaRaw(-100, 50)}`,
+);
+// Documented edge: an exact flip with no magnitude change is zero momentum —
+// the pressure magnitude did not move, which is what this factor measures.
+check(
+  'flip: dGamma(+100→−100) === 0 (magnitude unchanged)',
+  dGammaRaw(100, -100) === 0,
+  `got ${dGammaRaw(100, -100)}`,
 );
 
 // ── 6. Normalization is magnitude-ratio, NOT a z-score ──
