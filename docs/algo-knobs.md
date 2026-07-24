@@ -78,12 +78,21 @@ bar the composite z must clear.
 | `zScoreLookback` | `20` | Number of past same-day snapshots defining each factor's magnitude scale |
 
 **Factor normalization is not a z-score.** Each factor is `sign(r)·log2(1+|r|)`
-where `r = raw / meanAbs(recent raws)` — history sets the **scale** only and never
-re-centers the reading, so a factor keeps its raw sign and reads as "times the
-day's typical magnitude" (1.0 = typical, 3.46 = 10×). See
-[composite-score.md](composite-score.md) §4. The old `zStdFloorFrac` knob is gone
-(it floored a standard deviation that no longer exists), and thresholds tuned
-under the previous mean-centered scheme need re-tuning.
+where `r = raw / meanAbs(recent LEVEL raws)` — history sets the **scale** only and
+never re-centers the reading, so a factor keeps its raw sign and reads as "times
+the typical magnitude" (1.0 = typical, 3.46 = 10×).
+
+**Each rate of change is scaled by its level, not by itself:** `dGammaRaw` is
+divided by the `gexRaw` scale and `dPositionsRaw` by the `positionsRaw` scale, so
+they read as *the fraction of a typical level that moved this step*. A delta is a
+zero-mean series whose own mean magnitude is just its noise amplitude, so
+self-scaling standardized noise against noise and blew up at the open where the
+scale is thinnest. See [composite-score.md](composite-score.md) §4.
+**Consequence:** `dGammaZ` / `dPositionsZ` now sit near ≈0.1–0.2 rather than
+swinging ±3.5, so `wDGamma` / `wDPositions` (and their tuner bounds) must be
+re-tuned upward for the factors to contribute. The old `zStdFloorFrac` knob is
+gone (it floored a standard deviation that no longer exists), and thresholds
+tuned under the previous mean-centered scheme need re-tuning.
 
 ### Cone-breakout mode (`DEFAULT_CONFIG.coneBreakout`)
 A distinct entry/exit regime, **off by default**. When `enabled`, it *replaces*
