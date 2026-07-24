@@ -251,12 +251,18 @@ export function computeScore(
  * unchanged, so dGamma(+100→+50) === dGamma(−100→−50) and dGamma(+100→−50) ===
  * dGamma(−100→+50) — the invariant the level factor depends on.
  *
- * EDGE CASE — an exact sign flip with no magnitude change (+100 → −100) returns
- * 0: `dir` is sign(0) = 0. The pressure magnitude genuinely did not change, which
- * is what this factor measures; the flip itself is left to the LEVEL factors.
+ * WHY `dir` IS +1 WHEN THE MAGNITUDE IS UNCHANGED, not 0: `Math.sign` would
+ * return 0 there and zero out the whole term, which silently swallowed the most
+ * violent flip of all — +100 → −100 travels 200 through zero yet scored 0,
+ * because its endpoint magnitudes happen to match. Only a strict SHRINK is
+ * negative momentum; everything else is positive. This cannot resurrect the
+ * genuinely-unchanged case (curr === prev), whose `size` is already 0 — the two
+ * are separable because |curr| === |prev| with curr !== prev means, necessarily,
+ * an exact sign flip.
  */
 function signedDelta(curr: number, prev: number): number {
-  return Math.sign(Math.abs(curr) - Math.abs(prev)) * Math.abs(curr - prev);
+  const dir = Math.abs(curr) - Math.abs(prev) < 0 ? -1 : 1;
+  return dir * Math.abs(curr - prev);
 }
 
 /**

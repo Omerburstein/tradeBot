@@ -158,12 +158,25 @@ check(
   dGammaRaw(100, -50) === dGammaRaw(-100, 50),
   `got ${dGammaRaw(100, -50)} vs ${dGammaRaw(-100, 50)}`,
 );
-// Documented edge: an exact flip with no magnitude change is zero momentum —
-// the pressure magnitude did not move, which is what this factor measures.
+// The most violent flip of all: +100 → −100 travels 200 through zero. Its
+// endpoint magnitudes match, so a sign()-based direction zeroed the whole term
+// and swallowed it. Only a strict SHRINK is negative momentum now.
 check(
-  'flip: dGamma(+100→−100) === 0 (magnitude unchanged)',
-  dGammaRaw(100, -100) === 0,
+  'flip: dGamma(+100→−100) > 0 (travelled 200 through zero, not 0)',
+  dGammaRaw(100, -100) > 0,
   `got ${dGammaRaw(100, -100)}`,
+);
+// Distance travelled is what counts: 200 through zero === 200 the direct way.
+check(
+  'flip: dGamma(+100→−100) === dGamma(+100→+300) (both travel 200)',
+  dGammaRaw(100, -100) === dGammaRaw(100, 300),
+  `got ${dGammaRaw(100, -100)} vs ${dGammaRaw(100, 300)}`,
+);
+// …and the unchanged case stays 0: its SIZE is 0, so the +1 direction is inert.
+check(
+  'unchanged gamma still 0 despite the +1 direction default',
+  dGammaRaw(-80, -80) === 0,
+  `got ${dGammaRaw(-80, -80)}`,
 );
 
 // ── 6. Normalization is magnitude-ratio, NOT a z-score ──
