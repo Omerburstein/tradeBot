@@ -394,8 +394,40 @@ export interface AlgoConfig {
    * `0` disables the bonus.
    */
   conePassBonus: number;
-  /** Z-score level below which an open position is exited (signal fade). */
+  /**
+   * Consecutive *qualifying Greek bars* required before an entry actually fires.
+   * On each fresh Greek snapshot where `checkEntries` would open a position, a
+   * streak in that direction is advanced; the trade is taken only once the streak
+   * reaches this many bars. A bar that no longer qualifies (or flips direction)
+   * resets the streak. `1` = enter on the first qualifying bar (the pre-existing
+   * behaviour); `>1` waits for the signal to persist that many minutes, filtering
+   * one-bar gamma spikes that decay immediately — the "enters too quickly" fix.
+   * Reused-score price ticks between Greek frames never advance or reset it (they
+   * carry no new Greek information), and an executed entry resets it so a fresh
+   * confirmation is required after each trade. Values <1 are treated as 1.
+   */
+  entryConfirmBars: number;
+  /**
+   * Absolute FLOOR of the signal-fade exit bar (z-score units). An open position
+   * is closed when its directional composite fades below the effective fade bar,
+   * which is `max(exitFadeThreshold, exitFadeFraction × entry conviction)` — so
+   * this is the smallest fade level that ever closes a trade. See
+   * {@link exitFadeFraction} and `fadeExitBar` in risk-manager.ts.
+   */
   exitFadeThreshold: number;
+  /**
+   * How much a high-conviction entry LOWERS its own signal-fade exit bar, so a
+   * strong trade runs longer. The effective bar is
+   * `exitFadeThreshold × max(0.1, 1 − exitFadeFraction × (entryConviction − 1))`,
+   * where entryConviction is the directional composite at entry and 1.0 is the
+   * day's typical magnitude. A trade entered near typical (≈1) keeps the plain
+   * floor; one entered at z≈3 shrinks its bar toward zero, so it only fade-exits
+   * once the signal has almost fully unwound (the stop-loss and reversal still
+   * bound the downside). A LOWER bar = the score must fade FURTHER = a longer
+   * hold. `0` → the pure fixed floor (exitFadeThreshold), the pre-existing
+   * behaviour. See `fadeExitBar` in risk-manager.ts.
+   */
+  exitFadeFraction: number;
   /** Z-score in opposing direction that triggers an exit. */
   reversalThreshold: number;
 
@@ -443,7 +475,9 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,
   conePassBonus: 0.25,
-  exitFadeThreshold: 0.5,
+  entryConfirmBars: 2, // require the signal to persist 2 Greek bars before entering
+  exitFadeThreshold: 0.5, // fade-exit floor
+  exitFadeFraction: 0.35, // …but scale the fade bar to 35% of entry conviction so strong trades run
   reversalThreshold: 1.0,
   gexAutoExit: true,
 

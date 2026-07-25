@@ -34,6 +34,7 @@ import {
   checkTimeGates,
   computePositionSize,
   createFlatState,
+  fadeExitBar,
   gexTakeProfitPoints,
   meetsGexMinTakeProfit,
   recordEntry,
@@ -93,6 +94,18 @@ export class SignalGenerator {
   private previousGreekSnapshot: Snapshot | null = null;
   /** Most recent Greek score, reused on intermediate price ticks. */
   private lastScore: ScoreComponents | null = null;
+  /**
+   * True when the current snapshot carried fresh Greeks (score was recomputed),
+   * false on a reused-score price tick. Set each `processSnapshot` before the
+   * signal is generated; the entry-confirmation streak only advances/resets on
+   * fresh Greek bars (a price tick brings no new Greek information). See
+   * {@link AlgoConfig.entryConfirmBars} and `confirmEntry`.
+   */
+  private freshGreeks = false;
+  /** Direction of the in-progress entry-confirmation streak, or null when none. */
+  private entryStreakDir: 'long' | 'short' | null = null;
+  /** Consecutive fresh Greek bars the current entry candidate has qualified for. */
+  private entryStreakCount = 0;
   private trades: TradeRecord[] = [];
   private logger?: pino.Logger;
   /**
@@ -166,13 +179,17 @@ export class SignalGenerator {
     // the Greeks haven't changed, so re-deriving a delta against an identical
     // strike set would only inject zero-deltas that distort the lookback.
     let score: ScoreComponents;
-    if (!snapshot.greeksStale || this.lastScore === null) {
+    this.freshGreeks = !snapshot.greeksStale || this.lastScore === null;
+    if (this.freshGreeks) {
       score = computeScore(snapshot, this.previousGreekSnapshot, this.scoreHistory, config, this.momentum);
       this.scoreHistory.push(score);
       this.previousGreekSnapshot = snapshot;
       this.lastScore = score;
     } else {
-      score = this.lastScore;
+      // freshGreeks is false only when greeksStale AND lastScore !== null, so the
+      // reused score is guaranteed present (the field-based condition hides this
+      // from the narrower).
+      score = this.lastScore!;
     }
 
     // 2. Update cone (built once from this day's stored cone endpoints)
@@ -254,7 +271,46 @@ export class SignalGenerator {
         `GEX TP ${tp.toFixed(1)} pts < ${config.risk.minGexTakeProfitPoints} pt minimum — gamma center too close`);
     }
 
-    return this.checkEntries(score, cone, snapshot);
+    return this.confirmEntry(this.checkEntries(score, cone, snapshot), snapshot);
+  }
+
+  /**
+   * Gate a candidate entry through the consecutive-bar confirmation
+   * ({@link AlgoConfig.entryConfirmBars}). The streak advances only on fresh Greek
+   * bars: a qualifying entry candidate increments it in that direction, anything
+   * else (a hold, or a flip to the other side) resets it. A reused-score price
+   * tick leaves the streak untouched. Until the streak reaches the required count
+   * the candidate is downgraded to a `hold`, so a one-bar gamma spike that decays
+   * next minute never opens a trade; a signal that genuinely persists does. With
+   * `entryConfirmBars ≤ 1` this is a pass-through (enter on the first qualifying
+   * bar). An executed entry resets the streak (see executeSignal).
+   */
+  private confirmEntry(candidate: Signal, snapshot: Snapshot): Signal {
+    const isEntry = candidate.action === 'enter_long' || candidate.action === 'enter_short';
+    const dir = candidate.direction ?? null;
+
+    // Only fresh Greek bars carry new information for the streak.
+    if (this.freshGreeks) {
+      if (isEntry && dir !== null) {
+        this.entryStreakCount = this.entryStreakDir === dir ? this.entryStreakCount + 1 : 1;
+        this.entryStreakDir = dir;
+      } else {
+        this.entryStreakCount = 0;
+        this.entryStreakDir = null;
+      }
+    }
+
+    if (!isEntry) return candidate;
+
+    const need = entryConfirmBarsNeeded(this.config);
+    // Confirmed once the streak (built on fresh Greek bars) reaches the bar count.
+    if (this.entryStreakDir === dir && this.entryStreakCount >= need) {
+      return candidate;
+    }
+    // Show progress on a fresh bar; on a price tick the streak simply hasn't been
+    // reached yet, so report the standing count.
+    return this.makeSignal('hold', candidate.score, candidate.cone, snapshot, 'low',
+      `entry pending confirmation: ${this.entryStreakCount}/${need} consecutive ${dir} bars`);
   }
 
   private checkExits(
@@ -293,9 +349,14 @@ export class SignalGenerator {
     // structural exit above (cone-return / stop-loss / take-profit) or the forced
     // time gate closes it.
     if (config.gexAutoExit) {
-      // Signal fade: directional score dropped below exit threshold
-      if (directionalScore < config.exitFadeThreshold) {
-        return this.makeSignal('exit', score, cone, snapshot, 'medium', `signal fade: z-factor=${score.composite.toFixed(2)}`);
+      // Signal fade: directional score dropped below the effective fade bar. The
+      // bar is LOWERED for a high-conviction entry (see fadeExitBar), so a strong
+      // trade must fade almost to zero before this fires — shallow pullbacks no
+      // longer flush it and winners run longer. A typical entry exits at the floor.
+      const fadeBar = fadeExitBar(config, this.state);
+      if (directionalScore < fadeBar) {
+        return this.makeSignal('exit', score, cone, snapshot, 'medium',
+          `signal fade: z-factor=${score.composite.toFixed(2)} < ${fadeBar.toFixed(2)} fade bar`);
       }
 
       // Reversal: score flipped in opposing direction
@@ -486,6 +547,12 @@ export class SignalGenerator {
       const direction = signal.action === 'enter_long' ? 'long' as const : 'short' as const;
       const contracts = computePositionSize(config, signal.score.composite);
 
+      // A position is opening — clear the confirmation streak so the NEXT entry
+      // (after this trade closes) must earn its own fresh consecutive-bar
+      // confirmation rather than re-firing on the leftover count.
+      this.entryStreakDir = null;
+      this.entryStreakCount = 0;
+
       // Freeze the GEX take-profit (gamma-center distance) on the entry
       // snapshot so the exit target doesn't drift as gamma/spot move intraday.
       this.state = recordEntry(
@@ -629,6 +696,17 @@ const NEUTRAL_CONE: ConeInfo = {
   previousState: null,
   crossed: null,
 };
+
+/**
+ * Consecutive qualifying Greek bars required before an entry fires, coerced to a
+ * whole number ≥ 1. A config predating `entryConfirmBars` (undefined at runtime)
+ * or any value below 1 collapses to 1 — enter on the first qualifying bar, the
+ * original behaviour. See {@link AlgoConfig.entryConfirmBars}.
+ */
+function entryConfirmBarsNeeded(config: AlgoConfig): number {
+  const raw = config.entryConfirmBars;
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1;
+}
 
 /** Round to 2 decimals for tidy log fields. */
 function round2(n: number): number {

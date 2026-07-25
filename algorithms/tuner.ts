@@ -117,7 +117,16 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   entryThreshold: { min: 0.8, max: 2.5 },
   strongEntryThreshold: { min: 1.5, max: 3.5 },
   conePassBonus: { min: 0.0, max: 0.75 },
-  exitFadeThreshold: { min: 0.0, max: 1.2 },
+  // Consecutive qualifying Greek bars before entry (1 = enter immediately; higher
+  // filters one-bar spikes and holds entries longer). Integer.
+  entryConfirmBars: { min: 1, max: 4, integer: true },
+  exitFadeThreshold: { min: 0.0, max: 1.2 }, // absolute floor of the fade-exit bar
+  // How much a high-conviction entry LOWERS its fade bar (bar shrinks by this per
+  // unit of entry z above typical). Higher → strong trades hold longer. 0 = pure
+  // fixed floor. NOTE: under a pure-PnL objective the tuner may push this toward 0
+  // and entryConfirmBars toward 1 if shorter trades score better in-sample — the
+  // DEFAULT_CONFIG values bias toward longer holds when NOT tuning.
+  exitFadeFraction: { min: 0.0, max: 0.9 },
   reversalThreshold: { min: 0.5, max: 2.0 },
 
   // Exit style toggle: sampled as 0/1 and coerced to the boolean config field.

@@ -168,6 +168,49 @@ export function checkTakeProfit(
   return { hit: false, reason: '' };
 }
 
+/** Fade fraction used when a config predates `exitFadeFraction` (0 → pure floor,
+ *  i.e. the original fixed-threshold fade behaviour). */
+const DEFAULT_EXIT_FADE_FRACTION = 0;
+/** Floor on the conviction scale (× exitFadeThreshold): even the strongest entry
+ *  still fade-exits eventually rather than only ever on a reversal/stop. */
+const MIN_FADE_SCALE = 0.1;
+
+/**
+ * Effective signal-fade exit bar (z-score units) for an open position. The
+ * position is closed when its directional composite fades below this bar, so a
+ * LOWER bar makes the trade hold LONGER (the score must fade further to trigger).
+ *
+ * Because the composite is normalized to the day's typical magnitude, a sustained
+ * regime decays from its entry reading toward ~1.0; a fixed floor (0.5) then trips
+ * on shallow pullbacks and flushes a still-valid position early. Scaling the bar
+ * DOWN with entry conviction is what lets a strong trade run: conviction above the
+ * typical magnitude (1.0) shrinks the bar toward reversal territory, so a trade
+ * entered at directional z≈3 must fade almost to zero before the fade rule fires,
+ * while a merely-typical entry keeps the plain floor. The hard stop-loss and the
+ * reversal exit still bound the downside regardless.
+ *
+ * Entry conviction is the directional composite frozen at entry (positive in the
+ * normal case — we entered because the signal was strong in the trade's direction);
+ * a missing entry score, `exitFadeFraction ≤ 0`, or a flat state falls back to the
+ * plain floor so behaviour is unchanged for configs that don't opt in.
+ */
+export function fadeExitBar(config: AlgoConfig, state: TradeState): number {
+  const floor = config.exitFadeThreshold;
+  const fraction = Number.isFinite(config.exitFadeFraction)
+    ? config.exitFadeFraction
+    : DEFAULT_EXIT_FADE_FRACTION;
+  if (state.entryScore === null || fraction <= 0 || state.position === 'flat') {
+    return floor;
+  }
+  const direction = state.position === 'long' ? 1 : -1;
+  const entryConviction = state.entryScore.composite * direction;
+  // Conviction ABOVE the day's typical magnitude (1.0) earns fade tolerance; the
+  // bar shrinks by `fraction` per unit of excess, floored at MIN_FADE_SCALE·floor.
+  const excess = Math.max(0, entryConviction - 1);
+  const scale = Math.max(MIN_FADE_SCALE, 1 - fraction * excess);
+  return floor * scale;
+}
+
 /**
  * Check daily risk limits: max daily loss and max trade count.
  */
