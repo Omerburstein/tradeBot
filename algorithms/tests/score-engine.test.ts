@@ -13,6 +13,11 @@
  *   - the strike's side of spot points the momentum (above = +, below = −);
  *   - unchanged Greeks (or no previous snapshot) → zero dGamma.
  *
+ * §5c additionally pins the DECAYED-BASELINE momentum (momentumHalfLifeMin): a
+ * large last-step move enters at full weight, a constant level never ramps, a
+ * sustained build accumulates, a one-slot blip reverts, and the memory is
+ * wall-clock (cadence-invariant). Those replay a sequence through a MomentumState.
+ *
  * Only `computeScore` from score-engine.ts is exercised — it is pure, so no
  * env/DB stub is needed. Assertions read `dGammaRaw` (the pre-z-score sum) so
  * they test the factor arithmetic directly, independent of z normalization.
@@ -22,9 +27,9 @@
  */
 
 import pino from 'pino';
-import { computeScore } from '../score-engine.js';
+import { computeScore, createMomentumState } from '../score-engine.js';
 import { DEFAULT_CONFIG } from '../types.js';
-import type { ScoreComponents, Snapshot, StrikeData } from '../types.js';
+import type { Snapshot, StrikeData } from '../types.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
@@ -179,101 +184,117 @@ check(
   `got ${dGammaRaw(-80, -80)}`,
 );
 
-// ── 5c. Momentum carry-over (dMomentumDecay) ──
-// A one-step delta is one noisy difference. The carried value is a convex EWMA:
-//   carried = (1 − decay)·thisStep + decay·previousCarried
-// Because the carried value is what lands in ScoreComponents, the recursion
-// expands to the full geometric series over the day's earlier deltas.
+// ── 5c. Decayed-baseline momentum (momentumHalfLifeMin) ──
+// Each rate of change is `signedDelta(current level, baseline)`, where the
+// baseline is a per-strike EWMA over recent levels in WALL-CLOCK time. The
+// current level enters at full weight; the baseline carries ~2–3 half-lives of
+// history and cannot ramp. State lives in a MomentumState threaded across the
+// sequence — so these tests replay a sequence of snapshots, not single pairs.
 
-/** A ScoreComponents history entry carrying `dGammaRaw` (other fields inert). */
-function histEntry(dGammaRaw: number): ScoreComponents {
-  return {
-    gexRaw: 0, gexZ: 0,
-    dGammaRaw, dGammaZ: 0,
-    positionsRaw: 0, positionsZ: 0,
-    dPositionsRaw: 0, dPositionsZ: 0,
-    composite: 0,
-  };
-}
+const SEQ_START_MS = Date.parse('2026-05-21T13:30:00Z');
 
-/** dGammaRaw for one strike pair, against a history of prior carried deltas. */
-function dGammaCarried(
-  prevGamma: number,
-  currGamma: number,
-  hist: number[],
-  decay: number,
-): number {
-  return computeScore(
-    snap([strike(6010, currGamma)]),
-    snap([strike(6010, prevGamma)]),
-    hist.map(histEntry),
-    { ...DEFAULT_CONFIG, dMomentumDecay: decay },
-  ).dGammaRaw;
-}
-
-// decay = 0 reproduces the pre-carry behaviour exactly — each step stands alone.
-check(
-  'carry: decay 0 === single-step delta (carry disabled)',
-  dGammaCarried(50, 100, [0, 999], 0) === dGammaRaw(50, 100),
-  `got ${dGammaCarried(50, 100, [0, 999], 0)} vs ${dGammaRaw(50, 100)}`,
-);
-
-// With a real previous delta the blend is exactly convex.
-{
-  const step = dGammaRaw(50, 100); // this step's uncarried delta
-  const prevCarried = 400;
-  const got = dGammaCarried(50, 100, [0, prevCarried], 0.8);
-  const want = 0.2 * step + 0.8 * prevCarried;
-  check(
-    'carry: decay 0.8 blends (1−d)·step + d·prevCarried',
-    Math.abs(got - want) < 1e-9,
-    `got ${got}, want ${want}`,
-  );
-}
-
-// SEEDING: history[0] is the day's first score, whose delta is 0 by construction.
-// The first REAL delta must NOT be attenuated against that zero, or the open is
-// damped for ~1/(1−d) snapshots.
-check(
-  'carry: first real delta is unattenuated (not blended with the seed 0)',
-  dGammaCarried(50, 100, [0], 0.8) === dGammaRaw(50, 100),
-  `got ${dGammaCarried(50, 100, [0], 0.8)} vs ${dGammaRaw(50, 100)}`,
-);
-
-// A one-slot blip decays: with no fresh momentum this step, the carried value is
-// just the decayed previous one — smaller, same sign, never erased outright.
-{
-  const got = dGammaCarried(80, 80, [0, 500], 0.8); // unchanged gamma → step = 0
-  check(
-    'carry: a blip decays toward zero rather than vanishing',
-    got > 0 && got < 500,
-    `got ${got}`,
-  );
-  check('carry: decayed blip === d·prevCarried', Math.abs(got - 400) < 1e-9, `got ${got}`);
-}
-
-// NO DRIFT: the weights sum to 1, so a repeated delta converges to that delta
-// rather than accumulating. This is the property that keeps the factor from
-// ramping up over the course of a day (a `now + d·prev` sum would land at 5×).
-{
-  const step = dGammaRaw(50, 100);
-  check(
-    'carry: a constant delta is its own steady state (no intraday ramp)',
-    dGammaCarried(50, 100, [0, step], 0.8) === step,
-    `got ${dGammaCarried(50, 100, [0, step], 0.8)}, want ${step}`,
-  );
-  // Iterate a full session's worth of snapshots to show it stays put, and that
-  // no input sequence can push the carried value past its own largest step.
-  let y = step;
-  let maxSeen = Math.abs(y);
-  for (let i = 0; i < 390; i++) {
-    y = dGammaCarried(50, 100, [0, y], 0.8);
-    maxSeen = Math.max(maxSeen, Math.abs(y));
+/** Replay a gamma sequence through one MomentumState; return each dGammaRaw. */
+function runGammaSeq(gammas: number[], dtMin: number, halfLife: number, k = 6010): number[] {
+  const m = createMomentumState();
+  const cfg = { ...DEFAULT_CONFIG, momentumHalfLifeMin: halfLife };
+  const out: number[] = [];
+  let prev: Snapshot | null = null;
+  for (let i = 0; i < gammas.length; i++) {
+    const at = new Date(SEQ_START_MS + i * dtMin * 60_000).toISOString();
+    const cur: Snapshot = { ...snap([strike(k, gammas[i])]), capturedAt: at };
+    out.push(computeScore(cur, prev, [], cfg, m).dGammaRaw);
+    prev = cur;
   }
+  return out;
+}
+
+// FULL-WEIGHT PRESENT: after a flat run (baseline pinned exactly at 100), a jump
+// in the LAST step reads as the full single-step delta — the last-minute move is
+// never damped by the history. This is the property the redesign was asked for.
+{
+  const seq = runGammaSeq([100, 100, 100, 100, 200], 1, 10);
   check(
-    'carry: 390 snapshots of a constant delta never exceed that delta',
-    Math.abs(maxSeen - Math.abs(step)) < 1e-9,
-    `max |carried| ${maxSeen} vs step ${Math.abs(step)}`,
+    'baseline: a large last-step move registers at full single-step weight',
+    Math.abs(seq[4] - dGammaRaw(100, 200)) < 1e-9,
+    `got ${seq[4]} vs single-step ${dGammaRaw(100, 200)}`,
+  );
+}
+
+// STATELESS === single-step: with no MomentumState the baseline collapses to
+// `previous`, so behaviour is identical to the old per-pair delta (all of the
+// checks in §1–5b run on this path and must keep passing).
+check(
+  'baseline: stateless call === single-step delta',
+  computeScore(snap([strike(6010, 100)]), snap([strike(6010, 50)]), [], DEFAULT_CONFIG).dGammaRaw ===
+    dGammaRaw(50, 100),
+  'stateless path drifted from signedDelta(curr, prev)',
+);
+
+// NO SPURIOUS MOMENTUM / NO RAMP: a constant gamma leaves the baseline equal to
+// the level forever, so every delta is exactly 0 — no drift over a session.
+{
+  const seq = runGammaSeq(Array(50).fill(100), 1, 10);
+  check(
+    'baseline: constant gamma → every dGamma is 0 (no ramp)',
+    seq.every((x) => x === 0),
+    `nonzero entries: ${seq.filter((x) => x !== 0).length}`,
+  );
+}
+
+// SUSTAINED BUILD ACCUMULATES: a steady climb pulls further ahead of the lagging
+// baseline each step, so momentum grows rather than saturating at one step's size.
+{
+  const seq = runGammaSeq([100, 150, 200, 250, 300], 1, 2);
+  check(
+    'baseline: a sustained build gives increasing momentum',
+    seq[2] > seq[1] && seq[3] > seq[2] && seq[1] > 0,
+    `got ${seq.slice(1, 4).map((x) => x.toFixed(1)).join(', ')}`,
+  );
+}
+
+// ONE-SLOT BLIP REVERTS: a lone spike reads positive, then the very next
+// (unchanged) step reads NEGATIVE as the baseline, having absorbed the spike,
+// now sits above the level — the blip does not persist as signal.
+{
+  const seq = runGammaSeq([100, 100, 200, 100, 100], 1, 2);
+  check(
+    'baseline: a one-slot blip reverts (up then down)',
+    seq[2] > 0 && seq[3] < 0,
+    `got spike ${seq[2].toFixed(1)}, revert ${seq[3].toFixed(1)}`,
+  );
+}
+
+// LINEAR RAMP CONVERGES: under a constant slope the delta reaches a bounded
+// steady state (level − baseline → const) rather than ramping — the invariant
+// that keeps the factor off the day's opening reads.
+{
+  const seq = runGammaSeq(Array.from({ length: 200 }, (_, i) => 100 + 50 * i), 1, 10);
+  // Successive deltas shrink toward a fixed point: the late-step change is a tiny
+  // fraction of one input step (50), and far below any runaway — no ramp.
+  check(
+    'baseline: a linear ramp converges to a bounded steady state',
+    Math.abs(seq[199] - seq[150]) < 0.1 && seq[199] < 5000 && Number.isFinite(seq[199]),
+    `steps 100/150/199: ${seq[100].toFixed(3)}, ${seq[150].toFixed(3)}, ${seq[199].toFixed(3)}`,
+  );
+}
+
+// CADENCE-INVARIANT: the half-life is wall-clock, so a coarser cadence lets the
+// baseline absorb more per step. Same [100,200,200] scenario: at Δt=10 with
+// H=10 the baseline jumps to the midpoint (ρ=0.5) and the third-step delta is
+// smaller than at Δt=1 (ρ=0.5^0.1≈0.93, baseline barely moved).
+{
+  const fine = runGammaSeq([100, 200, 200], 1, 10);
+  const coarse = runGammaSeq([100, 200, 200], 10, 10);
+  check(
+    'baseline: coarser cadence forgets faster per step (wall-clock memory)',
+    coarse[2] > 0 && fine[2] > 0 && coarse[2] < fine[2],
+    `fine ${fine[2].toFixed(1)} vs coarse ${coarse[2].toFixed(1)}`,
+  );
+  // ρ=0.5 at Δt=half-life: baseline = midpoint 150 → signedDelta(200,150)=50·dWeight.
+  check(
+    'baseline: ρ=0.5 at Δt = half-life (exact midpoint baseline)',
+    Math.abs(coarse[2] - dGammaRaw(150, 200)) < 1e-9,
+    `got ${coarse[2]} vs ${dGammaRaw(150, 200)}`,
   );
 }
 

@@ -101,6 +101,26 @@ export interface ScoreComponents {
 }
 
 /**
+ * Carried-forward state backing the rate-of-change baseline (see
+ * {@link AlgoConfig.momentumHalfLifeMin}). Per-strike time-decayed averages of
+ * the gamma and positions levels, plus the instant of the last Greek snapshot
+ * folded in (so the decay ρ can be derived from the real Δt).
+ *
+ * DAY-SCOPED: one instance per SignalGenerator, i.e. per trading day. The maps
+ * start empty each day, so the baseline never reaches across a day boundary —
+ * the same invariant the per-day scoreHistory relies on. Never share across days.
+ * `computeScore` reads and mutates it in place on each fresh-Greek snapshot.
+ */
+export interface MomentumState {
+  /** strike → time-decayed average of that strike's gamma level. */
+  gamma: Map<number, number>;
+  /** strike → time-decayed average of that strike's net-positions level. */
+  positions: Map<number, number>;
+  /** Epoch-ms of the last Greek snapshot folded in, or null before the first. */
+  lastAt: number | null;
+}
+
+/**
  * Each factor's weighted contribution to the composite (weight × z-score), so
  * the composite can be broken down into the four parts that produced it:
  * `composite = gex + dGamma + positions + dPositions`. Built by
@@ -317,22 +337,29 @@ export interface AlgoConfig {
   distanceWeightSpan: number;
 
   /**
-   * EWMA carry-over weight on the PREVIOUS step's rate-of-change, applied to
-   * both dGamma and dPositions (0–1):
+   * Memory half-life, IN MINUTES, of the rate-of-change baseline shared by
+   * dGamma and dPositions.
    *
-   *   carried = (1 − decay)·thisStep + decay·previousCarried
+   * Each rate of change is `current level − baseline`, where the baseline is a
+   * time-decayed average of that strike's recent levels:
    *
-   * A one-step delta is a single noisy difference of two snapshots. Carrying
-   * momentum forward lets a wall that builds steadily over several minutes
-   * accumulate signal, while a one-slot blip decays away over ~1/(1 − decay)
-   * snapshots. 0 disables the carry entirely (each step stands alone); 0.8
-   * gives a ~5-snapshot memory.
+   *   ρ        = 0.5^(Δt_minutes / momentumHalfLifeMin)   // per-step retention
+   *   baseline = ρ·baseline + (1 − ρ)·currentLevel        // updated each snapshot
+   *   dGamma   = signedDelta(currentLevel, baseline)      // per strike, then aggregated
    *
-   * CADENCE-SENSITIVE: the memory is counted in SNAPSHOTS, not minutes, so the
-   * same decay spans ~5 min on the 1-min live feed but ~50 min on a 10-min
-   * backfill. Tune against the cadence you intend to trade.
+   * The CURRENT snapshot always enters the delta at FULL weight (it is one side
+   * of the difference), so a large last-minute move registers immediately; the
+   * baseline carries the preceding ~2–3 half-lives of history with geometric
+   * decay, so a wall building steadily accumulates while a one-slot blip reverts
+   * as the baseline catches up. Because it is a bounded difference of two levels,
+   * it never ramps over the session (unlike an accumulating sum).
+   *
+   * CADENCE-INVARIANT: the half-life is wall-clock minutes and ρ is derived from
+   * the actual Δt between snapshots, so the same value means the same physical
+   * memory on the 1-min live feed and on a 10-min backfill. At the default 10,
+   * a level ~20 min old still carries ~25% weight and ~30 min old ~12%.
    */
-  dMomentumDecay: number;
+  momentumHalfLifeMin: number;
 
   /**
    * Minimum gamma strength (a strike's |gamma| as a fraction of the window's
@@ -408,7 +435,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   pDPositions: 0.5,
   pDistance: 1.5,
   distanceWeightSpan: 2.0,
-  dMomentumDecay: 0.8,
+  momentumHalfLifeMin: 10,
 
   positionsGammaGate: 0.30,
   zClamp: 3.5,

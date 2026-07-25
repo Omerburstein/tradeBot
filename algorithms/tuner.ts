@@ -91,10 +91,11 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   pDistance: { min: 0.8, max: 2.5 },
   distanceWeightSpan: { min: 0.5, max: 4.0 },
 
-  // EWMA carry-over on both rate-of-change factors. 0 = each step stands alone
-  // (the pre-carry behaviour); 0.9 = ~10-snapshot memory. Capped below 1.0 —
-  // at exactly 1.0 the current step drops out entirely and the factor freezes.
-  dMomentumDecay: { min: 0.0, max: 0.9 },
+  // Half-life (MINUTES) of the dGamma/dPositions baseline. Wall-clock, so the
+  // same value means the same memory at any cadence. ~3 min ≈ react to the last
+  // few minutes only; ~30 min ≈ a slow, deep baseline. The current level always
+  // enters the delta at full weight regardless.
+  momentumHalfLifeMin: { min: 3, max: 30 },
 
   // Gates / clamps.
   positionsGammaGate: { min: 0.10, max: 0.60 },

@@ -15,20 +15,25 @@
  *      per-strike power) — exactly like gamma's level; the only compression is
  *      the log applied at the normalize step. Direction comes from position vs
  *      spot (no positive bias — gamma only).
- *   3. dGamma/dt — rate of change of gamma across successive snapshots, matching
- *      the absolute-magnitude GEX level. Its SIZE is the distance the value
- *      actually travelled (|Δgamma|, so a sign flip counts as the full trip
- *      through zero) and its SIGN is momentum — a wall building vs bleeding,
- *      including a negative-gamma strike shrinking toward zero. See
+ *   3. dGamma/dt — rate of change of gamma, measured as the current gamma level
+ *      against a TIME-DECAYED BASELINE of that strike's recent levels (not just
+ *      the immediately previous snapshot). Its SIZE is the distance the value
+ *      actually travelled from the baseline (|Δgamma|, so a sign flip counts as
+ *      the full trip through zero) and its SIGN is momentum — a wall building vs
+ *      bleeding, including a negative-gamma strike shrinking toward zero. See
  *      {@link signedDelta}. Then pointed by the strike's side of spot.
  *   4. dPositions/dt — rate of change of net MM positions (same gamma gate —
- *      threshold only, no gamma-strength weighting), matching the absolute
- *      positions LEVEL, via the same {@link signedDelta}: flip-aware size,
+ *      threshold only, no gamma-strength weighting), against its own decayed
+ *      positions baseline, via the same {@link signedDelta}: flip-aware size,
  *      build-vs-bleed sign. Then pointed by the side of spot.
  *
- *      Both rate-of-change factors then carry momentum forward as an EWMA over
- *      the day's earlier deltas (`dMomentumDecay`), so a wall building steadily
- *      across several snapshots accumulates signal while a one-slot blip decays.
+ *      The baseline is a per-strike EWMA in WALL-CLOCK time (half-life
+ *      `momentumHalfLifeMin`): the current snapshot enters at full weight, so a
+ *      large last-minute move registers at once, while the preceding ~2–3
+ *      half-lives of history decay in behind it — a steady build accumulates, a
+ *      one-slot blip reverts as the baseline catches up. See {@link MomentumState}
+ *      and {@link decayedDelta}. It is cadence-invariant (ρ is derived from the
+ *      real Δt) and cannot ramp (a bounded difference of two levels).
  *   5. Distance weighting — further strikes contribute MORE score
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
@@ -65,10 +70,27 @@
 import type {
   AlgoConfig,
   FactorContributions,
+  MomentumState,
   ScoreComponents,
   Snapshot,
   StrikeData,
 } from './types.js';
+
+/** Fresh, empty day-scoped {@link MomentumState}. One per SignalGenerator. */
+export function createMomentumState(): MomentumState {
+  return { gamma: new Map(), positions: new Map(), lastAt: null };
+}
+
+/** Fallback half-life (min) if a config predates `momentumHalfLifeMin`. */
+const DEFAULT_MOMENTUM_HALF_LIFE_MIN = 10;
+/**
+ * Δt clamp (minutes) for the baseline decay. Floors a zero/negative gap so ρ
+ * stays finite; caps a large gap so ρ→0 (the baseline forgets and reseeds to
+ * the current level) rather than underflowing — the right behaviour after a
+ * long hole in the feed.
+ */
+const MIN_DELTA_MINUTES = 0.05;
+const MAX_DELTA_MINUTES = 120;
 
 /**
  * Break a composite score into each factor's weighted contribution
@@ -92,17 +114,40 @@ export function factorContributions(
  * Compute the composite directional score for a single snapshot.
  *
  * @param current   The current snapshot (strikes pre-filtered to window)
- * @param previous  The previous snapshot (10 min ago), or null if first of day
+ * @param previous  The previous Greek snapshot, or null if first of day
  * @param history   Past ScoreComponents for z-score normalization
  * @param config    Algorithm configuration
+ * @param momentum  Day-scoped {@link MomentumState}, read and updated in place so
+ *                  the rate-of-change baseline spans many snapshots. When omitted
+ *                  (direct/unit callers) the baseline collapses to `previous`, so
+ *                  each rate of change is exactly the single-step delta.
  */
 export function computeScore(
   current: Snapshot,
   previous: Snapshot | null,
   history: ScoreComponents[],
   config: AlgoConfig,
+  momentum?: MomentumState,
 ): ScoreComponents {
   const { spot, strikes } = current;
+
+  // Per-step decay for the momentum baseline, derived from the REAL Δt since the
+  // last Greek snapshot so the half-life means the same wall-clock memory at any
+  // cadence. Before the first snapshot (or with no momentum state) ρ = 0, so the
+  // baseline simply seeds to the current level and the first delta is 0.
+  const halfLife =
+    Number.isFinite(config.momentumHalfLifeMin) && config.momentumHalfLifeMin > 0
+      ? config.momentumHalfLifeMin
+      : DEFAULT_MOMENTUM_HALF_LIFE_MIN;
+  const currentMs = new Date(current.capturedAt).getTime();
+  let rho = 0;
+  if (momentum && momentum.lastAt !== null) {
+    const dtMin = Math.min(
+      MAX_DELTA_MINUTES,
+      Math.max(MIN_DELTA_MINUTES, (currentMs - momentum.lastAt) / 60_000),
+    );
+    rho = Math.pow(0.5, dtMin / halfLife);
+  }
 
   let gexRaw = 0;
   let dGammaRaw = 0;
@@ -171,59 +216,33 @@ export function computeScore(
       positionsRaw += Math.abs(s.positions) * sign * dWeight;
     }
 
-    // Factors 3 & 4: rate-of-change of gamma and positions across snapshots
-    if (previous) {
-      const prev = prevByStrike.get(s.strike);
-      if (prev) {
-        // Change in gamma, to match the GEX level factor which treats gamma as
-        // an absolute pressure. A wall building is positive momentum; a wall
-        // bleeding off is negative — including a NEGATIVE gamma position
-        // shrinking toward zero, which is a fade of that strike's pressure. See
-        // {@link signedDelta} for how a sign FLIP is accounted for. The delta is
-        // already signed (its sign is momentum); the raw term is LINEAR in it
-        // (R6) — `sign` then points it by the strike's side of spot. `pDGamma`
-        // shaping is deferred to the normalize step.
-        const deltaGamma = signedDelta(s.gamma, prev.gamma);
-        dGammaRaw += deltaGamma * sign * dWeight;
+    // Factors 3 & 4: rate-of-change of gamma and positions vs a decayed baseline.
+    // The baseline is this strike's time-decayed average level; the delta is the
+    // CURRENT level measured against it (full weight on the present), via the
+    // flip-aware {@link signedDelta} — a wall building is positive momentum, a
+    // wall bleeding off (incl. a negative-gamma strike shrinking toward zero) is
+    // negative, and a sign flip travels the full trip through zero. `sign` points
+    // it by the strike's side of spot; `pDGamma`/`pDPositions` shaping is deferred
+    // to the normalize step. `decayedDelta` also folds the current level into the
+    // baseline for next time (in place), so the baseline reaches ~2–3 half-lives
+    // back. Absent a prior baseline the seed is `prev`, so the first move off a
+    // fresh strike is exactly the single-step delta.
+    const prev = prevByStrike.get(s.strike);
+    const deltaGamma = decayedDelta(momentum?.gamma, s.strike, s.gamma, prev?.gamma, rho);
+    dGammaRaw += deltaGamma * sign * dWeight;
 
-        if (positionsCounts) {
-          // Change in net MM positioning, mirroring the dGamma factor and the
-          // absolute positions LEVEL — a wall of MM positioning building vs
-          // bleeding, regardless of the raw position's own sign, via the same
-          // {@link signedDelta}. The delta is already signed momentum; the raw
-          // term is LINEAR in it (R6), pointed by `sign`. `pDPositions` shaping
-          // is deferred to normalize.
-          const deltaPositions = signedDelta(s.positions, prev.positions);
-          dPositionsRaw += deltaPositions * sign * dWeight;
-        }
-      }
+    // The positions baseline is kept fresh for EVERY in-window strike (so a strike
+    // crossing the gamma gate mid-day already has a warm baseline), but only a
+    // gated strike's delta enters the score — mirroring the positions LEVEL gate.
+    const deltaPositions = decayedDelta(momentum?.positions, s.strike, s.positions, prev?.positions, rho);
+    if (positionsCounts) {
+      dPositionsRaw += deltaPositions * sign * dWeight;
     }
   }
 
-  // Momentum carry-over (factors 3 & 4). A one-step delta is a single noisy
-  // difference of two snapshots, so blend it with the previous step's CARRIED
-  // delta: a wall building steadily over several minutes accumulates signal,
-  // while a one-slot blip decays over ~1/(1 − decay) snapshots. Because the
-  // carried value is what gets stored in ScoreComponents, this recursion
-  // expands to the full geometric series over the day's earlier deltas.
-  //
-  // CONVEX, not `now + decay·prev`: the weights sum to 1, so a carried delta
-  // stays on the same scale as a single step. A plain sum ramps toward a
-  // 1/(1 − decay) steady-state gain — 5× at 0.8 — and while normalizeToScale
-  // divides a CONSTANT gain out, it cannot divide out the ramp itself, which
-  // lands squarely on the day's opening reads.
-  //
-  // SEEDING: history[0] is the day's first score, whose delta is 0 by
-  // construction (no previous snapshot to difference against). Blending against
-  // that zero would attenuate the first REAL delta by (1 − decay) and take
-  // ~1/(1 − decay) snapshots to recover — i.e. straight through the open. So the
-  // carry only starts once a real previous delta exists (history.length >= 2).
-  const carried = history[history.length - 1];
-  if (config.dMomentumDecay > 0 && carried && history.length >= 2) {
-    const d = config.dMomentumDecay;
-    dGammaRaw = (1 - d) * dGammaRaw + d * carried.dGammaRaw;
-    dPositionsRaw = (1 - d) * dPositionsRaw + d * carried.dPositionsRaw;
-  }
+  // The baseline decay consumed this snapshot; advance the clock so the next
+  // snapshot derives ρ from the true Δt. (Skipped when running stateless.)
+  if (momentum) momentum.lastAt = currentMs;
 
   // Magnitude-ratio normalization using a rolling lookback, hard-clamped to
   // ±zClamp. History supplies only the SCALE each factor is measured against —
@@ -270,9 +289,45 @@ export function computeScore(
 }
 
 /**
+ * One strike's rate of change against its DECAYED BASELINE, updating the
+ * baseline in place. This is what lifts each rate of change from a single noisy
+ * two-snapshot difference to a move measured against ~2–3 half-lives of history,
+ * while the current level still enters at full weight (it is one side of the
+ * difference — a large last-minute move is never damped).
+ *
+ *   seed  = baseline[strike] ?? prevLevel ?? currLevel   // where history stands now
+ *   out   = signedDelta(currLevel, seed)                 // flip-aware move off it
+ *   baseline[strike] = ρ·seed + (1 − ρ)·currLevel        // fold current in for next time
+ *
+ * ρ (per-step retention, 0–1) comes from the real Δt and the half-life, so the
+ * memory is wall-clock, not snapshot-count (cadence-invariant). Because `out` is
+ * a bounded difference of two levels rather than an accumulating sum, it cannot
+ * ramp over the session.
+ *
+ * SEEDING keeps the stateless path (no `baseline` map — unit/direct callers)
+ * identical to the old single-step behaviour: seed falls back to `prevLevel`, so
+ * `out` = signedDelta(curr, prev), and with no previous snapshot the seed is the
+ * current level so the first reading is 0. A newly appearing strike likewise
+ * seeds off `prevLevel` (or itself) rather than spiking.
+ */
+function decayedDelta(
+  baseline: Map<number, number> | undefined,
+  strike: number,
+  currLevel: number,
+  prevLevel: number | undefined,
+  rho: number,
+): number {
+  const seed = baseline?.get(strike) ?? prevLevel ?? currLevel;
+  const out = signedDelta(currLevel, seed);
+  if (baseline) baseline.set(strike, rho * seed + (1 - rho) * currLevel);
+  return out;
+}
+
+/**
  * Signed rate-of-change of a per-strike quantity (gamma or net MM positions)
- * between two successive Greek snapshots. Shared by factors 3 and 4 so both
- * rates of change speak exactly the same language.
+ * against a reference level (the previous snapshot, or a decayed baseline).
+ * Shared by factors 3 and 4 so both rates of change speak exactly the same
+ * language.
  *
  *   size = |curr − prev|                 // how far the value actually travelled
  *   dir  = sign(|curr| − |prev|)         // did the wall build (+) or bleed (−)

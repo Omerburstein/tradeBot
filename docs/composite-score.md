@@ -113,20 +113,27 @@ gammaBias = positiveGammaBias (1.1) if gamma ≥ 0, else 1.0
 
 ### 3.2 dGamma/dt — gamma momentum  →  `dGammaZ` (weight `wDGamma`, default **0.25**)
 ```
-dGammaRaw += (|gamma| − |prevGamma|) · sign · dWeight   (linear; shaped at normalize by pDGamma)
+dGammaRaw += signedDelta(|gamma|, baseline) · sign · dWeight   (linear; shaped at normalize by pDGamma)
+baseline  = ρ·baseline + (1 − ρ)·gamma,   ρ = 0.5^(Δt_min / momentumHalfLifeMin)   // per strike, wall-clock
 ```
-- **Represents:** how the gamma landscape is *shifting* between snapshots —
-  gamma building above spot (or draining below) is fresh directional momentum.
+- **Represents:** how the gamma landscape is *shifting* — gamma building above
+  spot (or draining below) is fresh directional momentum.
 - **Why chosen:** the *level* (GEX) says where the walls are; the *change* says
   which way they are moving, catching turns earlier than the level alone.
-- **How computed:** the per-strike change in gamma **magnitude** (`|gamma|`) vs.
-  the previous **Greek** snapshot — matching the absolute-magnitude GEX level, so
-  a wall building is positive momentum and a wall bleeding off (including a
-  *negative* gamma strike shrinking toward zero) is negative. A 5-minute price
-  tick contributes a zero delta by design (Greeks unchanged). The |gamma| delta
-  keeps its own sign (the momentum), directioned by `sign` and distance-weighted
-  (all linear), then shaped at normalize by `pDGamma = 1.1`. Requires a previous
-  snapshot; it is 0 on the day's first.
+- **How computed:** per strike, the current gamma **magnitude** (`|gamma|`) is
+  compared not to the single previous snapshot but to a **time-decayed baseline**
+  of that strike's recent levels (half-life `momentumHalfLifeMin` minutes). The
+  current level enters at **full weight** — a large last-minute move registers at
+  once — while the baseline carries ~2–3 half-lives of history, so a steady build
+  accumulates and a one-slot blip reverts as the baseline catches up. It matches
+  the absolute-magnitude GEX level (a wall building is +, a wall bleeding off —
+  incl. a *negative* gamma strike shrinking toward zero — is −), keeps its own
+  sign, is directioned by `sign` and distance-weighted (all linear), then shaped
+  at normalize by `pDGamma`. The memory is **wall-clock** (ρ from the real Δt), so
+  it means the same thing at 1-min and 10-min cadence, and it **cannot ramp** (a
+  bounded difference of two levels). A price tick contributes no update (Greeks
+  unchanged); it is 0 on the day's first snapshot. See
+  [MomentumState / decayedDelta in score-engine.ts](../algorithms/score-engine.ts).
 
 ### 3.3 Net MM positions  →  `positionsZ` (weight `wPositions`, default **0.18**)
 ```
@@ -145,16 +152,20 @@ positionsRaw += |positions| · sign · dWeight   (gated; shaped at normalize by 
 
 ### 3.4 dPositions/dt — positions momentum  →  `dPositionsZ` (weight `wDPositions`, default **0.12**)
 ```
-dPositionsRaw += (|positions| − |prevPositions|) · sign · dWeight  (gated; shaped at normalize by pDPositions)
+dPositionsRaw += signedDelta(|positions|, baseline) · sign · dWeight  (gated; shaped at normalize by pDPositions)
+baseline     = ρ·baseline + (1 − ρ)·positions        // same ρ / half-life as dGamma, per strike
 ```
-- **Represents:** dealers actively adding or pulling positions at a strike
-  between snapshots — the freshest, fastest-moving read on positioning.
+- **Represents:** dealers actively adding or pulling positions at a strike — the
+  freshest, fastest-moving read on positioning.
 - **Why chosen:** earliest warning that positioning is changing; smallest weight
   (0.12) because it is the noisiest of the four.
-- **How computed:** per-strike change in position **magnitude** vs. the previous
-  Greek snapshot (linear), under the **same boolean gamma gate** as the level,
-  directioned and distance-weighted, then shaped at normalize by
-  `pDPositions = 0.5` (saturating).
+- **How computed:** identical machinery to dGamma (§3.2) — current position
+  **magnitude** vs. a per-strike **time-decayed baseline** (same
+  `momentumHalfLifeMin`), current level at full weight — under the **same boolean
+  gamma gate** as the level, directioned and distance-weighted, then shaped at
+  normalize by `pDPositions`. The positions baseline is kept warm for every
+  in-window strike so a strike crossing the gate mid-day has a settled baseline;
+  only a gated strike's delta enters the score.
 
 ---
 

@@ -45,6 +45,7 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `pDGamma` | `1.1` | Normalize-step exponent on the gamma-change factor |
 | `pPositions` | `0.5` | Normalize-step exponent on the positions factor (<1 saturates) |
 | `pDPositions` | `0.5` | Normalize-step exponent on the positions-change factor |
+| `momentumHalfLifeMin` | `10` | Half-life **in minutes** of the dGamma/dPositions baseline. Each rate of change is `current level − decayed baseline`: the current snapshot enters at full weight (a big last-minute move registers at once) while the baseline carries ~2–3 half-lives of history. Wall-clock, so it means the same at 1-min and 10-min cadence; cannot ramp. Replaces the old snapshot-counted `dMomentumDecay` EWMA. |
 | `pDistance` | `1.5` | Exponent on strike distance in the distance-weight ramp |
 | `distanceWeightSpan` | `2.0` | Span of the distance-weight ramp |
 | `positionsGammaGate` | `0.30` | Min gamma strength (0–1) for a strike's positions to count |

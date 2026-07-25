@@ -40,12 +40,13 @@ import {
   recordExit,
   updateTradeMetrics,
 } from './risk-manager.js';
-import { computeScore, factorContributions } from './score-engine.js';
+import { computeScore, createMomentumState, factorContributions } from './score-engine.js';
 import type {
   AlgoConfig,
   ConeInfo,
   Confidence,
   FactorContributions,
+  MomentumState,
   ScoreComponents,
   Signal,
   Snapshot,
@@ -80,6 +81,12 @@ export class SignalGenerator {
    * Never share a generator across days or this invariant breaks.
    */
   private scoreHistory: ScoreComponents[] = [];
+  /**
+   * Day-scoped baseline state for the dGamma/dPositions rate-of-change factors
+   * (see {@link MomentumState}). Fresh per generator, so the momentum baseline
+   * never reaches across a day boundary — same invariant as scoreHistory.
+   */
+  private momentum: MomentumState = createMomentumState();
   /** Last snapshot of any kind — for the chronological look-ahead guard. */
   private previousSnapshot: Snapshot | null = null;
   /** Last snapshot carrying fresh Greeks — the dGamma/dPositions baseline. */
@@ -160,7 +167,7 @@ export class SignalGenerator {
     // strike set would only inject zero-deltas that distort the lookback.
     let score: ScoreComponents;
     if (!snapshot.greeksStale || this.lastScore === null) {
-      score = computeScore(snapshot, this.previousGreekSnapshot, this.scoreHistory, config);
+      score = computeScore(snapshot, this.previousGreekSnapshot, this.scoreHistory, config, this.momentum);
       this.scoreHistory.push(score);
       this.previousGreekSnapshot = snapshot;
       this.lastScore = score;
