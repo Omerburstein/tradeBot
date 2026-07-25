@@ -76,16 +76,28 @@ export interface ParamRange {
  * reachable too (e.g. 'risk.stopLossPoints') — uncomment to include them.
  */
 export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
-  // Factor weights (re-normalized to sum 1 after sampling).
+  // Factor weights (re-normalized to sum 1 after sampling — only RATIOS matter).
+  // The two RATE-OF-CHANGE weights get the SAME ceiling as their level. Each
+  // rate of change is normalized against its LEVEL's scale, so a typical delta
+  // reads a fraction of a level (~0.3–0.5 vs ~1.0), i.e. it contributes less per
+  // unit of weight. Capping the delta weights below the level weights therefore
+  // capped their INFLUENCE twice over; giving them an equal ceiling lets the
+  // tuner lift a rate of change to level parity when the data supports it. The
+  // floors stay near zero so it can still ignore a genuinely useless factor.
   wGex: { min: 0.20, max: 0.70 },
-  wDGamma: { min: 0.05, max: 0.40 },
+  wDGamma: { min: 0.05, max: 0.70 },
   wPositions: { min: 0.02, max: 0.35 },
-  wDPositions: { min: 0.02, max: 0.30 },
+  wDPositions: { min: 0.02, max: 0.55 },
 
   // Normalize-step shaping exponents (applied to the whole factor's ratio).
+  // The dGamma/dPositions ratios sit BELOW 1 (a delta is a fraction of a level),
+  // and for r < 1 a SMALLER exponent lifts the reading toward the 1.0 anchor
+  // (r^p → 1 as p → 0), so both rate-of-change exponents share the low [0.3, …]
+  // floor the positions factors use — the trade-off is flatter discrimination
+  // between a big and a small move, which the tuner balances against PnL.
   pGamma: { min: 0.8, max: 1.8 },
   positiveGammaBias: { min: 1.0, max: 1.3 }, // per-strike multiplier, not an exponent
-  pDGamma: { min: 0.8, max: 1.8 },
+  pDGamma: { min: 0.3, max: 1.8 },
   pPositions: { min: 0.3, max: 0.9 },
   pDPositions: { min: 0.3, max: 0.9 },
   pDistance: { min: 0.8, max: 2.5 },
