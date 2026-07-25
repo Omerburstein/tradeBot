@@ -63,11 +63,14 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   + the `ingest-spx` npm script + code comments pointing at them). Backfill spot now
   comes solely from Yahoo `^GSPC` via `scripts/backfill-prices.ts` (already wired to
   `spot_prices`, same `captured_at` alignment); the live tick keeps writing its
-  page-header spot. **Scope note:** `fetch_es.py` / `fetch_spy.py` (ES `es_prices`
-  P&L feed + SPY→SPX conversion tooling) still use the massive SDK and were left in
-  place — they're not the I:SPX spot source and were deliberately kept on 2026-07-22.
-  **Trade-off accepted:** Yahoo 1-min only reaches ~30 days back, so SPX spot older
-  than that can no longer be re-fetched from source (existing DB rows are untouched).
+  page-header spot. **Massive fully removed:** `fetch_es.py` and `fetch_spy.py` (the
+  last massive SDK users) and the `MASSIVE_API_KEY` env key are also gone — ES now
+  comes from Yahoo `ES=F` via `backfill-prices.ts`/`live-prices.ts`. The ES→SPX CSV
+  *conversion* tooling (`es-to-spx.ts`, `ingest-prices.ts`, `test-es-spx-conversion.ts`,
+  `lib/es-spx.ts`) is kept — it doesn't use massive and is the manual deep-history
+  fallback (feed it a CSV from any source). **Trade-off accepted:** Yahoo 1-min only
+  reaches ~30 days back for BOTH `ES=F` and `^GSPC`, so 1-min ES/SPX older than that
+  can no longer be re-fetched from source (existing DB rows are untouched).
 
 ## Scraper
 
