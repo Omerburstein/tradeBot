@@ -231,8 +231,8 @@ export function candles5mToSpotRowsByDate(
  * reads the spot row keyed at T−1min, i.e. the bar that CLOSES at T.
  *
  * This is only a FALLBACK for backfill spot: the authoritative source is the
- * exact I:SPX index ingested by scripts/fetch_spx.py → ingest-spx.ts, which
- * covers all history (this UW endpoint is server-capped to ~6 trading days
+ * Yahoo ^GSPC feed ingested by scripts/backfill-prices.ts (Yahoo's 1-min data
+ * reaches ~30 days back; this UW endpoint is server-capped to ~6 trading days
  * back). Both use the identical bar-start/close convention, so they agree.
  */
 export function candles1mToSpotRowsByDate(

@@ -246,7 +246,7 @@ const MIN_MS = 60_000;
  * 10:34 spot (1-min) bar and the 10:30 ES (5-min) bar — both carry the last price
  * at 10:35.
  *
- * SPX (I:SPX) is uniformly 1-min → look up `T − 1min`. ES is 5-min in the older
+ * SPX (^GSPC) is uniformly 1-min → look up `T − 1min`. ES is 5-min in the older
  * data and 1-min in the recent feed; the bar closing at T is labelled `T − 1min`
  * (1-min) or `T − 5min` (5-min), so try the finer key first, then the 5-min key.
  * A final `T` fallback covers the rare missing prior bar (e.g. the 09:30 open,

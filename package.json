@@ -21,7 +21,6 @@
     "scale-carryover": "node --env-file=.env --import=tsx/esm algorithms/scale-carryover.ts",
     "ingest": "node --env-file=.env --import=tsx/esm scripts/ingest-prices.ts",
     "backfill-prices": "node --env-file=.env --import=tsx/esm scripts/backfill-prices.ts",
-    "ingest-spx": "node --env-file=.env --import=tsx/esm scripts/ingest-spx.ts",
     "live": "node --env-file=.env --import=tsx/esm scripts/live-prices.ts",
     "es-to-spx": "node --import=tsx/esm scripts/es-to-spx.ts",
     "test:es-spx": "node --import=tsx/esm scripts/test-es-spx-conversion.ts"

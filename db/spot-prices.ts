@@ -5,13 +5,13 @@ import { logger } from '../scraper/core/logger.js';
  * Master kill-switch for spot writes. Defaults ON; set SCRAPER_SPOT_WRITES=false
  * to disable at the process level.
  *
- * Use the OFF switch for a backfill run whose spot comes from the exact I:SPX
- * ingest (scripts/fetch_spx.py → ingest-spx.ts): that pipeline owns spot for
- * historical days, so the scraper's own (UW-derived) spot would just clobber
- * the ingested I:SPX rows on upsert. Turning it off there leaves the I:SPX rows
- * authoritative while the walk-back still writes Greeks/positions. The live
- * tick — a separate process — keeps the default ON and writes its page-header
- * spot, which matches the chart.
+ * Use the OFF switch for a backfill run whose spot comes from the Yahoo ^GSPC
+ * ingest (scripts/backfill-prices.ts): that pipeline owns spot for historical
+ * days, so the scraper's own (UW-derived) spot would just clobber the ingested
+ * ^GSPC rows on upsert. Turning it off there leaves the Yahoo rows authoritative
+ * while the walk-back still writes Greeks/positions. The live tick — a separate
+ * process — keeps the default ON and writes its page-header spot, which matches
+ * the chart.
  */
 const SPOT_WRITES_ENABLED =
   (process.env.SCRAPER_SPOT_WRITES ?? 'true').trim().toLowerCase() !== 'false';
@@ -27,7 +27,7 @@ const CREATE_SPOT_PRICES_TABLE =
 /**
  * Delete every spot row whose ET trading day falls in [startDate, endDate]
  * (inclusive, YYYY-MM-DD). Used by a full-replace re-ingest (e.g. swapping a
- * derived SPX proxy for the exact I:SPX index) so stale timestamps that the new
+ * derived SPX proxy for the Yahoo ^GSPC feed) so stale timestamps that the new
  * source doesn't cover can't linger. Returns the number of rows removed.
  */
 export async function deleteSpotPricesInRange(

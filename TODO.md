@@ -21,14 +21,11 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   per slot and down-weight (most faithful) vs. score the two expiries separately
   and blend composites.
 
-- [x] **3. Positions factor: use gamma as a threshold, not a multiplier.**
-  Change the positions factor so it no longer calculates the factor *with* gamma.
-  Gamma should only act as a threshold (gate) for whether the positions factor
-  applies at all, rather than being folded into the factor's value.
-
-- [x] **4. Align positions derivatives with the design roles.**
-  Change the positions derivatives so they match the roles defined in
-  `algorithms/ROLES.md`.
+- [ ] **7. Fix the derivatives issues.**
+  Fix the outstanding issues with the algorithm's derivatives (the
+  dGamma/dPositions rate-of-change and momentum terms). *(Underspecified — flag
+  the specific derivatives and the observed problem before implementing; ask the
+  user for details.)*
 
 ## Training / Backtesting
 
@@ -40,7 +37,7 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   `captured_at` slot so the algo can evaluate conditions at the moment of
   decision without look-ahead.
 
-- [ ] **5. Measure correlation between the 30 min pre-open window and the first 10 min after open.**
+- [ ] **3. Measure correlation between the 30 min pre-open window and the first 10 min after open.**
   Check the correlation between the 30 minutes before market open (the pre-bell
   active polling window, ~09:00–09:30 ET) and the 10 minutes after the open
   (~09:30–09:40 ET). Determine whether pre-open Greek/positioning signals predict
@@ -49,4 +46,35 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Data
 
+- [ ] **4. Migrate persistence from Neon Postgres to CockroachDB Serverless.**
+  Move the database layer off Neon Postgres onto CockroachDB Serverless. This
+  spans everything under `db/` (client connection, batch inserts, `ON CONFLICT`
+  idempotency, the `(captured_at, expiry, panel, strike)` unique constraint) plus
+  the `DATABASE_URL` / `STAGING_DATABASE_URL` env wiring and the Railway
+  deployment config. Verify CockroachDB's Postgres-wire compatibility with the
+  `@neondatabase/serverless` client (may need swapping to a standard `pg`/driver),
+  confirm `TIMESTAMPTZ` and the batch-insert paths behave identically, and plan a
+  data copy/backfill from the existing Neon branch. Both the scraper (writer) and
+  the algorithm (reader) depend on this schema, so validate both paths after
+  cutover.
+
+- [x] **6. Replace the massive (I:SPX) spot data source with Yahoo Finance.** ✅
+  Ripped out the I:SPX spot pipeline (`scripts/fetch_spx.py` + `scripts/ingest-spx.ts`
+  + the `ingest-spx` npm script + code comments pointing at them). Backfill spot now
+  comes solely from Yahoo `^GSPC` via `scripts/backfill-prices.ts` (already wired to
+  `spot_prices`, same `captured_at` alignment); the live tick keeps writing its
+  page-header spot. **Scope note:** `fetch_es.py` / `fetch_spy.py` (ES `es_prices`
+  P&L feed + SPY→SPX conversion tooling) still use the massive SDK and were left in
+  place — they're not the I:SPX spot source and were deliberately kept on 2026-07-22.
+  **Trade-off accepted:** Yahoo 1-min only reaches ~30 days back, so SPX spot older
+  than that can no longer be re-fetched from source (existing DB rows are untouched).
+
 ## Scraper
+
+- [ ] **5. Add a Market Tide backfill scraping mechanism.**
+  Add a scraping path for Market Tide, found in the left menu under the **Market**
+  option → **Market Tide** window. Scrape all available dates of the market tide
+  history from there. This should run **only during backfill** (not on the live
+  per-minute tick). Scrape **both the OTM and the ALL options** views of the
+  market tide. *(User offered to give further guidance if needed — ask before
+  implementing if the endpoint/date-range details are unclear.)*
