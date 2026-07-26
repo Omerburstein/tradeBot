@@ -100,6 +100,14 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   pDGamma: { min: 0.3, max: 1.8 },
   pPositions: { min: 0.3, max: 0.9 },
   pDPositions: { min: 0.3, max: 0.9 },
+
+  // Pre-normalize GAINS on the two rate-of-change factors — a plain multiplier on
+  // the raw delta, INSIDE the log, so it re-anchors a fractional delta toward the
+  // 1.0 read of its level (separable from the weight, which is outside the log).
+  // dGamma sits ~0.4x its level so ~2.5 anchors it; positions move far less
+  // minute-to-minute, so their delta needs a larger gain — hence the wider range.
+  dGammaGain: { min: 0.5, max: 10 },
+  dPositionsGain: { min: 0.5, max: 20 },
   pDistance: { min: 0.8, max: 2.5 },
   distanceWeightSpan: { min: 0.5, max: 4.0 },
 
@@ -117,15 +125,15 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   entryThreshold: { min: 0.8, max: 2.5 },
   strongEntryThreshold: { min: 1.5, max: 3.5 },
   conePassBonus: { min: 0.0, max: 0.75 },
-  // Consecutive qualifying Greek bars before entry (1 = enter immediately; higher
-  // filters one-bar spikes and holds entries longer). Integer.
-  entryConfirmBars: { min: 1, max: 4, integer: true },
+  // Wall-clock half-life (min) of the entry-signal EWMA (0 = off/instantaneous;
+  // higher = more smoothing, later entries). Filters one-bar spikes, cadence-invariant.
+  entrySignalHalfLifeMin: { min: 0, max: 12 },
   exitFadeThreshold: { min: 0.0, max: 1.2 }, // absolute floor of the fade-exit bar
   // How much a high-conviction entry LOWERS its fade bar (bar shrinks by this per
   // unit of entry z above typical). Higher → strong trades hold longer. 0 = pure
   // fixed floor. NOTE: under a pure-PnL objective the tuner may push this toward 0
-  // and entryConfirmBars toward 1 if shorter trades score better in-sample — the
-  // DEFAULT_CONFIG values bias toward longer holds when NOT tuning.
+  // and entrySignalHalfLifeMin toward 0 if shorter trades score better in-sample —
+  // the DEFAULT_CONFIG values bias toward longer holds when NOT tuning.
   exitFadeFraction: { min: 0.0, max: 0.9 },
   reversalThreshold: { min: 0.5, max: 2.0 },
 
@@ -163,6 +171,40 @@ function objectiveValue(r: BacktestResult, name: ObjectiveName): number {
       return r.sharpe;
   }
 }
+
+/**
+ * True when a config's fade floor sits at or above the LOWEST achievable entry
+ * bar — `entryThreshold − conePassBonus`, the fresh-pass outside-cone case. Such
+ * a config opens a position already below its own signal-fade bar, so the fade
+ * rule flushes it on the next tick (instant whipsaw). The runtime cap in
+ * `fadeExitBar` (risk-manager.ts) neutralizes the symptom, but the tuner should
+ * never bank a whipsaw-driven score, so these are rejected outright.
+ */
+function isInvertedFadeConfig(config: AlgoConfig): boolean {
+  const lowestEntryBar = config.entryThreshold - config.conePassBonus;
+  return config.exitFadeThreshold >= lowestEntryBar;
+}
+
+/**
+ * Zero-filled result stand-in for a config rejected BEFORE simulation (an
+ * inverted fade bar): recorded in `candidates` for an accurate `evaluated`
+ * count, but `failed`/-Infinity so it is filtered out and never selected.
+ */
+const EMPTY_RESULT: BacktestResult = {
+  trades: [],
+  totalPnl: 0,
+  winRate: 0,
+  avgWin: 0,
+  avgLoss: 0,
+  profitFactor: 0,
+  maxDrawdown: 0,
+  sharpe: 0,
+  totalDays: 0,
+  initialCapital: 0,
+  finalEquity: 0,
+  minEquity: 0,
+  failed: true,
+};
 
 // ── Tuning ──
 
@@ -248,10 +290,19 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
   const candidates: TuneCandidate[] = [];
 
   // One evaluation: decode a normalized vector → config → in-sample backtest.
-  // Rejects (blown account / too few trades) score -Infinity; CMA-ES ranks by
-  // score, so they sort last and are never selected.
+  // Rejects (blown account / too few trades / inverted fade bar) score -Infinity;
+  // CMA-ES ranks by score, so they sort last and are never selected.
   const evaluate = (x: number[]): number => {
     const config = decodeConfig(params, x);
+    // Reject configs whose fade floor sits ABOVE the lowest possible entry bar
+    // (entryThreshold − conePassBonus, the fresh-pass outside-cone case). Such a
+    // config enters a position already below its own fade bar and flushes it on
+    // the next tick — see fadeExitBar in risk-manager.ts. Rejecting steers the
+    // optimizer away from that region instead of banking whipsaw-driven scores.
+    if (isInvertedFadeConfig(config)) {
+      candidates.push({ config, score: -Infinity, train: EMPTY_RESULT });
+      return -Infinity;
+    }
     const result = simulate(train, config, undefined, equity);
     const usable = !result.failed && result.trades.length >= minTrades;
     const score = usable ? objectiveValue(result, objective) : -Infinity;

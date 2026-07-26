@@ -208,7 +208,16 @@ export function fadeExitBar(config: AlgoConfig, state: TradeState): number {
   // bar shrinks by `fraction` per unit of excess, floored at MIN_FADE_SCALE·floor.
   const excess = Math.max(0, entryConviction - 1);
   const scale = Math.max(MIN_FADE_SCALE, 1 - fraction * excess);
-  return floor * scale;
+  // Cap the bar at the entry conviction: a "fade" means the signal weakened FROM
+  // where it got us in, so we must never demand the score climb HIGHER than its
+  // entry level to stay in. Without this, a config whose fade floor exceeds the
+  // (effective) entry bar — e.g. entryThreshold 0.8 vs exitFadeThreshold 1.03 —
+  // flushes a low-conviction entry on the very next tick (instant whipsaw). The
+  // cap only binds when floor·scale > entryConviction; healthy configs are
+  // unaffected. Entry conviction can be ≤0 in a degenerate case (we entered on a
+  // structural rule with a weak/negative composite); clamp at 0 so the cap never
+  // produces a negative bar (reversal/stop still bound the downside).
+  return Math.min(floor * scale, Math.max(0, entryConviction));
 }
 
 /**
