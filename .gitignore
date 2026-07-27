@@ -29,3 +29,6 @@ docs/test-cases/logs/
 Thumbs.db
 .vscode/
 
+
+# ad-hoc scratch probes
+algorithms/_chk.ts
