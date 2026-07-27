@@ -27,6 +27,14 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   the specific derivatives and the observed problem before implementing; ask the
   user for details.)*
 
+- [ ] **8. Warm-up: feed GEX/positions from pre-market data, hold derivatives at 0 until warm-up completes.**
+  Change the warm-up so that GEX and positions use pre-market data, and the
+  derivatives value stays 0 until the warm-up is finished.
+
+- [ ] **9. Remove the first 3 ticks in the pre-market.**
+  Drop the first 3 ticks of the pre-market window so the algorithm never sees
+  them.
+
 ## Training / Backtesting
 
 - [ ] **2. Feed SPX price data from DB as the signal input for backtest and tune.**

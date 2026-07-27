@@ -257,6 +257,47 @@ function emptyResult(equity: EquitySettings = DEFAULT_EQUITY): BacktestResult {
   };
 }
 
+/**
+ * Build a BacktestResult from an already-realized set of trades — used by the
+ * walk-forward tuner to pool every fold's out-of-sample trades into one honest
+ * equity curve. Trades are replayed in entryTime order (so the capital account
+ * compounds exactly as it would live), daily PnLs group on the entryTime day
+ * for the drawdown/Sharpe series, and the run fails if pooled equity ever
+ * touches the floor. Unlike {@link simulate} it does NOT re-run the signal
+ * generator — the trades are taken as given.
+ */
+export function resultFromTrades(
+  trades: TradeRecord[],
+  equity: EquitySettings = DEFAULT_EQUITY,
+): BacktestResult {
+  const ordered = [...trades].sort(
+    (a, b) => new Date(a.entryTime).getTime() - new Date(b.entryTime).getTime(),
+  );
+  const dayPnl = new Map<string, number>();
+  const dayOrder: string[] = [];
+  const counted: TradeRecord[] = [];
+  let accountEquity = equity.initialCapital;
+  let minEquity = accountEquity;
+  let failed = false;
+  for (const t of ordered) {
+    const day = t.entryTime.slice(0, 10);
+    if (!dayPnl.has(day)) {
+      dayPnl.set(day, 0);
+      dayOrder.push(day);
+    }
+    accountEquity += t.pnl;
+    dayPnl.set(day, dayPnl.get(day)! + t.pnl);
+    counted.push(t);
+    if (accountEquity < minEquity) minEquity = accountEquity;
+    if (accountEquity <= equity.equityFloor) {
+      failed = true;
+      break;
+    }
+  }
+  const dailyPnls = dayOrder.map((d) => dayPnl.get(d)!);
+  return computeMetrics(counted, dailyPnls, dayOrder.length, equity, accountEquity, minEquity, failed);
+}
+
 // ── Reporting (shared by the backtest CLI and the tuner) ──
 
 /** Format a signed dollar amount, e.g. `+$1500.00` / `-$500.00`. */

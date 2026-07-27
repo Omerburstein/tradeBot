@@ -28,9 +28,19 @@
  * Snapshots are loaded from the DB once and replayed in-memory per config
  * (see simulate() in backtest.ts).
  *
- * To avoid overfitting, the range is split into an in-sample (train) slice
- * used for optimization and an out-of-sample (test) slice the winner is
- * reported on — if test performance collapses, the config is overfit.
+ * Validation — walk-forward (default): rather than one train/test split, the
+ * range is cut into K expanding-window folds. Each fold re-tunes on all history
+ * up to its test block (in-sample objective = profit factor) and is scored on
+ * the held-out block it never saw. Every fold's out-of-sample trades are pooled
+ * into one equity curve whose TOTAL DOLLARS is the honest estimate of "money
+ * this process would have made walking forward" — the keep/discard metric. The
+ * config that ships is then re-tuned on ALL data (the walk-forward dollars vouch
+ * for the process, not for one frozen config). Set TUNE_WF=false to fall back to
+ * the legacy single train/test split.
+ *
+ * Dimensionality — a handful of low-impact / secondary knobs are frozen during
+ * tuning (see FROZEN_PARAMS) at the current bestModel's values, cutting the
+ * swept params ~22 → ~14 to fight overfitting on the small trade sample.
  *
  * Capital account (TODO #9): every config is replayed against a seeded account
  * (default $100k, fail at $98k). A config whose run hits the floor is a failure
@@ -45,8 +55,11 @@
  *   TUNE_RESTARTS=3         independent CMA-ES restarts, best kept (default 3)
  *   TUNE_POP=12             CMA-ES population size λ per generation (default 4 + ⌊3·ln n⌋)
  *   TUNE_SIGMA=0.3          initial CMA-ES step size in normalized space (default 0.3)
- *   TUNE_OBJECTIVE=totalPnl sharpe | totalPnl | profitFactor (default totalPnl)
- *   TUNE_TRAIN_FRAC=0.7     fraction of days used for training (default 0.7)
+ *   TUNE_OBJECTIVE=profitFactor  sharpe | totalPnl | profitFactor (default profitFactor)
+ *   TUNE_WF=true            walk-forward validation on/off (default true; false = single split)
+ *   TUNE_WF_FOLDS=4         number of expanding-window folds (default 4)
+ *   TUNE_WF_INIT_FRAC=0.4   fraction of days reserved as the first fold's initial train (default 0.4)
+ *   TUNE_TRAIN_FRAC=0.7     single-split only: fraction of days used for training (default 0.7)
  *   TUNE_MIN_TRADES=10      configs with fewer train trades are rejected
  *   TUNE_SEED=42            reproducible runs (default: time-seeded)
  *   INITIAL_CAPITAL=100000  seed capital for each run (default 100000)
@@ -55,9 +68,9 @@
 
 import pino from 'pino';
 import { loadDateRange, getAvailableDates } from './data-loader.js';
-import { simulate, printTradeLog, printSummary } from './backtest.js';
+import { simulate, resultFromTrades, printTradeLog, printSummary } from './backtest.js';
 import { recordModelRun } from './model-store.js';
-import type { AlgoConfig, BacktestResult, EquitySettings, Snapshot } from './types.js';
+import type { AlgoConfig, BacktestResult, EquitySettings, Snapshot, TradeRecord } from './types.js';
 import { DEFAULT_CONFIG, DEFAULT_EQUITY } from './types.js';
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
@@ -144,6 +157,42 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
 
 /** Weight paths that get re-normalized to sum to 1 after sampling. */
 const WEIGHT_KEYS = ['wGex', 'wDGamma', 'wPositions', 'wDPositions'] as const;
+
+/**
+ * Low-impact / secondary knobs FROZEN during tuning to cut the search
+ * dimensionality (~22 → ~14) and fight overfitting on the small trade sample.
+ * They are pinned at the values of the current `bestModel` — the 2026-07-15 tune
+ * that generalized to +$650 out-of-sample — NOT at DEFAULT_CONFIG, whose values
+ * are unvetted. Only params that exist in that bestModel are frozen; newer knobs
+ * it predates (pPositions, entrySignalHalfLifeMin, …) stay tunable rather than
+ * be pinned at an arbitrary default. Re-derive these if bestModel changes
+ * materially, or remove a key here to sweep it again.
+ */
+export const FROZEN_PARAMS: Partial<Record<keyof AlgoConfig, number>> = {
+  positiveGammaBias: 1.1607767980745605,
+  pDGamma: 1.0021324829187954,
+  pDPositions: 0.7118878461245194,
+  distanceWeightSpan: 2.0070431945600453,
+  zClamp: 4.136436829932964,
+  strongEntryThreshold: 2.529692499488264,
+  conePassBonus: 0.1338095230282378,
+  reversalThreshold: 1.1900472858336397,
+};
+
+/** Base config a tuning run decodes from: DEFAULT_CONFIG with FROZEN_PARAMS pinned. */
+export const TUNING_BASE_CONFIG: AlgoConfig = (() => {
+  const base = cloneConfig(DEFAULT_CONFIG);
+  for (const [key, value] of Object.entries(FROZEN_PARAMS)) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (base as any)[key] = value;
+  }
+  return base;
+})();
+
+/** The space actually swept: the full search space minus every frozen key. */
+export const TUNING_SEARCH_SPACE: Record<string, ParamRange> = Object.fromEntries(
+  Object.entries(DEFAULT_SEARCH_SPACE).filter(([key]) => !(key in FROZEN_PARAMS)),
+);
 
 // ── Objective ──
 
@@ -235,14 +284,100 @@ export interface TuneResult {
   space: Record<string, ParamRange>;
 }
 
+/** Everything a single CMA-ES search over one in-sample slice needs. */
+interface SearchConfig {
+  objective: ObjectiveName;
+  minTrades: number;
+  totalBudget: number;
+  restarts: number;
+  popSize?: number;
+  sigma0: number;
+  equity: EquitySettings;
+  /** Config the search decodes from — FROZEN_PARAMS pinned (see TUNING_BASE_CONFIG). */
+  baseConfig: AlgoConfig;
+  rng: () => number;
+  /** Emit the per-restart CMA-ES config line (off for the many walk-forward folds). */
+  verbose?: boolean;
+}
+
+interface SearchResult {
+  best: AlgoConfig;
+  trainResult: BacktestResult;
+  leaderboard: TuneCandidate[];
+  evaluated: number;
+}
+
+/**
+ * Run CMA-ES over one in-sample slice and return the best config found. Shared
+ * by the single-split tuner and every walk-forward fold so both paths optimize
+ * identically. Returns null when no config clears the usability gates (blown
+ * account / too few trades / inverted fade) — the caller decides what that means.
+ */
+function searchBestConfig(train: Snapshot[], space: Record<string, ParamRange>, cfg: SearchConfig): SearchResult | null {
+  // The ordered list of tuned params defines the CMA-ES coordinate vector.
+  const params = Object.entries(space) as Array<[string, ParamRange]>;
+  const n = params.length;
+  const lambda = cfg.popSize ?? defaultLambda(n);
+
+  // Size the restart count to the budget: each restart needs at least one full
+  // generation (λ evals), and ideally several. Never exceed budget/λ restarts.
+  const requestedRestarts = Math.max(1, cfg.restarts);
+  const restarts = Math.max(1, Math.min(requestedRestarts, Math.floor(cfg.totalBudget / lambda)));
+  const perRestartBudget = Math.floor(cfg.totalBudget / restarts);
+
+  if (cfg.verbose) {
+    log.info(
+      { params: n, populationLambda: lambda, restarts, perRestartBudget, totalBudget: cfg.totalBudget, sigma0: cfg.sigma0 },
+      'CMA-ES configuration',
+    );
+  }
+
+  const candidates: TuneCandidate[] = [];
+
+  // One evaluation: decode a normalized vector → config → in-sample backtest.
+  // Rejects (blown account / too few trades / inverted fade bar) score -Infinity;
+  // CMA-ES ranks by score, so they sort last and are never selected.
+  const evaluate = (x: number[]): number => {
+    const config = decodeConfig(params, x, cfg.baseConfig);
+    // Reject configs whose fade floor sits ABOVE the lowest possible entry bar
+    // (entryThreshold − conePassBonus, the fresh-pass outside-cone case). Such a
+    // config enters a position already below its own fade bar and flushes it on
+    // the next tick — see fadeExitBar in risk-manager.ts. Rejecting steers the
+    // optimizer away from that region instead of banking whipsaw-driven scores.
+    if (isInvertedFadeConfig(config)) {
+      candidates.push({ config, score: -Infinity, train: EMPTY_RESULT });
+      return -Infinity;
+    }
+    const result = simulate(train, config, undefined, cfg.equity);
+    const usable = !result.failed && result.trades.length >= cfg.minTrades;
+    const score = usable ? objectiveValue(result, cfg.objective) : -Infinity;
+    candidates.push({ config, score, train: result });
+    return score;
+  };
+
+  const gauss = makeGaussian(cfg.rng);
+
+  // Multi-start: restart 0 begins at the (frozen) base config; the rest at random points.
+  for (let r = 0; r < restarts; r++) {
+    const x0 = r === 0 ? encodeConfig(params, cfg.baseConfig) : Array.from({ length: n }, () => cfg.rng());
+    cmaes({ n, x0, sigma0: cfg.sigma0, lambda, maxEvals: perRestartBudget, gauss, evaluate });
+  }
+
+  const finite = candidates.filter((c) => Number.isFinite(c.score));
+  if (finite.length === 0) return null;
+
+  const leaderboard = [...finite].sort((a, b) => b.score - a.score).slice(0, 10);
+  return { best: leaderboard[0]!.config, trainResult: leaderboard[0]!.train, leaderboard, evaluated: candidates.length };
+}
+
 export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
-  const objective = opts.objective ?? 'totalPnl';
+  const objective = opts.objective ?? 'profitFactor';
   // Total evaluation budget: fold the old two-stage env vars into one budget so
   // TUNE_ITERS / TUNE_REFINE keep controlling total compute.
   const totalBudget = (opts.iterations ?? 300) + (opts.refineIterations ?? 100);
   const trainFraction = opts.trainFraction ?? 0.7;
   const minTrades = opts.minTrades ?? 10;
-  const space = opts.space ?? DEFAULT_SEARCH_SPACE;
+  const space = opts.space ?? TUNING_SEARCH_SPACE;
   const equity = opts.equity ?? DEFAULT_EQUITY;
   const sigma0 = opts.sigma0 ?? 0.3;
   const rng = makeRng(opts.seed ?? Date.now());
@@ -260,72 +395,173 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
     'train/test split (by day)',
   );
 
-  // The ordered list of tuned params defines the CMA-ES coordinate vector.
-  const params = Object.entries(space) as Array<[string, ParamRange]>;
-  const n = params.length;
-  const lambda = opts.popSize ?? defaultLambda(n);
-
-  // Size the restart count to the budget: each restart needs at least one full
-  // generation (λ evals), and ideally several. Never exceed budget/λ restarts.
-  const requestedRestarts = Math.max(1, opts.restarts ?? 3);
-  const restarts = Math.max(1, Math.min(requestedRestarts, Math.floor(totalBudget / lambda)));
-  const perRestartBudget = Math.floor(totalBudget / restarts);
-
-  log.info(
-    { params: n, populationLambda: lambda, restarts, perRestartBudget, totalBudget, sigma0 },
-    'CMA-ES configuration',
-  );
-
-  const candidates: TuneCandidate[] = [];
-
-  // One evaluation: decode a normalized vector → config → in-sample backtest.
-  // Rejects (blown account / too few trades / inverted fade bar) score -Infinity;
-  // CMA-ES ranks by score, so they sort last and are never selected.
-  const evaluate = (x: number[]): number => {
-    const config = decodeConfig(params, x);
-    // Reject configs whose fade floor sits ABOVE the lowest possible entry bar
-    // (entryThreshold − conePassBonus, the fresh-pass outside-cone case). Such a
-    // config enters a position already below its own fade bar and flushes it on
-    // the next tick — see fadeExitBar in risk-manager.ts. Rejecting steers the
-    // optimizer away from that region instead of banking whipsaw-driven scores.
-    if (isInvertedFadeConfig(config)) {
-      candidates.push({ config, score: -Infinity, train: EMPTY_RESULT });
-      return -Infinity;
-    }
-    const result = simulate(train, config, undefined, equity);
-    const usable = !result.failed && result.trades.length >= minTrades;
-    const score = usable ? objectiveValue(result, objective) : -Infinity;
-    candidates.push({ config, score, train: result });
-    return score;
-  };
-
-  const gauss = makeGaussian(rng);
-
-  // Multi-start: restart 0 begins at DEFAULT_CONFIG; the rest at random points.
-  for (let r = 0; r < restarts; r++) {
-    const x0 = r === 0 ? encodeConfig(params, DEFAULT_CONFIG) : Array.from({ length: n }, () => rng());
-    cmaes({ n, x0, sigma0, lambda, maxEvals: perRestartBudget, gauss, evaluate });
-  }
-
-  const finite = candidates.filter((c) => Number.isFinite(c.score));
-  if (finite.length === 0) {
+  const search = searchBestConfig(train, space, {
+    objective, minTrades, totalBudget, restarts: opts.restarts ?? 3,
+    popSize: opts.popSize, sigma0, equity, baseConfig: TUNING_BASE_CONFIG, rng, verbose: true,
+  });
+  if (!search) {
     log.warn('no usable configs found (all rejected) — widen the search space or relax minTrades');
     return null;
   }
 
-  const leaderboard = [...finite].sort((a, b) => b.score - a.score).slice(0, 10);
-  const best = leaderboard[0]!;
-
   // Out-of-sample evaluation of the winner.
-  const testResult = simulate(test, best.config, undefined, equity);
+  const testResult = simulate(test, search.best, undefined, equity);
 
   return {
-    best: best.config,
-    trainResult: best.train,
+    best: search.best,
+    trainResult: search.trainResult,
     testResult,
-    leaderboard,
-    evaluated: candidates.length,
+    leaderboard: search.leaderboard,
+    evaluated: search.evaluated,
     space,
+  };
+}
+
+// ── Walk-forward validation ──
+
+/** One expanding-window fold: re-tuned on all history before its test block, scored on it. */
+export interface FoldResult {
+  index: number;
+  trainDays: number;
+  testDays: number;
+  /** First/last day (expiry) of the held-out test block. */
+  testStart: string;
+  testEnd: string;
+  /** Best config found on this fold's train slice (null if none was usable). */
+  best: AlgoConfig | null;
+  /** Out-of-sample result on the held-out block. */
+  oos: BacktestResult;
+}
+
+export interface WalkForwardResult {
+  /** Config to ship: re-tuned on ALL data (the walk-forward dollars vouch for the process). */
+  deploy: AlgoConfig;
+  /** In-sample result of the deploy config over all data. */
+  deployResult: BacktestResult;
+  /** Pooled out-of-sample: every fold's held-out trades concatenated into one equity curve. */
+  oos: BacktestResult;
+  folds: FoldResult[];
+  space: Record<string, ParamRange>;
+  evaluated: number;
+}
+
+/** Options for {@link runWalkForward} — TuneOptions plus fold geometry. */
+export interface WalkForwardOptions extends TuneOptions {
+  /** Number of expanding-window folds (default 4). */
+  folds?: number;
+  /** Fraction of days reserved as the first fold's initial train block (default 0.4). */
+  initialTrainFraction?: number;
+}
+
+/** Collect every snapshot whose day (expiry) is in `dayList`, preserving input order. */
+function snapshotsForDays(byDay: Map<string, Snapshot[]>, dayList: string[]): Snapshot[] {
+  const out: Snapshot[] = [];
+  for (const day of dayList) {
+    const list = byDay.get(day);
+    if (list) out.push(...list);
+  }
+  return out;
+}
+
+/**
+ * Walk-forward validation: cut the range into K expanding-window folds, re-tune
+ * each on all history up to its held-out test block, and pool every fold's
+ * out-of-sample trades into one honest equity curve. The pooled TOTAL DOLLARS is
+ * the keep/discard metric; the shipped config is re-tuned on ALL data.
+ */
+export async function runWalkForward(opts: WalkForwardOptions): Promise<WalkForwardResult | null> {
+  const objective = opts.objective ?? 'profitFactor';
+  const totalBudget = (opts.iterations ?? 300) + (opts.refineIterations ?? 100);
+  const minTrades = opts.minTrades ?? 10;
+  // Held-out fold slices trade far less than the full range, so a lower floor
+  // keeps folds from being rejected wholesale (which would empty the leaderboard).
+  const foldMinTrades = Math.max(2, Math.round(minTrades / 3));
+  const folds = Math.max(2, opts.folds ?? 4);
+  const initialTrainFraction = opts.initialTrainFraction ?? 0.4;
+  const space = opts.space ?? TUNING_SEARCH_SPACE;
+  const equity = opts.equity ?? DEFAULT_EQUITY;
+  const sigma0 = opts.sigma0 ?? 0.3;
+  const restarts = opts.restarts ?? 3;
+  const rng = makeRng(opts.seed ?? Date.now());
+
+  log.info({ startDate: opts.startDate, endDate: opts.endDate }, 'loading snapshots for walk-forward tuning');
+  const allSnapshots = await loadDateRange(opts.startDate, opts.endDate, DEFAULT_CONFIG.strikeWindow);
+  if (allSnapshots.length === 0) {
+    log.warn('no snapshots found in date range');
+    return null;
+  }
+
+  const days = [...new Set(allSnapshots.map((s) => s.expiry))].sort();
+  if (days.length < folds + 1) {
+    log.warn({ days: days.length, folds }, 'not enough trading days for the requested fold count');
+    return null;
+  }
+
+  // Expanding-window folds: reserve the first initialTrainFraction of days as the
+  // seed train block, split the remainder into K contiguous out-of-sample blocks.
+  const byDay = groupSnapshotsByDay(allSnapshots);
+  const startIdx = Math.max(1, Math.floor(days.length * initialTrainFraction));
+  const testDays = days.slice(startIdx);
+  const chunk = Math.max(1, Math.ceil(testDays.length / folds));
+
+  const foldResults: FoldResult[] = [];
+  const oosTrades: TradeRecord[] = [];
+  let evaluated = 0;
+
+  for (let f = 0; f < folds; f++) {
+    const testSlice = testDays.slice(f * chunk, (f + 1) * chunk);
+    if (testSlice.length === 0) break;
+    const testStart = testSlice[0]!;
+    // Expanding train: every day strictly before this test block.
+    const trainDayList = days.slice(0, days.indexOf(testStart));
+    const trainSnaps = snapshotsForDays(byDay, trainDayList);
+    const testSnaps = snapshotsForDays(byDay, testSlice);
+
+    const search = searchBestConfig(trainSnaps, space, {
+      objective, minTrades: foldMinTrades, totalBudget, restarts,
+      popSize: opts.popSize, sigma0, equity, baseConfig: TUNING_BASE_CONFIG, rng,
+    });
+    evaluated += search?.evaluated ?? 0;
+    const oos = search ? simulate(testSnaps, search.best, undefined, equity) : EMPTY_RESULT;
+    for (const t of oos.trades) oosTrades.push(t);
+
+    log.info(
+      { fold: f + 1, trainDays: trainDayList.length, testDays: testSlice.length, testStart, oosTrades: oos.trades.length, oosPnl: oos.totalPnl.toFixed(0) },
+      search ? 'fold complete' : 'fold produced no usable config',
+    );
+
+    foldResults.push({
+      index: f + 1,
+      trainDays: trainDayList.length,
+      testDays: testSlice.length,
+      testStart,
+      testEnd: testSlice[testSlice.length - 1]!,
+      best: search?.best ?? null,
+      oos,
+    });
+  }
+
+  // Pooled out-of-sample equity curve — the honest "money the process made".
+  const oos = resultFromTrades(oosTrades, equity);
+
+  // Ship a config re-tuned on ALL data (same process, more data).
+  const deploySearch = searchBestConfig(allSnapshots, space, {
+    objective, minTrades, totalBudget, restarts,
+    popSize: opts.popSize, sigma0, equity, baseConfig: TUNING_BASE_CONFIG, rng, verbose: true,
+  });
+  if (!deploySearch) {
+    log.warn('deploy retrain (all data) found no usable config');
+    return null;
+  }
+  evaluated += deploySearch.evaluated;
+
+  return {
+    deploy: deploySearch.best,
+    deployResult: deploySearch.trainResult,
+    oos,
+    folds: foldResults,
+    space,
+    evaluated,
   };
 }
 
@@ -336,8 +572,12 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
  * clamped to [0,1] (box-constraint repair) then mapped onto its param range;
  * integers are rounded and the factor weights re-normalized to sum to 1.
  */
-function decodeConfig(params: Array<[string, ParamRange]>, x: number[]): AlgoConfig {
-  const config = cloneConfig(DEFAULT_CONFIG);
+function decodeConfig(
+  params: Array<[string, ParamRange]>,
+  x: number[],
+  base: AlgoConfig = DEFAULT_CONFIG,
+): AlgoConfig {
+  const config = cloneConfig(base);
   params.forEach(([path, range], i) => {
     const unit = Math.max(0, Math.min(1, x[i] ?? 0.5));
     let value = range.min + unit * (range.max - range.min);
@@ -395,6 +635,20 @@ function setPath(obj: AlgoConfig, path: string, value: number): void {
 }
 
 // ── Train/test split ──
+
+/** Bucket snapshots by trading day (expiry), preserving input order within a day. */
+function groupSnapshotsByDay(snapshots: Snapshot[]): Map<string, Snapshot[]> {
+  const byDay = new Map<string, Snapshot[]>();
+  for (const s of snapshots) {
+    let list = byDay.get(s.expiry);
+    if (!list) {
+      list = [];
+      byDay.set(s.expiry, list);
+    }
+    list.push(s);
+  }
+  return byDay;
+}
 
 function splitByDay(snapshots: Snapshot[], trainFraction: number): { train: Snapshot[]; test: Snapshot[] } {
   const days = [...new Set(snapshots.map((s) => s.expiry))].sort();
@@ -682,6 +936,65 @@ function jacobiEigen(input: number[][]): { values: number[]; vectors: number[][]
   return { values, vectors: V };
 }
 
+// ── CLI reporting helpers (shared by the single-split and walk-forward paths) ──
+
+/** One-line performance summary of a backtest result. */
+function fmtResult(r: BacktestResult): string {
+  return (
+    `trades=${r.trades.length} pnl=$${r.totalPnl.toFixed(0)} win=${(r.winRate * 100).toFixed(0)}% ` +
+    `pf=${r.profitFactor.toFixed(2)} sharpe=${r.sharpe.toFixed(2)} maxDD=$${r.maxDrawdown.toFixed(0)} ` +
+    `eq=$${r.finalEquity.toFixed(0)} ${r.failed ? 'FAILED' : 'OK'}`
+  );
+}
+
+/** Print the winning value of every swept knob (the headline "what params won"). */
+function printTunedParams(config: AlgoConfig, space: Record<string, ParamRange>): void {
+  console.log('\n=== TUNED PARAMS (swept knobs) ===');
+  const paths = Object.keys(space).sort();
+  const pad = Math.max(...paths.map((p) => p.length));
+  for (const path of paths) {
+    const value = getPath(config, path);
+    const isWeight = (WEIGHT_KEYS as readonly string[]).includes(path);
+    const range = space[path]!;
+    const isToggle = range.integer && range.min === 0 && range.max === 1;
+    const shown = isToggle ? (value >= 0.5 ? '1 (on)' : '0 (off)') : value.toFixed(4);
+    console.log(`  ${path.padEnd(pad)} = ${shown}${isWeight ? ' (normalized)' : ''}`);
+  }
+}
+
+/**
+ * Flag any tuned param whose winning value sits at (or within a hair of) its
+ * search-space bound — a sign the optimum may lie OUTSIDE the range, so the
+ * bound should be widened and the tune re-run before trusting it. Re-normalized
+ * weights and 0/1 toggles are skipped (a bound simply IS the value there).
+ */
+function printParamsAtLimit(config: AlgoConfig, space: Record<string, ParamRange>): void {
+  console.log('\n=== PARAMS AT SEARCH-SPACE LIMIT ===');
+  const paths = Object.keys(space).sort();
+  const pad = Math.max(...paths.map((p) => p.length));
+  const atLimit: string[] = [];
+  for (const p of paths) {
+    const range = space[p]!;
+    const isWeight = (WEIGHT_KEYS as readonly string[]).includes(p);
+    const isToggle = range.integer === true && range.min === 0 && range.max === 1;
+    if (isWeight || isToggle) continue;
+    const value = getPath(config, p);
+    const span = range.max - range.min;
+    const tol = range.integer ? 0 : span * 0.005; // within 0.5% of the range counts as "at" it
+    if (value <= range.min + tol) {
+      atLimit.push(`  ${p.padEnd(pad)} = ${value.toFixed(4)}  → at MIN bound (${range.min})`);
+    } else if (value >= range.max - tol) {
+      atLimit.push(`  ${p.padEnd(pad)} = ${value.toFixed(4)}  → at MAX bound (${range.max})`);
+    }
+  }
+  if (atLimit.length === 0) {
+    console.log('  none — every tuned param settled inside its range.');
+  } else {
+    console.log('  These hit a search-space bound; consider widening the range and re-tuning:');
+    for (const line of atLimit) console.log(line);
+  }
+}
+
 // ── CLI ──
 
 const isMain =
@@ -705,9 +1018,10 @@ if (isMain) {
       .catch((e) => console.error('  (could not query DB)', e.message));
   } else {
   const num = (v: string | undefined, d: number) => (v ? Number(v) : d);
-  const objective = (process.env.TUNE_OBJECTIVE as ObjectiveName) ?? 'totalPnl';
+  const objective = (process.env.TUNE_OBJECTIVE as ObjectiveName) ?? 'profitFactor';
+  const walkForward = (process.env.TUNE_WF ?? 'true').toLowerCase() !== 'false';
 
-  runTuning({
+  const common = {
     startDate,
     endDate,
     iterations: num(process.env.TUNE_ITERS, 300),
@@ -716,131 +1030,156 @@ if (isMain) {
     popSize: process.env.TUNE_POP ? Number(process.env.TUNE_POP) : undefined,
     sigma0: num(process.env.TUNE_SIGMA, 0.3),
     objective,
-    trainFraction: num(process.env.TUNE_TRAIN_FRAC, 0.7),
     minTrades: num(process.env.TUNE_MIN_TRADES, 10),
     seed: process.env.TUNE_SEED ? Number(process.env.TUNE_SEED) : undefined,
     equity: {
       initialCapital: num(process.env.INITIAL_CAPITAL, DEFAULT_EQUITY.initialCapital),
       equityFloor: num(process.env.EQUITY_FLOOR, DEFAULT_EQUITY.equityFloor),
     },
-  })
-    .then((res) => {
-      if (!res) {
-        console.error('No data — nothing to tune.');
-        process.exit(1);
-      }
+  };
 
-      console.log('\n=== TUNING COMPLETE ===');
-      console.log(`Configs evaluated: ${res.evaluated}`);
-      console.log(`Objective:         ${process.env.TUNE_OBJECTIVE ?? 'totalPnl'}`);
-
-      const fmt = (r: BacktestResult) =>
-        `trades=${r.trades.length} pnl=$${r.totalPnl.toFixed(0)} win=${(r.winRate * 100).toFixed(0)}% ` +
-        `pf=${r.profitFactor.toFixed(2)} sharpe=${r.sharpe.toFixed(2)} maxDD=$${r.maxDrawdown.toFixed(0)} ` +
-        `eq=$${r.finalEquity.toFixed(0)} ${r.failed ? 'FAILED' : 'OK'}`;
-
-      console.log(`\nIn-sample  (train): ${fmt(res.trainResult)}`);
-      console.log(`Out-sample (test):  ${fmt(res.testResult)}`);
-
-      // The winning values for just the knobs that were swept — the headline
-      // answer to "what params won". (The full config follows below.)
-      console.log('\n=== BEST CONFIG — TUNED PARAMS ===');
-      const paths = Object.keys(res.space).sort();
-      const pad = Math.max(...paths.map((p) => p.length));
-      for (const path of paths) {
-        const value = getPath(res.best, path);
-        const isWeight = (WEIGHT_KEYS as readonly string[]).includes(path);
-        const isToggle = res.space[path]!.integer && res.space[path]!.min === 0 && res.space[path]!.max === 1;
-        const shown = isToggle ? (value >= 0.5 ? '1 (on)' : '0 (off)') : value.toFixed(4);
-        console.log(
-          `  ${path.padEnd(pad)} = ${shown}${isWeight ? ' (normalized)' : ''}`,
-        );
-      }
-
-      console.log('\n=== BEST CONFIG (full) ===');
-      console.log(JSON.stringify(res.best, null, 2));
-
-      console.log('\n=== LEADERBOARD (train objective) ===');
-      res.leaderboard.forEach((c, i) => {
-        console.log(`  #${(i + 1).toString().padStart(2)}  score=${c.score.toFixed(3)}  ${fmt(c.train)}`);
-      });
-
-      // Full trade detail + summary for the winning config (TODO #11).
-      printTradeLog(res.trainResult.trades, 'WINNING CONFIG — TRAIN TRADES');
-      printSummary(res.trainResult, 'WINNING CONFIG — TRAIN SUMMARY');
-      printTradeLog(res.testResult.trades, 'WINNING CONFIG — TEST TRADES');
-      printSummary(res.testResult, 'WINNING CONFIG — TEST SUMMARY');
-
-      // Persist the winning config. bestModel is ranked on the OUT-OF-SAMPLE
-      // (test-slice) total P&L — the tune "test case" — regardless of which
-      // objective was optimized in-sample. This is the honest keep-or-discard
-      // signal: real dollars made on days the tuner never trained on.
-      const t = res.testResult;
-      const metric = t.totalPnl;
-      const { becameBest, store, path } = recordModelRun({
-        savedAt: new Date().toISOString(),
-        source: 'tune test-slice totalPnl (out-sample)',
-        metric,
-        meta: {
-          startDate,
-          endDate,
-          objective,
-          evaluated: res.evaluated,
-          trainPnl: res.trainResult.totalPnl,
-          trainTrades: res.trainResult.trades.length,
-          // Full out-of-sample test summary — the basis for bestModel ranking.
-          testPnl: t.totalPnl,
-          testTrades: t.trades.length,
-          testWinRate: t.winRate,
-          testProfitFactor: t.profitFactor,
-          testSharpe: t.sharpe,
-          testMaxDrawdown: t.maxDrawdown,
-          testFinalEquity: t.finalEquity,
-        },
-        config: res.best,
-      });
-
-      console.log('\n=== MODEL SAVED ===');
-      console.log(`  metric (test-slice totalPnl, out-sample): $${metric.toFixed(2)}`);
-      console.log(
-        becameBest
-          ? '  → saved as lastModel AND bestModel (new best)'
-          : `  → saved as lastModel  (best so far: ${(store.bestModel?.metric ?? 0).toFixed(3)})`,
-      );
-      console.log(`  store: ${path}`);
-
-      // Flag any tuned param whose winning value sits at (or within a hair of)
-      // its search-space bound — a sign the optimum may lie OUTSIDE the range,
-      // so the bound should be widened and the tune re-run before trusting it.
-      // Re-normalized weights are excluded (their reported value is post-
-      // normalization, not on the raw [min,max] scale) and 0/1 toggles skipped
-      // (a bound simply IS the value there).
-      console.log('\n=== PARAMS AT SEARCH-SPACE LIMIT ===');
-      const atLimit: string[] = [];
-      for (const p of paths) {
-        const range = res.space[p]!;
-        const isWeight = (WEIGHT_KEYS as readonly string[]).includes(p);
-        const isToggle = range.integer === true && range.min === 0 && range.max === 1;
-        if (isWeight || isToggle) continue;
-        const value = getPath(res.best, p);
-        const span = range.max - range.min;
-        const tol = range.integer ? 0 : span * 0.005; // within 0.5% of the range counts as "at" it
-        if (value <= range.min + tol) {
-          atLimit.push(`  ${p.padEnd(pad)} = ${value.toFixed(4)}  → at MIN bound (${range.min})`);
-        } else if (value >= range.max - tol) {
-          atLimit.push(`  ${p.padEnd(pad)} = ${value.toFixed(4)}  → at MAX bound (${range.max})`);
+  const run = walkForward
+    ? runWalkForward({
+        ...common,
+        folds: num(process.env.TUNE_WF_FOLDS, 4),
+        initialTrainFraction: num(process.env.TUNE_WF_INIT_FRAC, 0.4),
+      }).then((res) => {
+        if (!res) {
+          console.error('No data — nothing to tune.');
+          process.exit(1);
         }
-      }
-      if (atLimit.length === 0) {
-        console.log('  none — every tuned param settled inside its range.');
-      } else {
-        console.log('  These hit a search-space bound; consider widening the range and re-tuning:');
-        for (const line of atLimit) console.log(line);
-      }
-    })
-    .catch((e) => {
-      console.error('Tuning failed:', e);
-      process.exit(1);
-    });
+
+        console.log('\n=== WALK-FORWARD COMPLETE ===');
+        console.log(`Configs evaluated: ${res.evaluated}`);
+        console.log(`Objective (in-sample, per fold): ${objective}`);
+
+        console.log('\n=== FOLDS (out-of-sample) ===');
+        for (const f of res.folds) {
+          const tag = f.best ? '' : '  (no usable config)';
+          console.log(`  #${f.index}  train=${f.trainDays}d  test=${f.testDays}d [${f.testStart}→${f.testEnd}]  ${fmtResult(f.oos)}${tag}`);
+        }
+
+        console.log('\n=== POOLED OUT-OF-SAMPLE (the honest estimate) ===');
+        console.log(`  ${fmtResult(res.oos)}`);
+        console.log('\n=== DEPLOY CONFIG (re-tuned on ALL data) — IN-SAMPLE ===');
+        console.log(`  ${fmtResult(res.deployResult)}`);
+
+        printTunedParams(res.deploy, res.space);
+        console.log('\n=== DEPLOY CONFIG (full) ===');
+        console.log(JSON.stringify(res.deploy, null, 2));
+
+        printTradeLog(res.oos.trades, 'POOLED OUT-OF-SAMPLE TRADES');
+        printSummary(res.oos, 'POOLED OUT-OF-SAMPLE SUMMARY');
+
+        // Persist the DEPLOY config (re-tuned on all data). bestModel is ranked
+        // on the pooled WALK-FORWARD total P&L — real dollars the process made on
+        // days it never trained on, walking forward. That is the honest
+        // keep-or-discard signal; the shipped config is the all-data retrain the
+        // walk-forward vouches for.
+        const o = res.oos;
+        const metric = o.totalPnl;
+        const { becameBest, store, path } = recordModelRun({
+          savedAt: new Date().toISOString(),
+          source: 'walk-forward pooled totalPnl (out-sample)',
+          metric,
+          meta: {
+            startDate,
+            endDate,
+            objective,
+            mode: 'walk-forward',
+            folds: res.folds.length,
+            evaluated: res.evaluated,
+            deployTrainPnl: res.deployResult.totalPnl,
+            deployTrainTrades: res.deployResult.trades.length,
+            // Pooled out-of-sample summary — the basis for bestModel ranking.
+            oosPnl: o.totalPnl,
+            oosTrades: o.trades.length,
+            oosWinRate: o.winRate,
+            oosProfitFactor: o.profitFactor,
+            oosSharpe: o.sharpe,
+            oosMaxDrawdown: o.maxDrawdown,
+            oosFinalEquity: o.finalEquity,
+          },
+          config: res.deploy,
+        });
+
+        console.log('\n=== MODEL SAVED ===');
+        console.log(`  metric (walk-forward pooled totalPnl, out-sample): $${metric.toFixed(2)}`);
+        console.log(
+          becameBest
+            ? '  → saved as lastModel AND bestModel (new best)'
+            : `  → saved as lastModel  (best so far: ${(store.bestModel?.metric ?? 0).toFixed(3)})`,
+        );
+        console.log(`  store: ${path}`);
+
+        printParamsAtLimit(res.deploy, res.space);
+      })
+    : runTuning({ ...common, trainFraction: num(process.env.TUNE_TRAIN_FRAC, 0.7) }).then((res) => {
+        if (!res) {
+          console.error('No data — nothing to tune.');
+          process.exit(1);
+        }
+
+        console.log('\n=== TUNING COMPLETE (single split) ===');
+        console.log(`Configs evaluated: ${res.evaluated}`);
+        console.log(`Objective:         ${objective}`);
+        console.log(`\nIn-sample  (train): ${fmtResult(res.trainResult)}`);
+        console.log(`Out-sample (test):  ${fmtResult(res.testResult)}`);
+
+        printTunedParams(res.best, res.space);
+        console.log('\n=== BEST CONFIG (full) ===');
+        console.log(JSON.stringify(res.best, null, 2));
+
+        console.log('\n=== LEADERBOARD (train objective) ===');
+        res.leaderboard.forEach((c, i) => {
+          console.log(`  #${(i + 1).toString().padStart(2)}  score=${c.score.toFixed(3)}  ${fmtResult(c.train)}`);
+        });
+
+        printTradeLog(res.trainResult.trades, 'WINNING CONFIG — TRAIN TRADES');
+        printSummary(res.trainResult, 'WINNING CONFIG — TRAIN SUMMARY');
+        printTradeLog(res.testResult.trades, 'WINNING CONFIG — TEST TRADES');
+        printSummary(res.testResult, 'WINNING CONFIG — TEST SUMMARY');
+
+        const t = res.testResult;
+        const metric = t.totalPnl;
+        const { becameBest, store, path } = recordModelRun({
+          savedAt: new Date().toISOString(),
+          source: 'tune test-slice totalPnl (out-sample)',
+          metric,
+          meta: {
+            startDate,
+            endDate,
+            objective,
+            mode: 'single-split',
+            evaluated: res.evaluated,
+            trainPnl: res.trainResult.totalPnl,
+            trainTrades: res.trainResult.trades.length,
+            testPnl: t.totalPnl,
+            testTrades: t.trades.length,
+            testWinRate: t.winRate,
+            testProfitFactor: t.profitFactor,
+            testSharpe: t.sharpe,
+            testMaxDrawdown: t.maxDrawdown,
+            testFinalEquity: t.finalEquity,
+          },
+          config: res.best,
+        });
+
+        console.log('\n=== MODEL SAVED ===');
+        console.log(`  metric (test-slice totalPnl, out-sample): $${metric.toFixed(2)}`);
+        console.log(
+          becameBest
+            ? '  → saved as lastModel AND bestModel (new best)'
+            : `  → saved as lastModel  (best so far: ${(store.bestModel?.metric ?? 0).toFixed(3)})`,
+        );
+        console.log(`  store: ${path}`);
+
+        printParamsAtLimit(res.best, res.space);
+      });
+
+  run.catch((e) => {
+    console.error('Tuning failed:', e);
+    process.exit(1);
+  });
   }
 }
