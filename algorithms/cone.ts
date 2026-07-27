@@ -77,6 +77,7 @@ export class ConeTracker {
         state: 'inside',
         previousState: this.previousState,
         crossed: null,
+        atCandleClose: false,
       };
       this.previousState = 'inside';
       return info;
@@ -96,6 +97,7 @@ export class ConeTracker {
         state: 'inside',
         previousState: this.previousState,
         crossed: null,
+        atCandleClose: false,
       };
     }
 
@@ -113,6 +115,7 @@ export class ConeTracker {
         state: held.state,
         previousState: held.state,
         crossed: null,
+        atCandleClose: false,
       };
     }
 
@@ -153,6 +156,10 @@ export class ConeTracker {
       state,
       previousState: this.previousState,
       crossed,
+      // A true 5-min close (isCandleClose) is a real decision point; the seed
+      // fall-through on the first RTH slot (not a close) is not — entries wait
+      // for the first genuine close.
+      atCandleClose: isCandleClose,
     };
 
     this.previousState = state;

@@ -163,6 +163,14 @@ export interface ConeInfo {
   state: ConeState;
   previousState: ConeState | null;
   crossed: ConeCrossing;
+  /**
+   * True only on an ET clock-aligned 5-min candle CLOSE — the instants the cone
+   * actually re-evaluates its state/crossing. `false` on the held intra-candle
+   * ticks in between (and on pre-market / no-cone / seed slots). Cone-driven
+   * entries fire only when this is true, so entering (like the re-entry exit) is
+   * decided on the previous 5-min close. See ConeTracker.
+   */
+  atCandleClose: boolean;
 }
 
 // ── Signals ──

@@ -393,6 +393,15 @@ export class SignalGenerator {
       return this.checkBreakoutEntries(score, cone, snapshot);
     }
 
+    // 5-min candle gate: cone-driven entries are decided on the ET-aligned 5-min
+    // close (based on the previous 5-min tick), never on an intra-candle price
+    // tick. Between closes the cone holds its state, so hold here too — the
+    // matching cone re-entry exit likewise only fires on a confirmed close.
+    if (!cone.atCandleClose) {
+      return this.makeSignal('hold', score, cone, snapshot, 'low',
+        'no entry: awaiting 5-min candle close');
+    }
+
     // Entry threshold tests gate on the TIME-SMOOTHED composite (an EWMA over the
     // last few minutes, entrySignalHalfLifeMin) so a one-bar gamma spike can't open
     // a trade on its own; direction/gamma-alignment (gexZ, cone state) stays
@@ -709,6 +718,7 @@ const NEUTRAL_CONE: ConeInfo = {
   state: 'inside',
   previousState: null,
   crossed: null,
+  atCandleClose: false,
 };
 
 /** Δt clamp (minutes) for the entry-signal EWMA decay: floor a zero/negative gap
