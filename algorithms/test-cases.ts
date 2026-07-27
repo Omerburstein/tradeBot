@@ -314,160 +314,40 @@ export async function runTestCase(
 
 // ── Explanation (console) ──
 
-function printExplanation(result: TestCaseResult, config: AlgoConfig): void {
-  const { testCase, allSlots, slots, trades, allTrades, svgPath } = result;
+/**
+ * Concise per-case summary: the case header, the trades that touched the window
+ * (one line each) and their net P&L. The full per-slot factor timeline is no
+ * longer printed to the console -- the SVG graph and the tee'd log file carry
+ * the detail, so the console stays skimmable across many cases.
+ */
+function printExplanation(result: TestCaseResult): void {
+  const { testCase, allSlots, trades, svgPath } = result;
 
   console.log(`\n${'='.repeat(72)}`);
   console.log(`TEST CASE  ${testCase.id}`);
-  console.log(`${testCase.date}  ${testCase.startEt}–${testCase.endEt} ET`);
+  console.log(`${testCase.date}  ${testCase.startEt}-${testCase.endEt} ET`);
   console.log(testCase.description);
   console.log('='.repeat(72));
 
   if (allSlots.length === 0) {
-    console.log('\n  (no snapshots found for this day — is the day loaded in the DB?)');
+    console.log('\n  (no snapshots found for this day - is the day loaded in the DB?)');
     return;
   }
 
-  const r = config.risk;
-  console.log(
-    `\nGates: entry=±${config.entryThreshold}  strong=±${config.strongEntryThreshold}  ` +
-      `exitFade=${config.exitFadeThreshold}  reversal=${config.reversalThreshold}  ` +
-      `GEX-TP min=${r.minGexTakeProfitPoints}pts`,
-  );
-  console.log(
-    'Legend: z=composite z-score, gexZ/dGamZ/posZ/dPosZ=factor z-scores, cone=band state',
-  );
-  console.log(
-    `Timeline: FULL day from the open — factors computed exactly as the tuner does; ` +
-      `the ${testCase.startEt}–${testCase.endEt} ET window is bracketed by ▶/◀.`,
-  );
-  console.log(
-    'Each slot also prints its reason with the concrete factor values that drove ' +
-      'it (e.g. a below-cone hold shows spot vs the cone band at that minute).\n',
-  );
-
-  // Annotate entries/exits across the whole day (not just the window) so the
-  // full-day timeline is self-consistent; the window summary below stays scoped.
-  const entryTimes = new Map(allTrades.map((t) => [t.entryTime, t]));
-  const exitTimes = new Map(allTrades.map((t) => [t.exitTime, t]));
-
-  const startMin = parseHhmm(testCase.startEt);
-  const endMin = parseHhmm(testCase.endEt);
-  let wasInWindow = false;
-
-  for (const s of allSlots) {
-    const nowInWindow = s.etMinutes >= startMin && s.etMinutes <= endMin;
-    if (nowInWindow && !wasInWindow) {
-      console.log(`  ${'▶'.repeat(3)} window start ${testCase.startEt} ET ${'▶'.repeat(3)}`);
-    } else if (!nowInWindow && wasInWindow) {
-      console.log(`  ${'◀'.repeat(3)} window end ${testCase.endEt} ET ${'◀'.repeat(3)}`);
-    }
-    wasInWindow = nowInWindow;
-
-    const tick = s.isTick ? ' ·tick' : '';
-    const line =
-      `  ${nowInWindow ? '|' : ' '} ${s.etLabel}${tick}  spot=${s.spot.toFixed(1)}  ` +
-      `z=${fmtSigned(s.composite)}  gexZ=${fmtSigned(s.gexZ)} dGamZ=${fmtSigned(s.dGammaZ)} ` +
-      `posZ=${fmtSigned(s.positionsZ)} dPosZ=${fmtSigned(s.dPositionsZ)}  ` +
-      `cone=${padState(s.coneState)}${s.coneCrossed ? `/${s.coneCrossed}` : ''}  → ${s.action.toUpperCase()}`;
-    console.log(line);
-
-    // Reason + the concrete values it hinges on, on EVERY slot. `relevantFactors`
-    // tailors the numbers to the reason text (cone band + spot for a cone hold,
-    // gexZ for a gamma-direction veto, composite vs thresholds for a fade, etc.).
-    console.log(`       why: ${s.reason}`);
-    console.log(`            ${relevantFactors(s, config)}`);
-
-    const entry = entryTimes.get(s.capturedAt);
-    const exit = exitTimes.get(s.capturedAt);
-    if (entry) {
-      console.log(
-        `       >>> ENTER ${entry.direction.toUpperCase()} ${entry.contracts} @ spx ${entry.entryPrice.toFixed(2)} ` +
-          `stop=${entry.stopPrice.toFixed(2)} tgt=${entry.targetPrice.toFixed(2)} ` +
-          `(GEX TP ${Math.abs(entry.targetPrice - entry.entryPrice).toFixed(1)}pts)`,
-      );
-    }
-    if (exit) {
-      console.log(
-        `       <<< EXIT  ${exit.direction.toUpperCase()} @ spx ${exit.exitPrice.toFixed(2)} ` +
-          `pnl=${fmtUsd(exit.pnl)}  (${exit.reason})`,
-      );
-    }
-  }
-
-  if (wasInWindow) {
-    console.log(`  ${'◀'.repeat(3)} window end ${testCase.endEt} ET ${'◀'.repeat(3)}`);
+  for (const t of trades) {
+    console.log(
+      `  ${etLabel(t.entryTime)}-${etLabel(t.exitTime)}  ${t.direction.toUpperCase()} ${t.contracts} ` +
+        `@ spx ${t.entryPrice.toFixed(2)} -> ${t.exitPrice.toFixed(2)}  pnl=${fmtUsd(t.pnl)}  (${t.reason})`,
+    );
   }
 
   console.log(
-    `\nTrades in window: ${trades.length}` +
+    `Trades in window: ${trades.length}` +
       (trades.length > 0
         ? `  net pnl=${fmtUsd(trades.reduce((a, t) => a + t.pnl, 0))}`
         : ''),
   );
   if (svgPath) console.log(`Graph: ${svgPath}`);
-}
-
-/**
- * The concrete factor values behind a slot's `reason`, so the log shows the
- * numbers each decision actually hinged on rather than just the prose. The
- * reason text is matched by keyword and only the factors it references are
- * emitted (an "all relevant factors" view, not a fixed dump):
- *   - cone reasons        → spot vs the cone band [lower, upper] at that minute
- *   - gamma-direction     → gexZ (the sign that gates a breakout side)
- *   - threshold / fade /  → composite z against the entry/strong/exit bars
- *     reversal / entry
- *   - GEX-TP gate         → gamma-center distance vs the minimum
- * A slot whose reason references none of these still shows the composite z so
- * no line is left context-free.
- */
-function relevantFactors(s: SlotDiag, config: AlgoConfig): string {
-  const reason = s.reason.toLowerCase();
-  const bits: string[] = [];
-
-  if (reason.includes('cone')) {
-    const side =
-      s.coneState === 'above' ? 'above' : s.coneState === 'below' ? 'below' : 'inside';
-    bits.push(
-      `spot ${s.spot.toFixed(1)} ${side} cone [${s.coneLower.toFixed(1)}, ${s.coneUpper.toFixed(1)}]` +
-        (s.coneCrossed ? ` (crossed ${s.coneCrossed})` : ''),
-    );
-  }
-
-  // Gamma-direction gate: the breakout side is vetoed/confirmed by the sign of
-  // gexZ. Match the direction phrasing ("gamma up/down/not pointing", "gexZ="),
-  // NOT the GEX-TP gate's "gamma center" (that's a distance, handled below).
-  if (
-    reason.includes('gamma up') ||
-    reason.includes('gamma down') ||
-    reason.includes('gamma not pointing') ||
-    reason.includes('gexz')
-  ) {
-    bits.push(`gexZ=${fmtSigned(s.gexZ)}`);
-  }
-
-  if (
-    reason.includes('z-factor') ||
-    reason.includes('entry') ||
-    reason.includes('signal') ||
-    reason.includes('fade') ||
-    reason.includes('reversal')
-  ) {
-    const bars = [`entry ±${config.entryThreshold}`, `strong ±${config.strongEntryThreshold}`];
-    if (reason.includes('fade')) bars.push(`exitFade ${config.exitFadeThreshold}`);
-    if (reason.includes('reversal')) bars.push(`reversal ${config.reversalThreshold}`);
-    bits.push(`z=${fmtSigned(s.composite)} [${bars.join(', ')}]`);
-  }
-
-  if (reason.includes('gex tp') || reason.includes('gamma center')) {
-    bits.push(
-      `gexTP=${s.gexTpPoints.toFixed(1)}pts (min ${config.risk.minGexTakeProfitPoints})`,
-    );
-  }
-
-  if (bits.length === 0) bits.push(`z=${fmtSigned(s.composite)}`);
-
-  return bits.join('  ·  ');
 }
 
 function fmtSigned(n: number): string {
@@ -476,10 +356,6 @@ function fmtSigned(n: number): string {
 
 function fmtUsd(n: number): string {
   return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2);
-}
-
-function padState(s: string): string {
-  return s.padEnd(6);
 }
 
 // ── SVG graph (dependency-free dual-axis line chart) ──
@@ -818,7 +694,7 @@ if (isMain) {
     let tradeCount = 0;
     for (const testCase of cases) {
       const result = await runTestCase(testCase, config);
-      printExplanation(result, config);
+      printExplanation(result);
       for (const t of result.trades) {
         netPnl += t.pnl;
         tradeCount += 1;

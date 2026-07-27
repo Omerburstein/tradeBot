@@ -819,6 +819,35 @@ if (isMain) {
           : `  → saved as lastModel  (best so far: ${(store.bestModel?.metric ?? 0).toFixed(3)})`,
       );
       console.log(`  store: ${path}`);
+
+      // Flag any tuned param whose winning value sits at (or within a hair of)
+      // its search-space bound — a sign the optimum may lie OUTSIDE the range,
+      // so the bound should be widened and the tune re-run before trusting it.
+      // Re-normalized weights are excluded (their reported value is post-
+      // normalization, not on the raw [min,max] scale) and 0/1 toggles skipped
+      // (a bound simply IS the value there).
+      console.log('\n=== PARAMS AT SEARCH-SPACE LIMIT ===');
+      const atLimit: string[] = [];
+      for (const p of paths) {
+        const range = res.space[p]!;
+        const isWeight = (WEIGHT_KEYS as readonly string[]).includes(p);
+        const isToggle = range.integer === true && range.min === 0 && range.max === 1;
+        if (isWeight || isToggle) continue;
+        const value = getPath(res.best, p);
+        const span = range.max - range.min;
+        const tol = range.integer ? 0 : span * 0.005; // within 0.5% of the range counts as "at" it
+        if (value <= range.min + tol) {
+          atLimit.push(`  ${p.padEnd(pad)} = ${value.toFixed(4)}  → at MIN bound (${range.min})`);
+        } else if (value >= range.max - tol) {
+          atLimit.push(`  ${p.padEnd(pad)} = ${value.toFixed(4)}  → at MAX bound (${range.max})`);
+        }
+      }
+      if (atLimit.length === 0) {
+        console.log('  none — every tuned param settled inside its range.');
+      } else {
+        console.log('  These hit a search-space bound; consider widening the range and re-tuning:');
+        for (const line of atLimit) console.log(line);
+      }
     })
     .catch((e) => {
       console.error('Tuning failed:', e);
