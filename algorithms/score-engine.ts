@@ -48,13 +48,13 @@
  * standard deviation is involved. Each normalized value therefore keeps its raw
  * factor's sign.
  *
- * A RATE OF CHANGE IS SCALED BY ITS LEVEL, NOT BY ITSELF. The two LEVEL factors
- * set the scale for their own rate of change: dGamma is divided by the gamma
- * level's typical magnitude and dPositions by the positions level's. So gexZ and
- * positionsZ read "how large is this level versus the day's typical level", while
- * dGammaZ and dPositionsZ read "what FRACTION of a typical level moved this
- * step" — the two are on a shared, comparable footing. See normalizeToScale for
- * why a delta must not set its own scale.
+ * EVERY FACTOR SETS ITS OWN, MAGNITUDE-ONLY SCALE. Each of the four is divided by
+ * the mean ABSOLUTE magnitude of its OWN recent raw history — gexRaw by past
+ * gexRaw, dGammaRaw by past dGammaRaw, and so on — so the sign never enters the
+ * denominator (opposite-sign readings can't cancel the scale) and the reading is
+ * "how large is this versus this factor's own typical size today". A rate of
+ * change therefore auto-anchors to ~1.0 just like its level, so the four sit on a
+ * shared footing and the weights are directly comparable, with no per-factor gain.
  *
  * ALL NON-LINEARITY LIVES AT NORMALIZE (R5/R6). Per-strike accumulation is
  * linear in the data (abs + the geometric weights sign/dWeight, plus gammaBias
@@ -255,18 +255,21 @@ export function computeScore(
   // never from prior days' "historical" data. The slice below is a trailing
   // window WITHIN that day; since history starts empty each day it can never
   // reach back across a day boundary. Do not feed a cross-day history here.
-  // EACH RATE OF CHANGE IS MEASURED AGAINST ITS OWN LEVEL'S SCALE, NOT ITS OWN.
-  // dGamma is divided by the gamma level's typical magnitude and dPositions by
-  // the positions level's, so the two scale histories below are each used twice.
-  // See {@link normalizeToScale} for why a delta must not set its own scale.
+  // EVERY FACTOR IS NORMALIZED BY THE MAGNITUDE OF ITS OWN RECENT HISTORY.
+  // Uniformly: gexRaw against past gexRaw, dGammaRaw against past dGammaRaw,
+  // positionsRaw against past positionsRaw, dPositionsRaw against past
+  // dPositionsRaw. The scale is a mean-ABSOLUTE (see normalizeToScale) — pure
+  // magnitude, the sign never enters the denominator — while the reading keeps
+  // its own raw sign as the factor's direction. Self-scaling each rate of change
+  // auto-anchors a typical move to ~1.0, so a typical dGamma reads comparably to
+  // a typical gamma level with no separate gain (see normalizeToScale for the
+  // trade-off vs level-scaling).
   const lookback = history.slice(-config.zScoreLookback);
-  const gammaScale = lookback.map((h) => h.gexRaw);
-  const positionsScale = lookback.map((h) => h.positionsRaw);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
-  const gexZ = clamp(normalizeToScale(gexRaw, gammaScale, config.pGamma));
-  const dGammaZ = clamp(normalizeToScale(dGammaRaw, gammaScale, config.pDGamma));
-  const positionsZ = clamp(normalizeToScale(positionsRaw, positionsScale, config.pPositions));
-  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, positionsScale, config.pDPositions));
+  const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexRaw), config.pGamma));
+  const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaRaw), config.pDGamma));
+  const positionsZ = clamp(normalizeToScale(positionsRaw, lookback.map((h) => h.positionsRaw), config.pPositions));
+  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, lookback.map((h) => h.dPositionsRaw), config.pDPositions));
 
   // Composite weighted score
   const composite =
@@ -372,32 +375,28 @@ function signedDelta(curr: number, prev: number): number {
  *   ratio = value / scale                             // "how many times typical"
  *   out   = sign(ratio) · log2(1 + |ratio|^exponent)  // shaped + compressed
  *
- * `history` IS NOT ALWAYS THIS FACTOR'S OWN HISTORY. The two LEVEL factors pass
- * their own (gexRaw against past gexRaw, positionsRaw against past positionsRaw);
- * the two RATE-OF-CHANGE factors pass their LEVEL'S history instead — dGammaRaw
- * against past gexRaw, dPositionsRaw against past positionsRaw.
+ * MAGNITUDE-ONLY SCALE. `scale` is a mean of ABSOLUTE values, so the sign never
+ * enters the denominator and opposite-sign readings in `history` cannot cancel
+ * it out. The reading's direction comes solely from `sign(value)` on the output;
+ * it is applied AFTER scaling and is orthogonal to the scale.
  *
- * WHY A DELTA MUST NOT SET ITS OWN SCALE: a level holds one sign across a session
- * (measured on 2026-05-19: mean/meanAbs = −0.97 for gamma, −0.98 for positions),
- * so dividing it by its own mean magnitude yields ≈1 by construction and the
- * reading is stable. A delta series is zero-mean (mean/meanAbs = +0.01 for
- * dGamma), so its mean magnitude IS its noise amplitude — dividing by that
- * standardizes noise against noise, and the output flips sign freely and reaches
- * 8× on an utterly ordinary delta. Two further failures came with it: the scale
- * ramped ~45× through the first hour (the same raw delta read 9.4× smaller late
- * in the day than at the open, so the factor was most trigger-happy exactly at
- * the open), and history[0]'s delta is a STRUCTURAL zero — no previous snapshot
- * to difference — which dragged the opening scale down a further 50%. Dividing by
- * the level's scale fixes all three: the level is large, sign-stable, and never
- * structurally zero, so the denominator is steady from the day's first slots.
+ * EACH FACTOR SETS ITS OWN SCALE. Every caller passes this factor's own recent
+ * raw history — gexRaw against past gexRaw, dGammaRaw against past dGammaRaw, and
+ * so on. So `ratio` reads "how large is this relative to this factor's OWN
+ * typical size today", and a rate of change auto-anchors: a typical dGamma reads
+ * ~1.0, the same as a typical gamma level, with no per-factor gain needed.
  *
- * CONSEQUENCE — DELTA READINGS ARE LEGITIMATELY SMALL. A one-step delta is a few
- * percent of its level (1-min cadence: dGamma ≈ 13.5% of the gamma level,
- * dPositions ≈ 1.0% of the positions level), so these now read ≈0.1–0.2 rather
- * than swinging ±3.5. That is the correct magnitude — a step that genuinely moves
- * a full typical level is rare and SHOULD read 1.0. The weights `wDGamma` /
- * `wDPositions` carry the burden of sizing that contribution and must be
- * re-tuned (and their tuner bounds widened) for this scale.
+ * TRADE-OFF vs scaling a delta by its level. Self-scaling makes the reading
+ * RELATIVE TO THE DAY'S OWN ACTIVITY: on a quiet day a small move still reads
+ * ~1.0 because it is typical FOR THAT DAY. Scaling a delta by its level instead
+ * would keep quiet-day moves small (a fraction of the level), but then a typical
+ * delta reads well below 1.0 and needs a gain to matter. Self-scaling is chosen
+ * here so the four factors share one anchor (≈1.0 = today-typical) and the
+ * weights stay directly comparable; the decayed-baseline momentum (NOT a raw
+ * one-step difference — see {@link decayedDelta}) is smooth enough that its own
+ * magnitude is a stable scale rather than pure noise. history[0]'s delta is a
+ * structural zero (no baseline yet); with the <3-sample cold-start guard below
+ * and a short lookback it dilutes the opening scale only mildly.
  *
  * This is the SOLE non-linear transform in the score pipeline (R5). Per-strike
  * accumulation is linear (R6); the factor's shaping exponent — `pGamma`,

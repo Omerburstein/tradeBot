@@ -395,18 +395,22 @@ export interface AlgoConfig {
    */
   conePassBonus: number;
   /**
-   * Consecutive *qualifying Greek bars* required before an entry actually fires.
-   * On each fresh Greek snapshot where `checkEntries` would open a position, a
-   * streak in that direction is advanced; the trade is taken only once the streak
-   * reaches this many bars. A bar that no longer qualifies (or flips direction)
-   * resets the streak. `1` = enter on the first qualifying bar (the pre-existing
-   * behaviour); `>1` waits for the signal to persist that many minutes, filtering
-   * one-bar gamma spikes that decay immediately — the "enters too quickly" fix.
-   * Reused-score price ticks between Greek frames never advance or reset it (they
-   * carry no new Greek information), and an executed entry resets it so a fresh
-   * confirmation is required after each trade. Values <1 are treated as 1.
+   * Wall-clock half-life (MINUTES) of the entry-signal smoother. Entry threshold
+   * tests gate on an EWMA of the composite instead of its instantaneous value:
+   * `s ← ρ·s + (1−ρ)·composite`, `ρ = 0.5^(Δt / entrySignalHalfLifeMin)`, advanced
+   * once per fresh Greek bar. The current bar always carries the largest single
+   * weight and older bars decay geometrically, so a one-bar gamma spike is damped
+   * (it can't clear the bar on its own) while a signal that persists a few minutes
+   * passes — the "enters too quickly" fix. Unlike a fixed bar count it is
+   * cadence-invariant: the half-life is real minutes, so it means the same memory
+   * on the 1-min live feed and on a 10-min backfill. Direction/gamma-alignment
+   * (`gexZ`, cone state) and all EXIT checks stay instantaneous, and the raw
+   * composite is still what is frozen into the trade record. A short value keeps
+   * the current minute dominant (H≈3 → current bar ~21% weight, a bar ~10 min old
+   * ~1%); `0` disables smoothing and enters on the first qualifying bar (the
+   * pre-existing behaviour). See `updateEntrySignal` in signal-generator.ts.
    */
-  entryConfirmBars: number;
+  entrySignalHalfLifeMin: number;
   /**
    * Absolute FLOOR of the signal-fade exit bar (z-score units). An open position
    * is closed when its directional composite fades below the effective fade bar,
@@ -475,7 +479,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   entryThreshold: 1.5,
   strongEntryThreshold: 2.0,
   conePassBonus: 0.25,
-  entryConfirmBars: 2, // require the signal to persist 2 Greek bars before entering
+  entrySignalHalfLifeMin: 3, // smooth the entry signal over ~a few min so a 1-bar spike can't enter
   exitFadeThreshold: 0.5, // fade-exit floor
   exitFadeFraction: 0.35, // …but scale the fade bar to 35% of entry conviction so strong trades run
   reversalThreshold: 1.0,

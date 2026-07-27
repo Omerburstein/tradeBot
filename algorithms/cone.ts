@@ -11,6 +11,14 @@
  * - Price crossing ABOVE the cone + bullish gamma signal → long (continuation)
  * - Price crossing BELOW the cone + bearish gamma signal → short (continuation)
  * - Price returning INSIDE the cone → exit (breakout failed)
+ *
+ * 5-MIN CANDLE SAMPLING: cone state transitions and crossings are evaluated only
+ * on ET clock-aligned 5-minute candle CLOSES (09:35, 09:40, … ET) using that
+ * candle's close price. Between closes the tracker HOLDS its last confirmed
+ * state (so intra-candle wiggles never flip the cone or fire a fresh crossing) —
+ * i.e. every cone decision is "based on the previous 5-min tick". The very first
+ * RTH snapshot of the day seeds the baseline state even if it is not a candle
+ * close, so the first real close has something to transition from.
  */
 
 import { etMinutesSinceMidnight } from './et-time.js';
@@ -22,6 +30,14 @@ const RTH_OPEN_MINUTES = 9 * 60 + 30;
 const RTH_CLOSE_MINUTES = 16 * 60;
 /** RTH session length in minutes (09:30–16:00 ET). */
 const RTH_MINUTES = 390;
+/**
+ * Candle size (minutes) the cone is sampled on: state/crossings advance only at
+ * ET wall-clock instants divisible by this. 09:30 (the apex) is itself a
+ * boundary, so the closes land at 09:35, 09:40, … A 10-min historical backfill
+ * (:00/:10/…) is coarser than this, so every backfill Greek slot is a close;
+ * per-minute price ticks in between are held.
+ */
+const CANDLE_MINUTES = 5;
 
 /**
  * Tracks cone state across successive snapshots within a trading day.
@@ -30,7 +46,15 @@ const RTH_MINUTES = 390;
  */
 export class ConeTracker {
   private readonly endpoints: ConeEndpoints | null;
+  /** State at the last CONFIRMED 5-min candle close (see CANDLE_MINUTES). */
   private previousState: ConeState | null = null;
+  /**
+   * The ConeInfo emitted at the last confirmed candle close, replayed verbatim
+   * on the intra-candle price ticks that follow it (with `crossed` suppressed
+   * and `previousState` pinned to the held state, so no transition or fresh
+   * crossing is ever reported off a held tick). `null` until the first close.
+   */
+  private lastConfirmed: ConeInfo | null = null;
 
   constructor(endpoints: ConeEndpoints | null) {
     this.endpoints = endpoints;
@@ -64,12 +88,30 @@ export class ConeTracker {
     // "above" the zero-width apex would swallow the first genuine RTH breakout
     // crossing. Report a neutral unbounded 'inside' and leave previousState
     // untouched so the first RTH slot sets the crossing baseline.
-    if (etMinutesSinceMidnight(capturedAtUtc) < RTH_OPEN_MINUTES) {
+    const etMinute = etMinutesSinceMidnight(capturedAtUtc);
+    if (etMinute < RTH_OPEN_MINUTES) {
       return {
         upper: Number.POSITIVE_INFINITY,
         lower: Number.NEGATIVE_INFINITY,
         state: 'inside',
         previousState: this.previousState,
+        crossed: null,
+      };
+    }
+
+    // 5-min candle gate: outside an ET clock-aligned close, replay the last
+    // confirmed candle so intra-candle ticks can't flip the state or fire a
+    // fresh crossing. `previousState` is pinned to the held state so consumers
+    // see no transition. The first RTH snapshot (no confirmed close yet) falls
+    // through to seed the baseline even if it is not a close.
+    const isCandleClose = etMinute % CANDLE_MINUTES === 0;
+    if (!isCandleClose && this.lastConfirmed !== null) {
+      const held = this.lastConfirmed;
+      return {
+        upper: held.upper,
+        lower: held.lower,
+        state: held.state,
+        previousState: held.state,
         crossed: null,
       };
     }
@@ -114,12 +156,14 @@ export class ConeTracker {
     };
 
     this.previousState = state;
+    this.lastConfirmed = info;
     return info;
   }
 
   /** Reset for a new trading day. */
   reset(): void {
     this.previousState = null;
+    this.lastConfirmed = null;
   }
 
   /**

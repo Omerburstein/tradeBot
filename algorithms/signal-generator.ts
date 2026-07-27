@@ -19,9 +19,12 @@
  *   - Signal fade: composite drops below ±0.5
  *   - Reversal: composite flips past ±1.0 in opposing direction
  *   - Stop-loss: hard or trailing stop hit
+ *   - Cone re-entry: a breakout that CLOSES back inside its cone line (evaluated
+ *     on the 5-min candle close) — long exits back below the upper line, short
+ *     back above the lower line. Structural (independent of gexAutoExit).
  *   - Time gate: forced exit before 0DTE decay chaos (15:50 ET)
- *   (The cone no longer drives exits in default mode — see TODO #9. Cone re-entry
- *    exits live only in cone-breakout mode, TODO #8.)
+ *   (The cone samples state on 5-min closes for BOTH entries and this exit — see
+ *    ConeTracker. Cone-breakout mode, TODO #8, keeps its own exit set.)
  */
 
 import type pino from 'pino';
@@ -97,15 +100,19 @@ export class SignalGenerator {
   /**
    * True when the current snapshot carried fresh Greeks (score was recomputed),
    * false on a reused-score price tick. Set each `processSnapshot` before the
-   * signal is generated; the entry-confirmation streak only advances/resets on
-   * fresh Greek bars (a price tick brings no new Greek information). See
-   * {@link AlgoConfig.entryConfirmBars} and `confirmEntry`.
+   * signal is generated; the entry-signal EWMA advances only on fresh Greek bars
+   * (a price tick brings no new Greek information).
    */
   private freshGreeks = false;
-  /** Direction of the in-progress entry-confirmation streak, or null when none. */
-  private entryStreakDir: 'long' | 'short' | null = null;
-  /** Consecutive fresh Greek bars the current entry candidate has qualified for. */
-  private entryStreakCount = 0;
+  /**
+   * Day-scoped EWMA of the composite, used ONLY to gate entry threshold tests
+   * (see {@link AlgoConfig.entrySignalHalfLifeMin}). Seeded to the first fresh
+   * composite and advanced only on fresh Greek bars, in wall-clock time. Equals
+   * the raw composite when smoothing is off. `entrySignalLastMs` is the instant
+   * of the last advance, for the wall-clock decay. See `updateEntrySignal`.
+   */
+  private entrySignalComposite = 0;
+  private entrySignalLastMs: number | null = null;
   private trades: TradeRecord[] = [];
   private logger?: pino.Logger;
   /**
@@ -185,6 +192,12 @@ export class SignalGenerator {
       this.scoreHistory.push(score);
       this.previousGreekSnapshot = snapshot;
       this.lastScore = score;
+      // Advance the entry-signal EWMA on fresh Greek bars only — a reused-score
+      // price tick carries no new signal, so the gate holds its last value.
+      this.entrySignalComposite = this.updateEntrySignal(
+        score.composite,
+        new Date(snapshot.capturedAt).getTime(),
+      );
     } else {
       // freshGreeks is false only when greeksStale AND lastScore !== null, so the
       // reused score is guaranteed present (the field-based condition hides this
@@ -271,46 +284,34 @@ export class SignalGenerator {
         `GEX TP ${tp.toFixed(1)} pts < ${config.risk.minGexTakeProfitPoints} pt minimum — gamma center too close`);
     }
 
-    return this.confirmEntry(this.checkEntries(score, cone, snapshot), snapshot);
+    return this.checkEntries(score, cone, snapshot);
   }
 
   /**
-   * Gate a candidate entry through the consecutive-bar confirmation
-   * ({@link AlgoConfig.entryConfirmBars}). The streak advances only on fresh Greek
-   * bars: a qualifying entry candidate increments it in that direction, anything
-   * else (a hold, or a flip to the other side) resets it. A reused-score price
-   * tick leaves the streak untouched. Until the streak reaches the required count
-   * the candidate is downgraded to a `hold`, so a one-bar gamma spike that decays
-   * next minute never opens a trade; a signal that genuinely persists does. With
-   * `entryConfirmBars ≤ 1` this is a pass-through (enter on the first qualifying
-   * bar). An executed entry resets the streak (see executeSignal).
+   * Advance the entry-signal EWMA to the current fresh Greek bar and return the
+   * smoothed composite the entry gate reads ({@link AlgoConfig.entrySignalHalfLifeMin}).
+   *
+   * `s ← ρ·s + (1−ρ)·composite` with `ρ = 0.5^(Δt / halfLife)` derived from the
+   * REAL minutes since the last fresh bar, so the half-life is the same wall-clock
+   * memory at any feed cadence. The current composite always enters at full weight
+   * (1−ρ) — the largest single weight — and older bars decay geometrically, which
+   * damps a one-bar spike while letting a persisting signal through. With smoothing
+   * off (`halfLife ≤ 0`) or on the first bar of the day there is no history to
+   * blend, so the gate is the raw composite.
    */
-  private confirmEntry(candidate: Signal, snapshot: Snapshot): Signal {
-    const isEntry = candidate.action === 'enter_long' || candidate.action === 'enter_short';
-    const dir = candidate.direction ?? null;
-
-    // Only fresh Greek bars carry new information for the streak.
-    if (this.freshGreeks) {
-      if (isEntry && dir !== null) {
-        this.entryStreakCount = this.entryStreakDir === dir ? this.entryStreakCount + 1 : 1;
-        this.entryStreakDir = dir;
-      } else {
-        this.entryStreakCount = 0;
-        this.entryStreakDir = null;
-      }
+  private updateEntrySignal(composite: number, currentMs: number): number {
+    const halfLife = this.config.entrySignalHalfLifeMin;
+    if (!Number.isFinite(halfLife) || halfLife <= 0 || this.entrySignalLastMs === null) {
+      this.entrySignalLastMs = currentMs;
+      return composite;
     }
-
-    if (!isEntry) return candidate;
-
-    const need = entryConfirmBarsNeeded(this.config);
-    // Confirmed once the streak (built on fresh Greek bars) reaches the bar count.
-    if (this.entryStreakDir === dir && this.entryStreakCount >= need) {
-      return candidate;
-    }
-    // Show progress on a fresh bar; on a price tick the streak simply hasn't been
-    // reached yet, so report the standing count.
-    return this.makeSignal('hold', candidate.score, candidate.cone, snapshot, 'low',
-      `entry pending confirmation: ${this.entryStreakCount}/${need} consecutive ${dir} bars`);
+    const dtMin = Math.min(
+      MAX_ENTRY_SIGNAL_DT_MIN,
+      Math.max(MIN_ENTRY_SIGNAL_DT_MIN, (currentMs - this.entrySignalLastMs) / 60_000),
+    );
+    const rho = Math.pow(0.5, dtMin / halfLife); // weight retained by history
+    this.entrySignalLastMs = currentMs;
+    return rho * this.entrySignalComposite + (1 - rho) * composite;
   }
 
   private checkExits(
@@ -340,9 +341,21 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
     }
 
-    // (The cone no longer forces an exit in default mode — TODO #9 reduced the
-    // cone to an entry-threshold selector. Cone re-entry exits are cone-breakout
-    // mode only, handled in checkBreakoutExits.)
+    // Cone re-entry exit, evaluated on the 5-min candle close (the ConeTracker
+    // only transitions on ET-aligned closes, so this fires off the confirmed
+    // close, not an intra-candle wick). A breakout that closes back inside its
+    // line has failed: a LONG exits when a 5-min close comes back below the
+    // upper line it broke above; a SHORT exits when a close comes back above the
+    // lower line it broke below. Positions taken INSIDE the cone (previousState
+    // never 'above'/'below') are never force-exited by this. Structural — fires
+    // regardless of gexAutoExit.
+    const coneReEntry = isLong
+      ? cone.previousState === 'above' && cone.state !== 'above'
+      : cone.previousState === 'below' && cone.state !== 'below';
+    if (coneReEntry) {
+      return this.makeSignal('exit', score, cone, snapshot, 'medium',
+        `cone re-entry (5-min close): back inside the ${isLong ? 'upper' : 'lower'} line`);
+    }
 
     // GEX-driven auto-exits (signal fade + reversal). Gated by config.gexAutoExit:
     // when disabled, the position is held through score fades/flips and only a
@@ -374,12 +387,19 @@ export class SignalGenerator {
     snapshot: Snapshot,
   ): Signal {
     const { config } = this;
-    const z = score.composite.toFixed(2);
 
     // Cone-breakout mode (TODO #8) uses its own, stricter entry rule.
     if (config.coneBreakout.enabled) {
       return this.checkBreakoutEntries(score, cone, snapshot);
     }
+
+    // Entry threshold tests gate on the TIME-SMOOTHED composite (an EWMA over the
+    // last few minutes, entrySignalHalfLifeMin) so a one-bar gamma spike can't open
+    // a trade on its own; direction/gamma-alignment (gexZ, cone state) stays
+    // instantaneous. `gate` equals the raw composite when smoothing is off. The raw
+    // score is still what's frozen into the trade record (signal.score).
+    const gate = this.entrySignalComposite;
+    const z = gate.toFixed(2);
 
     // ── CONE-THRESHOLD RULE (TODO #9) ──
     // The cone state selects the entry bar: the normal `entryThreshold` OUTSIDE
@@ -393,7 +413,7 @@ export class SignalGenerator {
       if (score.gexZ > 0) {
         const bonus = cone.crossed === 'up' ? config.conePassBonus : 0;
         const threshold = config.entryThreshold - bonus;
-        if (score.composite > threshold) {
+        if (gate > threshold) {
           const confidence = this.assessConfidence(score, true);
           return this.makeSignal('enter_long', score, cone, snapshot, confidence,
             `long entry: above cone + gamma up (z-factor=${z}, thr=${threshold.toFixed(2)}${bonus ? ', fresh-pass bonus' : ''})`);
@@ -410,7 +430,7 @@ export class SignalGenerator {
       if (score.gexZ < 0) {
         const bonus = cone.crossed === 'down' ? config.conePassBonus : 0;
         const threshold = config.entryThreshold - bonus;
-        if (score.composite < -threshold) {
+        if (gate < -threshold) {
           const confidence = this.assessConfidence(score, true);
           return this.makeSignal('enter_short', score, cone, snapshot, confidence,
             `short entry: below cone + gamma down (z-factor=${z}, thr=${threshold.toFixed(2)}${bonus ? ', fresh-pass bonus' : ''})`);
@@ -423,12 +443,12 @@ export class SignalGenerator {
     }
 
     // ── INSIDE THE CONE → higher bar (strongEntryThreshold), either direction ──
-    if (score.composite > config.strongEntryThreshold) {
+    if (gate > config.strongEntryThreshold) {
       const confidence = this.assessConfidence(score, false);
       return this.makeSignal('enter_long', score, cone, snapshot, confidence,
         `long entry: strong inside-cone signal (z-factor=${z})`);
     }
-    if (score.composite < -config.strongEntryThreshold) {
+    if (gate < -config.strongEntryThreshold) {
       const confidence = this.assessConfidence(score, false);
       return this.makeSignal('enter_short', score, cone, snapshot, confidence,
         `short entry: strong inside-cone signal (z-factor=${z})`);
@@ -546,12 +566,6 @@ export class SignalGenerator {
     if (signal.action === 'enter_long' || signal.action === 'enter_short') {
       const direction = signal.action === 'enter_long' ? 'long' as const : 'short' as const;
       const contracts = computePositionSize(config, signal.score.composite);
-
-      // A position is opening — clear the confirmation streak so the NEXT entry
-      // (after this trade closes) must earn its own fresh consecutive-bar
-      // confirmation rather than re-firing on the leftover count.
-      this.entryStreakDir = null;
-      this.entryStreakCount = 0;
 
       // Freeze the GEX take-profit (gamma-center distance) on the entry
       // snapshot so the exit target doesn't drift as gamma/spot move intraday.
@@ -697,16 +711,12 @@ const NEUTRAL_CONE: ConeInfo = {
   crossed: null,
 };
 
-/**
- * Consecutive qualifying Greek bars required before an entry fires, coerced to a
- * whole number ≥ 1. A config predating `entryConfirmBars` (undefined at runtime)
- * or any value below 1 collapses to 1 — enter on the first qualifying bar, the
- * original behaviour. See {@link AlgoConfig.entryConfirmBars}.
- */
-function entryConfirmBarsNeeded(config: AlgoConfig): number {
-  const raw = config.entryConfirmBars;
-  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1;
-}
+/** Δt clamp (minutes) for the entry-signal EWMA decay: floor a zero/negative gap
+ *  so ρ stays finite; cap a large gap so a long hole in the feed makes ρ→0 (the
+ *  smoother reseeds to the current level) rather than underflowing. Mirrors the
+ *  momentum baseline clamps in score-engine.ts. */
+const MIN_ENTRY_SIGNAL_DT_MIN = 0.05;
+const MAX_ENTRY_SIGNAL_DT_MIN = 120;
 
 /** Round to 2 decimals for tidy log fields. */
 function round2(n: number): number {
