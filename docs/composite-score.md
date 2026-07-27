@@ -177,21 +177,28 @@ measured against a **typical magnitude drawn from recent history**, then
 log-compressed:
 
 ```
-scale = meanAbs(recent LEVEL raws)              // the typical size of the level
+scale = meanAbs(recent raws of THIS factor)     // its own typical size, magnitude only
 ratio = raw / scale                             // "how many times typical"
 z     = sign(ratio) · log2(1 + |ratio|^p)       // shaped by the factor's exponent p,
                                                 //   compressed, then clamped
 ```
 
-**Each rate of change is scaled by its LEVEL, not by itself.** There are only
-two scales, one per level, and each is used twice:
+**Every factor sets its own, magnitude-only scale.** Each of the four is divided
+by the mean **absolute** magnitude of its OWN recent raw history — so the sign
+never enters the denominator (opposite-sign readings cannot cancel the scale),
+and the reading is *"how large is this versus this factor's own typical size
+today"*:
 
 | Factor | Scale it is divided by | Reads as |
 |--------|------------------------|----------|
-| `gexRaw` | `meanAbs(recent gexRaw)` | times the typical gamma level |
-| `dGammaRaw` | `meanAbs(recent gexRaw)` | **fraction of a typical gamma level moved this step** |
-| `positionsRaw` | `meanAbs(recent positionsRaw)` | times the typical positions level |
-| `dPositionsRaw` | `meanAbs(recent positionsRaw)` | **fraction of a typical positions level moved this step** |
+| `gexRaw` | `meanAbs(recent gexRaw)` | times its own typical size |
+| `dGammaRaw` | `meanAbs(recent dGammaRaw)` | times its own typical size |
+| `positionsRaw` | `meanAbs(recent positionsRaw)` | times its own typical size |
+| `dPositionsRaw` | `meanAbs(recent dPositionsRaw)` | times its own typical size |
+
+Because every factor anchors at `ratio = 1 → 1.0`, a rate of change reads on the
+**same footing** as its level (all ≈1.0 typical), so the four `w…` weights are
+directly comparable and no per-factor gain is needed.
 
 `p` is the factor's own exponent (`pGamma` / `pDGamma` / `pPositions` /
 `pDPositions`) — the **only** place the factors are shaped non-linearly (the raw
@@ -201,8 +208,8 @@ for every `p`.
 
 > **This is NOT a statistical z-score.** Standard deviation plays no part. The
 > `gexZ` / `dGammaZ` / `positionsZ` / `dPositionsZ` names are retained for
-> continuity, but they mean *"how many times the day's typical magnitude, and in
-> which direction"* — not *"how many sigma from the day's mean"*.
+> continuity, but they mean *"how many times the factor's own typical magnitude,
+> and in which direction"* — not *"how many sigma from the day's mean"*.
 
 **Why not `(raw − mean) / std`?** Mean-centering measures deviation from the
 day's average, which **discards the raw factor's own sign**. On 2026-05-19 gamma
@@ -210,38 +217,23 @@ sat persistently negative (gexRaw ≈ −1.1e5 all morning); at 13:00 a merely
 *less* negative reading of −4.9e4 scored **+2.14** — the composite turned bullish
 and cleared `entryThreshold` while gamma pressure was still bearish. Under
 scale normalization that same snapshot reads **−0.52**: still negative (gamma is
-bearish), at 0.44× the day's typical magnitude. Sign now tracks the market, and a
-10× spike reads as a 10× spike regardless of whether the day ran quiet or busy.
+bearish). Sign now tracks the market.
 
-**Why not let a delta set its own scale?** Because dividing a factor by its own
-mean magnitude only behaves when that factor holds one sign. Measured on
-2026-05-19 (391 snapshots):
-
-| Raw factor | `mean/meanAbs` | Sign flips | Character |
-|---|---|---|---|
-| `gexRaw` | −0.972 | 14 / 391 | persistent level |
-| `positionsRaw` | −0.983 | 10 / 391 | persistent level |
-| `dGammaRaw` | +0.012 | 118 / 391 | zero-mean |
-| `dPositionsRaw` | +0.062 | 109 / 391 | zero-mean |
-
-For a level, `mean/meanAbs ≈ −1` means the ratio is ≈1 by construction and the
-reading is stable. For a zero-mean delta, the mean magnitude **is** the noise
-amplitude, so self-normalizing standardizes noise against noise: `|ratio|`
-reached 9.2 for dGamma and 14.7 for dPositions, and the output flipped sign
-~30% of all slots. Two further failures came with it — the self-scale ramped
-**45×** through the first hour (09:33 dGamma scale 22.7 → 10:20 ≈1000, so the
-same raw delta read 9.4× smaller late in the day and the factor was most
-trigger-happy exactly at the open), and `history[0]`'s delta is a **structural
-zero** (no previous snapshot to difference), dragging the opening scale down a
-further 50%. At 09:34 a `dGammaRaw` of +566 — *below* the day's mean magnitude
-of 1100 — scored **+3.27**. The level's scale is large, sign-stable and never
-structurally zero, so it is steady from the day's first slots.
-
-**Delta readings are legitimately small now.** A one-step delta is a few percent
-of its level (1-min cadence: dGamma ≈ 13.5% of the gamma level, dPositions
-≈ 1.0%), so these read ≈0.1–0.2 instead of swinging ±3.5. That is the correct
-magnitude: a step that moves a *full* typical level is rare and should read 1.0.
-`wDGamma` / `wDPositions` now carry the sizing and must be re-tuned.
+**The trade-off of self-scaling a rate of change.** A delta series is roughly
+zero-mean, so its own mean magnitude is essentially its movement amplitude. That
+means the reading is *relative to the day's own activity*: on a quiet day a small
+move still reads ~1.0 because it is typical **for that day** — self-scaling does
+not know the move was small in absolute (level) terms. An earlier version
+therefore scaled each delta by its LEVEL instead, which kept quiet-day moves
+small; the cost was that a typical delta then read a fraction of 1.0 (≈0.3–0.5)
+and needed a separate gain to matter, leaving the composite lopsided. This
+version self-scales so all four factors share one anchor and the weights stay
+comparable. The reason it is safe now: the rate of change is the **decayed-
+baseline momentum** (§3.2), not a raw one-step difference, so it is smooth
+(≈35 sign flips/session, not ≈118) and its own magnitude is a stable scale rather
+than pure noise. `history[0]`'s delta is a structural zero (no baseline yet); the
+`<3`-sample cold-start guard plus a short lookback keep that from distorting the
+open.
 
 **Why log-compress?** A plain ratio needs a large `zClamp` to let a 10× spike
 read as 10, and such a spike then swamps the other three factors. Compression

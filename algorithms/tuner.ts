@@ -77,37 +77,26 @@ export interface ParamRange {
  */
 export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   // Factor weights (re-normalized to sum 1 after sampling — only RATIOS matter).
-  // The two RATE-OF-CHANGE weights get the SAME ceiling as their level. Each
-  // rate of change is normalized against its LEVEL's scale, so a typical delta
-  // reads a fraction of a level (~0.3–0.5 vs ~1.0), i.e. it contributes less per
-  // unit of weight. Capping the delta weights below the level weights therefore
-  // capped their INFLUENCE twice over; giving them an equal ceiling lets the
-  // tuner lift a rate of change to level parity when the data supports it. The
-  // floors stay near zero so it can still ignore a genuinely useless factor.
+  // Every factor self-normalizes to ~1.0 typical (each divided by its OWN recent
+  // magnitude), so a rate of change reads on the same footing as its level and
+  // the weights are directly comparable. All four therefore get a wide, roughly
+  // symmetric ceiling; the floors stay near zero so the tuner can still ignore a
+  // genuinely useless factor.
   wGex: { min: 0.20, max: 0.70 },
   wDGamma: { min: 0.05, max: 0.70 },
   wPositions: { min: 0.02, max: 0.35 },
   wDPositions: { min: 0.02, max: 0.55 },
 
-  // Normalize-step shaping exponents (applied to the whole factor's ratio).
-  // The dGamma/dPositions ratios sit BELOW 1 (a delta is a fraction of a level),
-  // and for r < 1 a SMALLER exponent lifts the reading toward the 1.0 anchor
-  // (r^p → 1 as p → 0), so both rate-of-change exponents share the low [0.3, …]
-  // floor the positions factors use — the trade-off is flatter discrimination
-  // between a big and a small move, which the tuner balances against PnL.
+  // Normalize-step shaping exponents (applied to the whole factor's ratio). The
+  // ratio anchors at ~1.0 for every factor; the exponent shapes the response
+  // around it — >1 emphasizes moves above typical, <1 saturates them. The
+  // rate-of-change exponents keep a wide range so the tuner can pick either.
   pGamma: { min: 0.8, max: 1.8 },
   positiveGammaBias: { min: 1.0, max: 1.3 }, // per-strike multiplier, not an exponent
   pDGamma: { min: 0.3, max: 1.8 },
   pPositions: { min: 0.3, max: 0.9 },
   pDPositions: { min: 0.3, max: 0.9 },
 
-  // Pre-normalize GAINS on the two rate-of-change factors — a plain multiplier on
-  // the raw delta, INSIDE the log, so it re-anchors a fractional delta toward the
-  // 1.0 read of its level (separable from the weight, which is outside the log).
-  // dGamma sits ~0.4x its level so ~2.5 anchors it; positions move far less
-  // minute-to-minute, so their delta needs a larger gain — hence the wider range.
-  dGammaGain: { min: 0.5, max: 10 },
-  dPositionsGain: { min: 0.5, max: 20 },
   pDistance: { min: 0.8, max: 2.5 },
   distanceWeightSpan: { min: 0.5, max: 4.0 },
 

@@ -98,6 +98,21 @@ export interface ScoreComponents {
   dPositionsRaw: number;
   dPositionsZ: number;
   composite: number;
+
+  /**
+   * GROSS magnitudes — the sum of each strike's ABSOLUTE contribution, with no
+   * above/below-spot cancellation (unlike the net `…Raw` fields, where a strike
+   * above spot offsets one below). These feed the normalization SCALE only: the
+   * numerator of each `…Z` is the NET `…Raw` (the directional signal), but its
+   * denominator is `meanAbs(history of the matching gross)`. So a balanced
+   * "pinning" day — lots of gamma movement, net ≈ 0 — reads ~0 (no direction)
+   * instead of a flippy self-normalized ±1, while a one-sided day still reads ~1.
+   * See `normalizeToScale` / the normalize block in score-engine.ts.
+   */
+  gexGross: number;
+  dGammaGross: number;
+  positionsGross: number;
+  dPositionsGross: number;
 }
 
 /**

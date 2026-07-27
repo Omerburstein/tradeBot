@@ -48,13 +48,14 @@
  * standard deviation is involved. Each normalized value therefore keeps its raw
  * factor's sign.
  *
- * EVERY FACTOR SETS ITS OWN, MAGNITUDE-ONLY SCALE. Each of the four is divided by
- * the mean ABSOLUTE magnitude of its OWN recent raw history — gexRaw by past
- * gexRaw, dGammaRaw by past dGammaRaw, and so on — so the sign never enters the
- * denominator (opposite-sign readings can't cancel the scale) and the reading is
- * "how large is this versus this factor's own typical size today". A rate of
- * change therefore auto-anchors to ~1.0 just like its level, so the four sit on a
- * shared footing and the weights are directly comparable, with no per-factor gain.
+ * NET SIGNAL, GROSS-MAGNITUDE SCALE. Each factor's numerator is its NET raw
+ * (above/below-spot strikes offset — the directional signal); its denominator is
+ * the mean of its own recent GROSS magnitude — the sum of |per-strike
+ * contribution|, where above and below never cancel. So the scale is sign-blind
+ * and never collapses on a balanced day, and the reading (net / gross) is the
+ * DIRECTIONAL COHERENCE of the activity: ~1 when one-sided, ~0 on a balanced
+ * pinning day. All four factors share this anchor, so the weights are directly
+ * comparable. See {@link ScoreComponents} gross fields and normalizeToScale.
  *
  * ALL NON-LINEARITY LIVES AT NORMALIZE (R5/R6). Per-strike accumulation is
  * linear in the data (abs + the geometric weights sign/dWeight, plus gammaBias
@@ -154,6 +155,16 @@ export function computeScore(
   let positionsRaw = 0;
   let dPositionsRaw = 0;
 
+  // GROSS magnitudes: the sum of each strike's ABSOLUTE contribution, WITHOUT the
+  // above/below-spot (`sign`) cancellation the net `…Raw` sums have. These are the
+  // normalization SCALE only — never the signal. Pairing net numerator with gross
+  // denominator means a balanced day (net ≈ 0, gross large) reads ~0 rather than a
+  // self-normalized flip, while a one-sided day (net ≈ gross) still reads ~1.
+  let gexGross = 0;
+  let dGammaGross = 0;
+  let positionsGross = 0;
+  let dPositionsGross = 0;
+
   // Build a lookup for previous snapshot's strikes for dGamma/dPositions computation
   const prevByStrike = new Map<number, StrikeData>();
   if (previous) {
@@ -196,6 +207,7 @@ export function computeScore(
     // normalize step, where `pGamma` is applied to the whole aggregated factor.
     const gammaBias = s.gamma >= 0 ? config.positiveGammaBias : 1.0;
     gexRaw += Math.abs(s.gamma) * gammaBias * sign * dWeight;
+    gexGross += Math.abs(s.gamma) * gammaBias * dWeight; // |contribution|, no side cancellation
 
     // Factor 2: Net MM positions exposure — GATED by gamma, not weighted by it.
     // A strike's positions count only when its gamma is strong relative to the
@@ -214,6 +226,7 @@ export function computeScore(
       // of its own sign; direction comes from `sign`. No positive bias here —
       // the bias is gamma-only.
       positionsRaw += Math.abs(s.positions) * sign * dWeight;
+      positionsGross += Math.abs(s.positions) * dWeight; // |contribution|, no side cancellation
     }
 
     // Factors 3 & 4: rate-of-change of gamma and positions vs a decayed baseline.
@@ -230,6 +243,7 @@ export function computeScore(
     const prev = prevByStrike.get(s.strike);
     const deltaGamma = decayedDelta(momentum?.gamma, s.strike, s.gamma, prev?.gamma, rho);
     dGammaRaw += deltaGamma * sign * dWeight;
+    dGammaGross += Math.abs(deltaGamma) * dWeight; // |contribution|, no side cancellation
 
     // The positions baseline is kept fresh for EVERY in-window strike (so a strike
     // crossing the gamma gate mid-day already has a warm baseline), but only a
@@ -237,6 +251,7 @@ export function computeScore(
     const deltaPositions = decayedDelta(momentum?.positions, s.strike, s.positions, prev?.positions, rho);
     if (positionsCounts) {
       dPositionsRaw += deltaPositions * sign * dWeight;
+      dPositionsGross += Math.abs(deltaPositions) * dWeight; // |contribution|, no side cancellation
     }
   }
 
@@ -255,21 +270,22 @@ export function computeScore(
   // never from prior days' "historical" data. The slice below is a trailing
   // window WITHIN that day; since history starts empty each day it can never
   // reach back across a day boundary. Do not feed a cross-day history here.
-  // EVERY FACTOR IS NORMALIZED BY THE MAGNITUDE OF ITS OWN RECENT HISTORY.
-  // Uniformly: gexRaw against past gexRaw, dGammaRaw against past dGammaRaw,
-  // positionsRaw against past positionsRaw, dPositionsRaw against past
-  // dPositionsRaw. The scale is a mean-ABSOLUTE (see normalizeToScale) — pure
-  // magnitude, the sign never enters the denominator — while the reading keeps
-  // its own raw sign as the factor's direction. Self-scaling each rate of change
-  // auto-anchors a typical move to ~1.0, so a typical dGamma reads comparably to
-  // a typical gamma level with no separate gain (see normalizeToScale for the
-  // trade-off vs level-scaling).
+  // NET NUMERATOR, GROSS-MAGNITUDE SCALE. Each factor's reading is the NET `…Raw`
+  // (the directional signal, where above/below-spot strikes offset) divided by
+  // the mean of its own recent GROSS magnitude — the sum of |per-strike
+  // contribution|, where nothing cancels. So the scale measures "typical total
+  // activity" and never collapses when a day is balanced; the ratio net/gross is
+  // then the DIRECTIONAL COHERENCE of that activity: ~1 when one-sided, ~0 on a
+  // balanced pinning day (correctly, no direction) rather than a flippy ±1 from
+  // self-scaling a near-zero net against a near-zero scale. `meanAbs` inside
+  // normalizeToScale keeps the denominator sign-blind either way. See
+  // {@link ScoreComponents} gross fields.
   const lookback = history.slice(-config.zScoreLookback);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
-  const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexRaw), config.pGamma));
-  const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaRaw), config.pDGamma));
-  const positionsZ = clamp(normalizeToScale(positionsRaw, lookback.map((h) => h.positionsRaw), config.pPositions));
-  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, lookback.map((h) => h.dPositionsRaw), config.pDPositions));
+  const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexGross), config.pGamma));
+  const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaGross), config.pDGamma));
+  const positionsZ = clamp(normalizeToScale(positionsRaw, lookback.map((h) => h.positionsGross), config.pPositions));
+  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, lookback.map((h) => h.dPositionsGross), config.pDPositions));
 
   // Composite weighted score
   const composite =
@@ -288,6 +304,10 @@ export function computeScore(
     dPositionsRaw,
     dPositionsZ,
     composite,
+    gexGross,
+    dGammaGross,
+    positionsGross,
+    dPositionsGross,
   };
 }
 
@@ -376,27 +396,22 @@ function signedDelta(curr: number, prev: number): number {
  *   out   = sign(ratio) · log2(1 + |ratio|^exponent)  // shaped + compressed
  *
  * MAGNITUDE-ONLY SCALE. `scale` is a mean of ABSOLUTE values, so the sign never
- * enters the denominator and opposite-sign readings in `history` cannot cancel
- * it out. The reading's direction comes solely from `sign(value)` on the output;
- * it is applied AFTER scaling and is orthogonal to the scale.
+ * enters the denominator and opposite-sign entries in `history` cannot cancel it
+ * out. The reading's direction comes solely from `sign(value)` on the output; it
+ * is applied AFTER scaling and is orthogonal to the scale.
  *
- * EACH FACTOR SETS ITS OWN SCALE. Every caller passes this factor's own recent
- * raw history — gexRaw against past gexRaw, dGammaRaw against past dGammaRaw, and
- * so on. So `ratio` reads "how large is this relative to this factor's OWN
- * typical size today", and a rate of change auto-anchors: a typical dGamma reads
- * ~1.0, the same as a typical gamma level, with no per-factor gain needed.
- *
- * TRADE-OFF vs scaling a delta by its level. Self-scaling makes the reading
- * RELATIVE TO THE DAY'S OWN ACTIVITY: on a quiet day a small move still reads
- * ~1.0 because it is typical FOR THAT DAY. Scaling a delta by its level instead
- * would keep quiet-day moves small (a fraction of the level), but then a typical
- * delta reads well below 1.0 and needs a gain to matter. Self-scaling is chosen
- * here so the four factors share one anchor (≈1.0 = today-typical) and the
- * weights stay directly comparable; the decayed-baseline momentum (NOT a raw
- * one-step difference — see {@link decayedDelta}) is smooth enough that its own
- * magnitude is a stable scale rather than pure noise. history[0]'s delta is a
- * structural zero (no baseline yet); with the <3-sample cold-start guard below
- * and a short lookback it dilutes the opening scale only mildly.
+ * NET VALUE, GROSS-MAGNITUDE HISTORY. `value` is a factor's NET raw (above/below-
+ * spot strikes offset — the directional signal), but callers pass its GROSS
+ * history for `history`: the per-snapshot sum of |per-strike contribution|, where
+ * nothing cancels (see the gross fields on {@link ScoreComponents}). So `scale`
+ * is "typical TOTAL activity" and never collapses on a balanced day, and `ratio =
+ * net / gross` reads the DIRECTIONAL COHERENCE of that activity — ~1 when the
+ * movement is one-sided, ~0 on a balanced "pinning" day where above and below
+ * offset. Scaling the net by its own net history instead would divide a near-zero
+ * balanced-day net by a near-zero scale and emit a meaningless flippy ±1; the
+ * gross scale reports "no clear direction" there instead. history[0]'s delta is a
+ * structural zero (no baseline yet); the <3-sample cold-start guard below plus a
+ * short lookback keep it from distorting the open.
  *
  * This is the SOLE non-linear transform in the score pipeline (R5). Per-strike
  * accumulation is linear (R6); the factor's shaping exponent — `pGamma`,

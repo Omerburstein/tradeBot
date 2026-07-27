@@ -302,7 +302,10 @@ check(
 // History supplies only the SCALE; it never re-centers the reading. These pin
 // the properties that distinguish normalizeToScale from (x − mean) / std.
 
-/** gexZ for `gamma` at a strike above spot, against a history of `hist` gexRaws. */
+// The normalization SCALE now reads the GROSS field, so history entries set
+// `gexGross` to the intended scale magnitude. For the single above-spot strike
+// these tests use, a snapshot's gross == |net|, so gexGross = |gexRaw|.
+/** gexZ for `gamma` at a strike above spot, against a history of `hist` scale mags. */
 function gexZAgainst(gamma: number, hist: number[]): number {
   const history = hist.map((gexRaw) => ({
     gexRaw,
@@ -314,6 +317,10 @@ function gexZAgainst(gamma: number, hist: number[]): number {
     dPositionsRaw: 0,
     dPositionsZ: 0,
     composite: 0,
+    gexGross: Math.abs(gexRaw),
+    dGammaGross: 0,
+    positionsGross: 0,
+    dPositionsGross: 0,
   }));
   return computeScore(snap([strike(6010, gamma)]), null, history, DEFAULT_CONFIG).gexZ;
 }
@@ -337,6 +344,10 @@ function gexZAgainst(gamma: number, hist: number[]): number {
       dPositionsRaw: 0,
       dPositionsZ: 0,
       composite: 0,
+      gexGross: Math.abs(gexRaw), // scale magnitude (gross), sign-blind
+      dGammaGross: 0,
+      positionsGross: 0,
+      dPositionsGross: 0,
     })),
     DEFAULT_CONFIG,
   ).gexZ;
@@ -416,6 +427,41 @@ check(
   gexZAgainst(100, [5000, 5000]) === 1,
   `got ${gexZAgainst(100, [5000, 5000])}`,
 );
+
+// ── 7. Gross-magnitude scale: no above/below cancellation in the denominator ──
+// The scale reads the GROSS magnitude (sum of |per-strike contribution|), the
+// numerator the NET. So a BALANCED snapshot — equal gamma above and below spot —
+// has net ≈ 0 but a large gross, and must read ~0 (no direction), NOT a flippy
+// ±1 from dividing a near-zero net by a near-zero self-scale. A one-sided
+// snapshot (net == gross) still reads directionally.
+{
+  const grossHist = Array(5).fill(0).map(() => ({
+    gexRaw: 0, gexZ: 0, dGammaRaw: 0, dGammaZ: 0,
+    positionsRaw: 0, positionsZ: 0, dPositionsRaw: 0, dPositionsZ: 0,
+    composite: 0,
+    gexGross: 1000, dGammaGross: 0, positionsGross: 0, dPositionsGross: 0,
+  }));
+  // +100 gamma equidistant above (6010) and below (5990) spot → net cancels.
+  const balanced = computeScore(snap([strike(6010, 100), strike(5990, 100)]), null, grossHist, DEFAULT_CONFIG);
+  check(
+    'gross-scale: balanced above/below → gexZ ≈ 0 (net cancels, no direction)',
+    Math.abs(balanced.gexZ) < 1e-9,
+    `got ${balanced.gexZ} (gexRaw=${balanced.gexRaw})`,
+  );
+  check(
+    'gross-scale: the SAME balanced snapshot still has a large gross (no cancellation in scale)',
+    balanced.gexGross > 0,
+    `got ${balanced.gexGross}`,
+  );
+  // One-sided → net == gross → a clear directional reading.
+  const oneSided = computeScore(snap([strike(6010, 100)]), null, grossHist, DEFAULT_CONFIG);
+  check('gross-scale: one-sided snapshot → gexZ > 0 (clear direction)', oneSided.gexZ > 0, `got ${oneSided.gexZ}`);
+  check(
+    'gross-scale: one-sided net === gross',
+    Math.abs(oneSided.gexRaw - oneSided.gexGross) < 1e-9,
+    `net=${oneSided.gexRaw} gross=${oneSided.gexGross}`,
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────
 logger.info('────────────────────────────────────────────');

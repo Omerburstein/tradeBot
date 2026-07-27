@@ -19,9 +19,11 @@
  *   - Signal fade: composite drops below ±0.5
  *   - Reversal: composite flips past ±1.0 in opposing direction
  *   - Stop-loss: hard or trailing stop hit
- *   - Cone re-entry: a breakout that CLOSES back inside its cone line (evaluated
- *     on the 5-min candle close) — long exits back below the upper line, short
- *     back above the lower line. Structural (independent of gexAutoExit).
+ *   - Cone breach: on a 5-min candle close, the cone state moved AGAINST the
+ *     position (short → state moved up, long → moved down). Covers a breakout
+ *     that closed back inside its line AND an inside position that broke out the
+ *     far line against it (e.g. a short closing above the upper line). Structural
+ *     (independent of gexAutoExit), applies to inside- and outside-cone entries.
  *   - Time gate: forced exit before 0DTE decay chaos (15:50 ET)
  *   (The cone samples state on 5-min closes for BOTH entries and this exit — see
  *    ConeTracker. Cone-breakout mode, TODO #8, keeps its own exit set.)
@@ -48,6 +50,7 @@ import { computeScore, createMomentumState, factorContributions } from './score-
 import type {
   AlgoConfig,
   ConeInfo,
+  ConeState,
   Confidence,
   FactorContributions,
   MomentumState,
@@ -341,20 +344,27 @@ export class SignalGenerator {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
     }
 
-    // Cone re-entry exit, evaluated on the 5-min candle close (the ConeTracker
+    // Cone breach exit, evaluated on the 5-min candle close (the ConeTracker
     // only transitions on ET-aligned closes, so this fires off the confirmed
-    // close, not an intra-candle wick). A breakout that closes back inside its
-    // line has failed: a LONG exits when a 5-min close comes back below the
-    // upper line it broke above; a SHORT exits when a close comes back above the
-    // lower line it broke below. Positions taken INSIDE the cone (previousState
-    // never 'above'/'below') are never force-exited by this. Structural — fires
-    // regardless of gexAutoExit.
-    const coneReEntry = isLong
-      ? cone.previousState === 'above' && cone.state !== 'above'
-      : cone.previousState === 'below' && cone.state !== 'below';
-    if (coneReEntry) {
-      return this.makeSignal('exit', score, cone, snapshot, 'medium',
-        `cone re-entry (5-min close): back inside the ${isLong ? 'upper' : 'lower'} line`);
+    // close, not an intra-candle wick). Rank the band low→high as
+    // below(-1) < inside(0) < above(+1); a SHORT exits when the confirmed close
+    // moves the state UP (against the short), a LONG when it moves DOWN. This
+    // covers BOTH a breakout that closed back inside its line (e.g. a below-cone
+    // short closing back above the lower line → below→inside) AND a position
+    // opened INSIDE the cone that then broke out the far line against it (e.g. a
+    // short closing above the upper line → inside→above). Only fires on a real
+    // close transition (state === previousState on the held intra-candle ticks).
+    // Structural — fires regardless of gexAutoExit.
+    if (cone.previousState !== null && cone.state !== cone.previousState) {
+      const movedUp = coneRank(cone.state) > coneRank(cone.previousState);
+      const adverse = isLong ? !movedUp : movedUp;
+      if (adverse) {
+        const line = cone.state === 'above' ? 'upper'
+          : cone.state === 'below' ? 'lower'
+          : cone.previousState === 'above' ? 'upper' : 'lower';
+        return this.makeSignal('exit', score, cone, snapshot, 'medium',
+          `cone breach (5-min close): closed ${isLong ? 'below' : 'above'} the ${line} line against the ${isLong ? 'long' : 'short'}`);
+      }
     }
 
     // GEX-driven auto-exits (signal fade + reversal). Gated by config.gexAutoExit:
@@ -710,6 +720,7 @@ const EMPTY_SCORE: ScoreComponents = {
   positionsRaw: 0, positionsZ: 0,
   dPositionsRaw: 0, dPositionsZ: 0,
   composite: 0,
+  gexGross: 0, dGammaGross: 0, positionsGross: 0, dPositionsGross: 0,
 };
 
 const NEUTRAL_CONE: ConeInfo = {
@@ -731,6 +742,12 @@ const MAX_ENTRY_SIGNAL_DT_MIN = 120;
 /** Round to 2 decimals for tidy log fields. */
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/** Order the cone band low→high so an adverse move can be read as a sign change:
+ *  below(-1) < inside(0) < above(+1). Used by the cone-breach exit. */
+function coneRank(state: ConeState): number {
+  return state === 'above' ? 1 : state === 'below' ? -1 : 0;
 }
 
 /** Round each factor contribution to 2 decimals for tidy log/trade-record fields. */
