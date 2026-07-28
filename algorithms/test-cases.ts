@@ -202,6 +202,13 @@ interface SlotDiag {
   reason: string;
   /** GEX take-profit distance (gamma-center dist) this slot would target. */
   gexTpPoints: number;
+  /**
+   * True when the generator skipped this slot for incomplete data (TODO #6).
+   * Such a slot carries no decision: its score is the all-zero placeholder and
+   * its cone is the neutral (NaN-bounded) one — so it must be reported and
+   * plotted as a GAP, never as a real reading of "everything is zero".
+   */
+  dataGap: boolean;
 }
 
 export interface TestCaseResult {
@@ -291,8 +298,13 @@ export async function runTestCase(
       confidence: signal.confidence,
       reason: signal.reason,
       gexTpPoints: gexTakeProfitPoints(config, snap),
+      dataGap: false, // marked below, from the generator's own gap ledger
     });
   }
+
+  // The generator is the single source of truth for which slots it skipped.
+  const gapTimes = new Set(generator.getDataGaps().map((g) => g.capturedAt));
+  for (const d of diags) d.dataGap = gapTimes.has(d.capturedAt);
 
   const windowSlots = diags.filter((d) => d.inWindow);
 
@@ -312,15 +324,19 @@ export async function runTestCase(
   return { testCase, allSlots: diags, slots: windowSlots, trades, allTrades, svgPath };
 }
 
-// ── Explanation (console) ──
+// ── Explanation (console + log) ──
 
 /**
- * Concise per-case summary: the case header, the trades that touched the window
- * (one line each) and their net P&L. The full per-slot factor timeline is no
- * longer printed to the console -- the SVG graph and the tee'd log file carry
- * the detail, so the console stays skimmable across many cases.
+ * Per-case report. The CONSOLE stays skimmable across all cases: the header,
+ * one line per in-window trade, the net P&L and the graph path. The full
+ * per-slot factor timeline goes to `logOnly` — the tee'd docs/test-cases/logs/
+ * file — so the detail is always on disk without flooding the terminal.
  */
-function printExplanation(result: TestCaseResult): void {
+function printExplanation(
+  result: TestCaseResult,
+  config: AlgoConfig,
+  logOnly?: (line: string) => void,
+): void {
   const { testCase, allSlots, trades, svgPath } = result;
 
   console.log(`\n${'='.repeat(72)}`);
@@ -333,6 +349,8 @@ function printExplanation(result: TestCaseResult): void {
     console.log('\n  (no snapshots found for this day - is the day loaded in the DB?)');
     return;
   }
+
+  if (logOnly) for (const line of explainedTimeline(result, config)) logOnly(line);
 
   for (const t of trades) {
     console.log(
@@ -348,6 +366,168 @@ function printExplanation(result: TestCaseResult): void {
         : ''),
   );
   if (svgPath) console.log(`Graph: ${svgPath}`);
+}
+
+/**
+ * The full explained day, one block per slot — the detail the log file carries.
+ *
+ * The FULL day is walked (not just the case window) because factors are
+ * computed exactly as the tuner computes them, from the open; the window is
+ * bracketed by ▶/◀ so the part the case is about stands out. Every slot prints
+ * its z components, its cone state, the action it produced, the reason, and the
+ * concrete factor values that reason hinged on. Slots the generator skipped for
+ * incomplete data are printed as `DATA GAP` rather than as zeros.
+ */
+function explainedTimeline(result: TestCaseResult, config: AlgoConfig): string[] {
+  const { testCase, allSlots, allTrades } = result;
+  const out: string[] = [];
+
+  const r = config.risk;
+  out.push(
+    `\nGates: entry=±${config.entryThreshold}  strong=±${config.strongEntryThreshold}  ` +
+      `exitFade=${config.exitFadeThreshold}  reversal=${config.reversalThreshold}  ` +
+      `GEX-TP min=${r.minGexTakeProfitPoints}pts`,
+  );
+  out.push('Legend: z=composite z-score, gexZ/dGamZ/posZ/dPosZ=factor z-scores, cone=band state');
+  out.push(
+    `Timeline: FULL day from the open — factors computed exactly as the tuner does; ` +
+      `the ${testCase.startEt}–${testCase.endEt} ET window is bracketed by ▶/◀.`,
+  );
+  out.push(
+    'Each slot also prints its reason with the concrete factor values that drove ' +
+      'it (e.g. a below-cone hold shows spot vs the cone band at that minute).\n',
+  );
+
+  // Annotate entries/exits across the whole day (not just the window) so the
+  // full-day timeline is self-consistent; the window summary stays scoped.
+  const entryTimes = new Map(allTrades.map((t) => [t.entryTime, t]));
+  const exitTimes = new Map(allTrades.map((t) => [t.exitTime, t]));
+
+  const startMin = parseHhmm(testCase.startEt);
+  const endMin = parseHhmm(testCase.endEt);
+  let wasInWindow = false;
+
+  for (const s of allSlots) {
+    const nowInWindow = s.etMinutes >= startMin && s.etMinutes <= endMin;
+    if (nowInWindow && !wasInWindow) {
+      out.push(`  ${'▶'.repeat(3)} window start ${testCase.startEt} ET ${'▶'.repeat(3)}`);
+    } else if (!nowInWindow && wasInWindow) {
+      out.push(`  ${'◀'.repeat(3)} window end ${testCase.endEt} ET ${'◀'.repeat(3)}`);
+    }
+    wasInWindow = nowInWindow;
+
+    const bar = nowInWindow ? '|' : ' ';
+    const tick = s.isTick ? ' ·tick' : '';
+
+    // A skipped slot has no score and no cone — print what it HAS (the price)
+    // and what is missing, never a row of zeros that reads as a real reading.
+    if (s.dataGap) {
+      out.push(`  ${bar} ${s.etLabel}${tick}  spot=${s.spot.toFixed(1)}  DATA GAP — no decision`);
+      out.push(`       why: ${s.reason}`);
+      continue;
+    }
+
+    out.push(
+      `  ${bar} ${s.etLabel}${tick}  spot=${s.spot.toFixed(1)}  ` +
+        `z=${fmtSigned(s.composite)}  gexZ=${fmtSigned(s.gexZ)} dGamZ=${fmtSigned(s.dGammaZ)} ` +
+        `posZ=${fmtSigned(s.positionsZ)} dPosZ=${fmtSigned(s.dPositionsZ)}  ` +
+        `cone=${padState(s.coneState)}${s.coneCrossed ? `/${s.coneCrossed}` : ''}  → ${s.action.toUpperCase()}`,
+    );
+    out.push(`       why: ${s.reason}`);
+    out.push(`            ${relevantFactors(s, config)}`);
+
+    const entry = entryTimes.get(s.capturedAt);
+    const exit = exitTimes.get(s.capturedAt);
+    if (entry) {
+      out.push(
+        `       >>> ENTER ${entry.direction.toUpperCase()} ${entry.contracts} @ spx ${entry.entryPrice.toFixed(2)} ` +
+          `stop=${entry.stopPrice.toFixed(2)} tgt=${entry.targetPrice.toFixed(2)} ` +
+          `(GEX TP ${Math.abs(entry.targetPrice - entry.entryPrice).toFixed(1)}pts)`,
+      );
+    }
+    if (exit) {
+      out.push(
+        `       <<< EXIT  ${exit.direction.toUpperCase()} @ spx ${exit.exitPrice.toFixed(2)} ` +
+          `pnl=${fmtUsd(exit.pnl)}  (${exit.reason})`,
+      );
+    }
+  }
+
+  if (wasInWindow) {
+    out.push(`  ${'◀'.repeat(3)} window end ${testCase.endEt} ET ${'◀'.repeat(3)}`);
+  }
+  out.push('');
+
+  return out;
+}
+
+/**
+ * The concrete factor values behind a slot's `reason`, so the log shows the
+ * numbers each decision actually hinged on rather than just the prose. The
+ * reason text is matched by keyword and only the factors it references are
+ * emitted (an "all relevant factors" view, not a fixed dump):
+ *   - cone reasons        → spot vs the cone band [lower, upper] at that minute
+ *   - gamma-direction     → gexZ (the sign that gates a breakout side)
+ *   - threshold / fade /  → composite z against the entry/strong/exit bars
+ *     reversal / entry
+ *   - GEX-TP gate         → gamma-center distance vs the minimum
+ * A slot whose reason references none of these still shows the composite z so
+ * no line is left context-free.
+ */
+function relevantFactors(s: SlotDiag, config: AlgoConfig): string {
+  const reason = s.reason.toLowerCase();
+  const bits: string[] = [];
+
+  if (reason.includes('cone')) {
+    const side =
+      s.coneState === 'above' ? 'above' : s.coneState === 'below' ? 'below' : 'inside';
+    // An unbounded band (no cone stored for the day) has infinite edges — say so
+    // rather than printing "Infinity" as if it were a price.
+    const band = Number.isFinite(s.coneUpper) && Number.isFinite(s.coneLower)
+      ? `[${s.coneLower.toFixed(1)}, ${s.coneUpper.toFixed(1)}]`
+      : '[no cone]';
+    bits.push(
+      `spot ${s.spot.toFixed(1)} ${side} cone ${band}` +
+        (s.coneCrossed ? ` (crossed ${s.coneCrossed})` : ''),
+    );
+  }
+
+  // Gamma-direction gate: the breakout side is vetoed/confirmed by the sign of
+  // gexZ. Match the direction phrasing ("gamma up/down/not pointing", "gexZ="),
+  // NOT the GEX-TP gate's "gamma center" (that's a distance, handled below).
+  if (
+    reason.includes('gamma up') ||
+    reason.includes('gamma down') ||
+    reason.includes('gamma not pointing') ||
+    reason.includes('gexz')
+  ) {
+    bits.push(`gexZ=${fmtSigned(s.gexZ)}`);
+  }
+
+  if (
+    reason.includes('z-factor') ||
+    reason.includes('entry') ||
+    reason.includes('signal') ||
+    reason.includes('fade') ||
+    reason.includes('reversal')
+  ) {
+    const bars = [`entry ±${config.entryThreshold}`, `strong ±${config.strongEntryThreshold}`];
+    if (reason.includes('fade')) bars.push(`exitFade ${config.exitFadeThreshold}`);
+    if (reason.includes('reversal')) bars.push(`reversal ${config.reversalThreshold}`);
+    bits.push(`z=${fmtSigned(s.composite)} [${bars.join(', ')}]`);
+  }
+
+  if (reason.includes('gex tp') || reason.includes('gamma center')) {
+    bits.push(`gexTP=${s.gexTpPoints.toFixed(1)}pts (min ${config.risk.minGexTakeProfitPoints})`);
+  }
+
+  if (bits.length === 0) bits.push(`z=${fmtSigned(s.composite)}`);
+
+  return bits.join('  ·  ');
+}
+
+function padState(s: string): string {
+  return s.padEnd(6);
 }
 
 function fmtSigned(n: number): string {
@@ -372,6 +552,7 @@ const COLORS = {
   spot: '#16a34a', // green
   cone: '#9ca3af', // gray
   guide: '#d1d5db', // light gray
+  gap: '#f3f4f6', // very light gray — skipped (incomplete-data) slots
   zero: '#6b7280',
   long: '#16a34a',
   short: '#dc2626',
@@ -437,6 +618,25 @@ function writeSvg(
     ),
   );
 
+  // Data-gap shading, drawn first so everything else sits on top: contiguous
+  // runs of skipped slots become one band each, so a day whose feed is patchy
+  // reads as patchy instead of as a signal that keeps collapsing to zero.
+  for (let i = 0; i < n; ) {
+    if (!slots[i]!.dataGap) {
+      i += 1;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < n && slots[j + 1]!.dataGap) j += 1;
+    const x0 = x(i);
+    const x1 = x(j);
+    parts.push(
+      `<rect x="${x0.toFixed(1)}" y="${M.top}" width="${Math.max(1, x1 - x0).toFixed(1)}" ` +
+        `height="${PLOT_H}" fill="${COLORS.gap}"/>`,
+    );
+    i = j + 1;
+  }
+
   // Plot frame
   parts.push(
     `<rect x="${M.left}" y="${M.top}" width="${PLOT_W}" height="${PLOT_H}" fill="none" stroke="#e5e7eb"/>`,
@@ -487,9 +687,13 @@ function writeSvg(
   // Spot (right axis)
   parts.push(polyline(slots.map((s, i) => [x(i), yR(s.spot)]), COLORS.spot, 2));
 
-  // Composite z + gexZ (left axis)
-  parts.push(polyline(slots.map((s, i) => [x(i), yL(s.composite)]), COLORS.composite, 2));
-  parts.push(polyline(slots.map((s, i) => [x(i), yL(s.gexZ)]), COLORS.gexZ, 1.5));
+  // Composite z + gexZ (left axis). A data-gap slot carries the all-zero
+  // placeholder score, NOT a measured zero — plotting it would drag both lines
+  // to the zero axis every gap minute and read as a real signal collapse. Feed
+  // NaN so `polyline` breaks there instead.
+  const zAt = (v: number, gap: boolean) => (gap ? NaN : yL(v));
+  parts.push(polyline(slots.map((s, i) => [x(i), zAt(s.composite, s.dataGap)]), COLORS.composite, 2));
+  parts.push(polyline(slots.map((s, i) => [x(i), zAt(s.gexZ, s.dataGap)]), COLORS.gexZ, 1.5));
 
   // Entry / exit markers on the price line
   for (const t of trades) {
@@ -512,6 +716,7 @@ function writeSvg(
     ['cone', COLORS.cone],
     ['entry▲/▼', COLORS.long],
     ['exit✕', COLORS.exit],
+    ['data gap', COLORS.gap],
   ];
   let lx = M.left;
   for (const [label, color] of legend) {
@@ -569,6 +774,12 @@ function polyline(pts: Array<[number, number]>, color: string, width: number, da
 
   return segments
     .map((seg) => {
+      // A one-point run has no line to draw; render it as a dot so an isolated
+      // reading between two gaps still shows up.
+      if (seg.length === 1) {
+        const [px, py] = seg[0]!;
+        return `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${(width + 0.5).toFixed(1)}" fill="${color}"/>`;
+      }
       const d = seg.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(' ');
       return `<polyline points="${d}" fill="none" stroke="${color}" stroke-width="${width}"${
         dash ? ` stroke-dasharray="${dash}"` : ''
@@ -702,6 +913,11 @@ if (isMain) {
   console.log = tee(origLog);
   console.error = tee(console.error.bind(console));
 
+  /** Detail that belongs in the log file only — never on the terminal. */
+  const logOnly = (line: string): void => {
+    logLines.push(line);
+  };
+
   const flushLog = (): string => {
     const dir = logsDir();
     mkdirSync(dir, { recursive: true });
@@ -721,7 +937,7 @@ if (isMain) {
     let tradeCount = 0;
     for (const testCase of cases) {
       const result = await runTestCase(testCase, config);
-      printExplanation(result);
+      printExplanation(result, config, logOnly);
       for (const t of result.trades) {
         netPnl += t.pnl;
         tradeCount += 1;
