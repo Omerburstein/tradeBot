@@ -398,14 +398,18 @@ function writeSvg(
   const zTop = niceCeil(zMax);
   const yL = (z: number) => M.top + PLOT_H / 2 - (z / zTop) * (PLOT_H / 2);
 
-  // Right axis: price (spot + cone bands).
+  // Right axis: price (spot + cone bands). Only FINITE values may set the
+  // scale: a cone band is ±Infinity when the day has no stored cone and NaN on
+  // a data-gap slot (the generator emits a neutral cone), and a single such
+  // value would otherwise poison pMin/pMax into NaN — silently erasing the
+  // whole price side of the chart (spot line, cone, entry/exit markers).
   const prices = [
     ...slots.map((s) => s.spot),
     ...slots.map((s) => s.coneUpper),
     ...slots.map((s) => s.coneLower),
-  ];
-  let pMin = Math.min(...prices);
-  let pMax = Math.max(...prices);
+  ].filter((p) => Number.isFinite(p));
+  let pMin = prices.length > 0 ? Math.min(...prices) : 0;
+  let pMax = prices.length > 0 ? Math.max(...prices) : 1;
   const pad = Math.max(1, (pMax - pMin) * 0.08);
   pMin -= pad;
   pMax += pad;
@@ -543,11 +547,34 @@ function niceCeil(v: number): number {
   return nice * pow;
 }
 
+/**
+ * A line through `pts`, BROKEN at any non-finite point rather than drawn
+ * through it. Slots with no cone (unbounded band) or an incomplete data slot
+ * carry ±Infinity/NaN; emitting those coordinates would make the browser drop
+ * the entire polyline, so each run of finite points becomes its own segment and
+ * the gap simply shows as a gap.
+ */
 function polyline(pts: Array<[number, number]>, color: string, width: number, dash = ''): string {
-  const d = pts.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(' ');
-  return `<polyline points="${d}" fill="none" stroke="${color}" stroke-width="${width}"${
-    dash ? ` stroke-dasharray="${dash}"` : ''
-  }/>`;
+  const segments: Array<Array<[number, number]>> = [];
+  let run: Array<[number, number]> = [];
+  for (const p of pts) {
+    if (Number.isFinite(p[0]) && Number.isFinite(p[1])) {
+      run.push(p);
+    } else if (run.length > 0) {
+      segments.push(run);
+      run = [];
+    }
+  }
+  if (run.length > 0) segments.push(run);
+
+  return segments
+    .map((seg) => {
+      const d = seg.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(' ');
+      return `<polyline points="${d}" fill="none" stroke="${color}" stroke-width="${width}"${
+        dash ? ` stroke-dasharray="${dash}"` : ''
+      }/>`;
+    })
+    .join('\n');
 }
 
 function marker(cx: number, cy: number, kind: 'up' | 'down' | 'x', color: string): string {
