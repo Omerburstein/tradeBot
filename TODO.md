@@ -6,6 +6,63 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
 
 ## Algorithm
 
+> Items 11–16 come from the MM-exposure mechanism audit in
+> [`docs/mm-exposure-model.md`](docs/mm-exposure-model.md) — read §3 there before
+> picking one up; the ordering in §5 matters (11 decides the priority of 13/14).
+
+- [ ] **11. Settle the gamma-sign question empirically (read-only analysis, no model change).**
+  Three measurements off stored history: (a) the distribution of `sign(gamma)`
+  for in-window strikes — is SPX 0DTE persistently one-signed near spot, or does
+  the mix vary day to day? (b) group days by `sign(netGex)` at 10:00 and compare
+  realized range, |close − open|, and the existing tuned model's PnL per group;
+  (c) find slots where spot crosses the zero-gamma `flipStrike` and measure the
+  15/30-min realized move after. Shape it like `coverage-report.ts`. Outcome
+  decides whether #13 (pin/accel split) is a top priority or theoretical.
+
+- [ ] **12. Capture a 1-min `^VIX` series — PERISHABLE, do this early.**
+  Vanna is ∂delta/∂IV and is unusable without an intraday IV series, which is
+  why it correctly tests as noise today. Add `^VIX` through the same Yahoo path
+  as `^GSPC`/`ES=F` (`scripts/backfill-prices.ts` + `live-prices.ts`). Yahoo
+  serves 1-min only ~30 days back (TODO #6), so every uncaptured day is
+  permanently lost at that resolution — start the capture *before* deciding
+  whether vanna is useful.
+
+- [ ] **13. Add the gamma regime (`netGex` / `flipStrike` / `distToFlip`) as an INTERACTION.**
+  The composite is a fixed linear blend of four factors with no interaction term,
+  so it cannot express that the same gamma structure implies opposite trades in
+  opposite regimes — no re-tune of `wGex` fixes a missing interaction. Compute
+  signed `netGex`, the zero-gamma `flipStrike`, and `distToFlip` normalized by
+  the cone half-width; use them to modulate `entryThreshold`, to switch the cone
+  gate between breakout (short-gamma) and fade (long-gamma), and to feed #15.
+  Keep it one continuous signed scalar so the tuner gets a knob, not a cliff.
+
+- [ ] **14. Split GEX into a pin term (positive gamma) and an accelerant term (negative gamma).**
+  Positive gamma = attractor, direction = side of spot (what the current
+  convention is right for). Negative gamma = amplifier with no inherent
+  direction — it should point along the prevailing move, scaled by proximity.
+  Today both score identically within 10 % (`positiveGammaBias`), which is the
+  direct contradiction of the mechanism. **Contradicts R1/R2** — if the
+  head-to-head walk-forward favors the split, rewrite those roles via `/role`
+  rather than silently violating them; if it loses, record why in ROLES.md.
+
+- [ ] **15. Regime-condition the risk manager; make stops/window scale-free.**
+  `stopLossPoints: 10` and `strikeWindow: 120` are absolute point values in a
+  market whose daily range varies ~3×. Scale both by the day's cone half-width,
+  then condition on the regime: pinning ⇒ tighter stop, target the
+  `callWall`/`putWall` rather than a fixed point count; accelerating ⇒ wider
+  stop, smaller size (flat dollar risk), let winners run. Also allow
+  `distanceWeightSpan` to go negative so the tuner can choose an ATM-peaked
+  distance kernel instead of the hard-coded far-strikes-count-more shape.
+
+- [ ] **16. Revisit charm as a time-of-day interaction; carry the call/put split.**
+  Charm is small in the morning and grows sharply into the close, so a plain
+  linear 5th factor averages the real afternoon signal with an empty morning and
+  tests as noise — the likely reason it was excluded. Enter it as
+  `charm × f(time-to-close)`, and only after #13 (its direction is also
+  regime-dependent). Separately: `positions` collapses `call_qty + put_qty` then
+  takes `abs()`, discarding a split the DB already stores; carry both through
+  `StrikeData` and test a signed variant.
+
 - [ ] **1. Make next-day (1DTE) strikes less relevant than current-day (0DTE) strikes (factor ≥ 0.5).**
   Down-weight next-day strikes relative to current-day strikes by a factor of at
   least 0.5 (next-day counts at most half as much).
@@ -51,6 +108,17 @@ Backlog of work items. Group: **Algorithm** (`algorithms/`).
   (~09:30–09:40 ET). Determine whether pre-open Greek/positioning signals predict
   the opening move, so we know if the early window carries usable signal for the
   algo.
+
+- [ ] **10. Coin-flip baseline: is the tuned model better than random entries?**
+  Build a random-entry baseline to establish the noise floor the algo must beat.
+  Over the same trading days, enter at random times with the same average hold
+  duration and the same stop/TP rules, 1 contract, and run it ~200 times to get a
+  distribution of PnL rather than a single number. Then compare the tuned model's
+  out-of-sample PnL against that distribution. If the model lands in the middle of
+  it, the Greeks are contributing nothing and the parameters were never the
+  problem — which tells "needs better tuning" apart from "no signal in the data".
+  *(User also benchmarks against their own manual trading, but wants these numbers
+  for reference.)*
 
 ## Data
 
