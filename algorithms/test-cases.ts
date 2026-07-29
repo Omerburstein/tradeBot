@@ -753,39 +753,21 @@ function niceCeil(v: number): number {
 }
 
 /**
- * A line through `pts`, BROKEN at any non-finite point rather than drawn
- * through it. Slots with no cone (unbounded band) or an incomplete data slot
- * carry ±Infinity/NaN; emitting those coordinates would make the browser drop
- * the entire polyline, so each run of finite points becomes its own segment and
- * the gap simply shows as a gap.
+ * One continuous line through the plottable points, SKIPPING any non-finite
+ * one rather than drawing to it: a slot with no cone carries ±Infinity, and a
+ * skipped (incomplete-data) slot carries NaN — emitting those coordinates makes
+ * the browser drop the whole polyline. Skipped points are bridged, so the
+ * series stays a readable line; which spans were bridged is shown separately by
+ * the shaded data-gap bands, not by chopping the line into fragments.
  */
 function polyline(pts: Array<[number, number]>, color: string, width: number, dash = ''): string {
-  const segments: Array<Array<[number, number]>> = [];
-  let run: Array<[number, number]> = [];
-  for (const p of pts) {
-    if (Number.isFinite(p[0]) && Number.isFinite(p[1])) {
-      run.push(p);
-    } else if (run.length > 0) {
-      segments.push(run);
-      run = [];
-    }
-  }
-  if (run.length > 0) segments.push(run);
+  const drawable = pts.filter(([px, py]) => Number.isFinite(px) && Number.isFinite(py));
+  if (drawable.length < 2) return '';
 
-  return segments
-    .map((seg) => {
-      // A one-point run has no line to draw; render it as a dot so an isolated
-      // reading between two gaps still shows up.
-      if (seg.length === 1) {
-        const [px, py] = seg[0]!;
-        return `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${(width + 0.5).toFixed(1)}" fill="${color}"/>`;
-      }
-      const d = seg.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(' ');
-      return `<polyline points="${d}" fill="none" stroke="${color}" stroke-width="${width}"${
-        dash ? ` stroke-dasharray="${dash}"` : ''
-      }/>`;
-    })
-    .join('\n');
+  const d = drawable.map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(' ');
+  return `<polyline points="${d}" fill="none" stroke="${color}" stroke-width="${width}"${
+    dash ? ` stroke-dasharray="${dash}"` : ''
+  }/>`;
 }
 
 function marker(cx: number, cy: number, kind: 'up' | 'down' | 'x', color: string): string {
