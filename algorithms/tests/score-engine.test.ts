@@ -54,15 +54,30 @@ function strike(k: number, gamma: number): StrikeData {
   return { strike: k, gamma, charm: 0, vanna: 0, positions: 0 };
 }
 
+const SNAP_AT = '2026-05-21T18:50:00Z';
+const SNAP_MS = new Date(SNAP_AT).getTime();
+
 function snap(strikes: StrikeData[], spot = SPOT): Snapshot {
   return {
-    capturedAt: '2026-05-21T18:50:00Z',
+    capturedAt: SNAP_AT,
     expiry: '2026-05-21',
     timeframe: '14:40 - 14:50',
     spot,
     strikes,
     cone: null,
   };
+}
+
+/**
+ * Instant to stamp on the `i`-th of `n` synthetic history entries: they walk
+ * backwards from {@link SNAP_MS} at the 10-min cadence, so the newest sits one
+ * step before the snapshot. The lookback is a WALL-CLOCK window
+ * (`zScoreLookbackMin`, 180 min), so a history entry only counts toward the
+ * scale if it carries an instant inside it — these deliberately all do, keeping
+ * every normalization assertion below about SHAPE rather than about the window.
+ */
+function histAt(i: number, n: number): number {
+  return SNAP_MS - (n - i) * 10 * 60_000;
 }
 
 /** dGammaRaw for one current/previous strike pair (no z-history). */
@@ -307,7 +322,8 @@ check(
 // these tests use, a snapshot's gross == |net|, so gexGross = |gexRaw|.
 /** gexZ for `gamma` at a strike above spot, against a history of `hist` scale mags. */
 function gexZAgainst(gamma: number, hist: number[]): number {
-  const history = hist.map((gexRaw) => ({
+  const history = hist.map((gexRaw, i) => ({
+    at: histAt(i, hist.length),
     gexRaw,
     gexZ: 0,
     dGammaRaw: 0,
@@ -334,7 +350,8 @@ function gexZAgainst(gamma: number, hist: number[]): number {
   const z = computeScore(
     snap([strike(5990, 40)]), // small |gamma| → small negative gexRaw
     null,
-    persistentlyNegative.map((gexRaw) => ({
+    persistentlyNegative.map((gexRaw, i) => ({
+      at: histAt(i, persistentlyNegative.length),
       gexRaw,
       gexZ: 0,
       dGammaRaw: 0,
@@ -435,7 +452,8 @@ check(
 // ±1 from dividing a near-zero net by a near-zero self-scale. A one-sided
 // snapshot (net == gross) still reads directionally.
 {
-  const grossHist = Array(5).fill(0).map(() => ({
+  const grossHist = Array(5).fill(0).map((_, i) => ({
+    at: histAt(i, 5),
     gexRaw: 0, gexZ: 0, dGammaRaw: 0, dGammaZ: 0,
     positionsRaw: 0, positionsZ: 0, dPositionsRaw: 0, dPositionsZ: 0,
     composite: 0,

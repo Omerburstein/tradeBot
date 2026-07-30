@@ -85,6 +85,14 @@ export function createMomentumState(): MomentumState {
 /** Fallback half-life (min) if a config predates `momentumHalfLifeMin`. */
 const DEFAULT_MOMENTUM_HALF_LIFE_MIN = 10;
 /**
+ * Fallback normalization window (min) if a config predates `zScoreLookbackMin` —
+ * notably a model persisted in `tuned-models.json` back when the field was the
+ * snapshot COUNT `zScoreLookback`, which `loadModelStore` casts without
+ * validating. Without this a stale record would yield `undefined` minutes, an
+ * empty lookback, and a silent cold-start score on every slot.
+ */
+const DEFAULT_ZSCORE_LOOKBACK_MIN = 180;
+/**
  * Δt clamp (minutes) for the baseline decay. Floors a zero/negative gap so ρ
  * stays finite; caps a large gap so ρ→0 (the baseline forgets and reseeds to
  * the current level) rather than underflowing — the right behaviour after a
@@ -280,7 +288,20 @@ export function computeScore(
   // self-scaling a near-zero net against a near-zero scale. `meanAbs` inside
   // normalizeToScale keeps the denominator sign-blind either way. See
   // {@link ScoreComponents} gross fields.
-  const lookback = history.slice(-config.zScoreLookback);
+  // WALL-CLOCK lookback: keep the history entries whose own instant falls inside
+  // the trailing `zScoreLookbackMin` window, rather than a fixed COUNT of
+  // entries. A count means 10× less history on a 1-min feed than on a 10-min one
+  // (the same trap `momentumHalfLifeMin` / `entrySignalHalfLifeMin` were made
+  // cadence-invariant to avoid); selecting by timestamp makes the scale mean the
+  // same physical memory at any cadence. `history` holds only PRIOR scores (the
+  // current one is pushed by the caller after this returns), and it is day-scoped,
+  // so early in the session the window simply holds fewer entries.
+  const windowMin =
+    Number.isFinite(config.zScoreLookbackMin) && config.zScoreLookbackMin > 0
+      ? config.zScoreLookbackMin
+      : DEFAULT_ZSCORE_LOOKBACK_MIN;
+  const windowStartMs = currentMs - windowMin * 60_000;
+  const lookback = history.filter((h) => h.at >= windowStartMs);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
   const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexGross), config.pGamma));
   const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaGross), config.pDGamma));
@@ -295,6 +316,9 @@ export function computeScore(
     config.wDPositions * dPositionsZ;
 
   return {
+    // Stamped here, not by the caller, so a score can never enter the history
+    // without the instant the wall-clock lookback needs to place it.
+    at: currentMs,
     gexRaw,
     gexZ,
     dGammaRaw,

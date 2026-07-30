@@ -87,6 +87,14 @@ export interface Snapshot {
 // ── Scoring ──
 
 export interface ScoreComponents {
+  /**
+   * Epoch-ms of the snapshot this score was computed from. Stamped by
+   * `computeScore` itself so a caller can never forget it, and read back when the
+   * score sits in the per-day history: the normalization lookback is a WALL-CLOCK
+   * window ({@link AlgoConfig.zScoreLookbackMin}), so each past entry has to carry
+   * the instant it belongs to. See the lookback filter in score-engine.ts.
+   */
+  at: number;
   gexRaw: number;
   gexZ: number;
   dGammaRaw: number;
@@ -261,10 +269,56 @@ export interface RiskParams {
    * round-trip cost and slippage.
    */
   minGexTakeProfitPoints: number;
+
+  // ── Time-decaying exit distances ──
+  // Both the take-profit and the stop-loss start at their entry distance and
+  // walk LINEARLY toward the entry price as the trade ages:
+  //
+  //   distance(t) = max(floor, initial · (1 − perHour · hoursHeld))
+  //
+  // The point is the trade that goes the right way but never quite reaches its
+  // target: without decay it round-trips back through entry and exits flat (or
+  // on a stop) having given back a move it actually caught. A target that gives
+  // up ground over time converts that into a smaller realized win — "if it
+  // doesn't reach the TP it can still take some". Decay is measured from the
+  // ENTRY instant in wall-clock hours, so it means the same thing on the 1-min
+  // live feed and on a 10-min backfill.
+  //
+  // `perHour = 0` disables decay on that side (the pre-decay fixed-distance
+  // behaviour). The floor is clamped to at most the initial distance, so a floor
+  // set above it can never WIDEN an exit — decay only ever tightens.
+
+  /**
+   * Fraction of the ORIGINAL take-profit distance surrendered per hour held
+   * (0.25 = the target moves 25% closer to entry every hour). `0` = off.
+   */
+  takeProfitDecayPerHour: number;
+  /**
+   * Floor (SPX pts) under which the decaying take-profit never falls, so a
+   * long-held trade can't exit inside round-trip cost + slippage.
+   */
+  takeProfitFloorPoints: number;
+  /**
+   * Fraction of the ORIGINAL stop distance surrendered per hour held — the stop
+   * tightens toward entry as the trade ages, cutting a position that stopped
+   * working. `0` = off (the fixed `stopLossPoints` stop, unchanged).
+   *
+   * Defaults OFF while take-profit decay defaults ON: a decaying TP can only
+   * ever bank profit EARLIER, whereas a tightening stop realizes losses earlier
+   * and can shake out a trade that was quietly working. Turn it on deliberately.
+   */
+  stopLossDecayPerHour: number;
+  /** Floor (SPX pts) under which the tightening stop never falls. */
+  stopLossFloorPoints: number;
+
   /**
    * Master switch for the trailing stop. When `false` the trailing stop is
    * disabled entirely and only the hard `stopLossPoints` stop applies;
    * `trailingStopActivation` / `trailingStopDistance` are then ignored.
+   *
+   * Distinct from `stopLossDecayPerHour`: the trailing stop tracks the trade's
+   * high-water mark (profit-driven), the decay tightens on the clock
+   * (time-driven). They compose — whichever is hit first exits.
    */
   trailingStopEnabled: boolean;
   /** Profit threshold (SPX pts) to activate trailing stop. */
@@ -471,8 +525,28 @@ export interface AlgoConfig {
 
   /** Only consider strikes within this many points of spot. */
   strikeWindow: number;
-  /** Number of past ScoreComponents snapshots used to derive each factor's scale. */
-  zScoreLookback: number;
+  /**
+   * Length, IN MINUTES, of the trailing window used to derive each factor's
+   * magnitude scale — the "typical size" every factor is divided by at the
+   * normalize step (see `normalizeToScale` in score-engine.ts). It answers
+   * "big compared to what?".
+   *
+   * WALL-CLOCK, like {@link momentumHalfLifeMin} and
+   * {@link entrySignalHalfLifeMin}: the window is selected by timestamp, not by
+   * a count of entries, so the same value means the same physical memory at any
+   * feed cadence. (It was previously a COUNT of snapshots, which silently meant
+   * 10× less history on a 1-min feed than on a 10-min one.)
+   *
+   * Shorter = a local, fast-adapting yardstick: in a quiet stretch the scale
+   * shrinks, so ordinary moves read as large and more signals clear the entry
+   * bar. Longer = a slower, steadier yardstick: fewer and more selective
+   * signals, but slower to react when the day's regime changes.
+   *
+   * DAY-SCOPED, like the history it slices — a fresh SignalGenerator per trading
+   * day means the window can never reach back across a day boundary, so early in
+   * the session it simply holds fewer entries than the full window.
+   */
+  zScoreLookbackMin: number;
 
   /** Cone-breakout entry/exit mode (TODO #8). Off by default. */
   coneBreakout: ConeBreakoutConfig;
@@ -509,7 +583,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   gexAutoExit: true,
 
   strikeWindow: 120,
-  zScoreLookback: 20,
+  zScoreLookbackMin: 180, // 3h wall-clock scale window (was 20 snapshots ≈ 200 min at the 10-min cadence)
 
   coneBreakout: {
     enabled: false, // OFF → default score-driven entry/exit rules apply
@@ -525,6 +599,10 @@ export const DEFAULT_CONFIG: AlgoConfig = {
     stopLossPoints: 10,
     riskRewardRatio: 3, // fallback only (no cone): take-profit at 30 pts
     minGexTakeProfitPoints: 15, // skip trades whose GEX TP (gamma-center distance) < 15 pts
+    takeProfitDecayPerHour: 0.25, // target gives up 25%/h: a 30pt TP is 22.5 after 1h, 15 after 2h
+    takeProfitFloorPoints: 6, // …but never below 6 pts (round-trip cost + slippage)
+    stopLossDecayPerHour: 0, // stop tightening OFF by default (see RiskParams)
+    stopLossFloorPoints: 4,
     trailingStopEnabled: false, // trailing stop OFF — only the hard stopLossPoints stop applies
     trailingStopActivation: 5,
     trailingStopDistance: 7,

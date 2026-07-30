@@ -332,14 +332,15 @@ export class SignalGenerator {
     const isLong = this.state.position === 'long';
     const directionalScore = isLong ? score.composite : -score.composite;
 
-    // Stop-loss check
-    const stopCheck = checkStopLoss(this.state, snapshot.spot, config);
+    // Stop-loss check (distance time-decayed per risk.stopLossDecayPerHour)
+    const stopCheck = checkStopLoss(this.state, snapshot.spot, config, snapshot.capturedAt);
     if (stopCheck.stopped) {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
     }
 
-    // Take-profit check: GEX-relative target (gamma-center distance frozen at entry)
-    const tpCheck = checkTakeProfit(this.state, snapshot.spot);
+    // Take-profit check: GEX-relative target (gamma-center distance frozen at
+    // entry, then decayed toward entry per risk.takeProfitDecayPerHour).
+    const tpCheck = checkTakeProfit(this.state, snapshot.spot, config, snapshot.capturedAt);
     if (tpCheck.hit) {
       return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
     }
@@ -535,15 +536,15 @@ export class SignalGenerator {
 
     // (c) Stop-loss
     if (cb.exitOnSl) {
-      const stopCheck = checkStopLoss(this.state, snapshot.spot, config);
+      const stopCheck = checkStopLoss(this.state, snapshot.spot, config, snapshot.capturedAt);
       if (stopCheck.stopped) {
         return this.makeSignal('exit', score, cone, snapshot, 'high', `stop-loss: ${stopCheck.reason}`);
       }
     }
 
-    // (b) Take-profit (GEX-relative target frozen at entry)
+    // (b) Take-profit (GEX target frozen at entry, then time-decayed)
     if (cb.exitOnTp) {
-      const tpCheck = checkTakeProfit(this.state, snapshot.spot);
+      const tpCheck = checkTakeProfit(this.state, snapshot.spot, config, snapshot.capturedAt);
       if (tpCheck.hit) {
         return this.makeSignal('exit', score, cone, snapshot, 'high', `take-profit: ${tpCheck.reason}`);
       }
@@ -715,6 +716,7 @@ export class SignalGenerator {
  * Signal. Callers that skipped a decision must not read these as a real reading.
  */
 const EMPTY_SCORE: ScoreComponents = {
+  at: 0, // never enters scoreHistory (data-gap slots are skipped), so the instant is unused
   gexRaw: 0, gexZ: 0,
   dGammaRaw: 0, dGammaZ: 0,
   positionsRaw: 0, positionsZ: 0,

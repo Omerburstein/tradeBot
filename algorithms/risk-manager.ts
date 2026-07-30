@@ -17,6 +17,86 @@ import type {
 const FULL_SIZE_SCALAR = 1.0;
 /** Reduced base size for a signal below `strongEntryThreshold`. */
 const WEAK_SIGNAL_SIZE_SCALAR = 0.5;
+/** Milliseconds per hour — decay rates are expressed per hour held. */
+const MS_PER_HOUR = 3_600_000;
+
+/**
+ * Wall-clock hours the position has been open at `nowUtc`.
+ *
+ * A missing entry time, an unparseable instant, or an out-of-order pair (exit
+ * before entry) all collapse to 0, so a clock problem can only ever mean "no
+ * decay yet" — never a spuriously shrunken target that fabricates an exit.
+ */
+function hoursHeld(state: TradeState, nowUtc: string): number {
+  if (state.entryTime === null) return 0;
+  const held = (Date.parse(nowUtc) - Date.parse(state.entryTime)) / MS_PER_HOUR;
+  return Number.isFinite(held) && held > 0 ? held : 0;
+}
+
+/**
+ * Linear time-decay of an exit distance toward the entry price:
+ *
+ *   distance(t) = max(floor, initial · (1 − perHour · hours))
+ *
+ * `perHour ≤ 0` (or non-finite) returns `initial` unchanged — the fixed-distance
+ * behaviour that predates decay. The floor is clamped to at most `initial` so a
+ * floor set above the starting distance can never WIDEN the exit: decay only
+ * ever tightens. The result is also held at ≥ 0 (a decay rate past 1/hour would
+ * otherwise drive the distance negative and exit on any price at all).
+ */
+function decayDistance(
+  initial: number,
+  perHour: number,
+  floorPoints: number,
+  hours: number,
+): number {
+  if (!Number.isFinite(perHour) || perHour <= 0) return initial;
+  const floor = Number.isFinite(floorPoints) ? Math.max(0, floorPoints) : 0;
+  const decayed = initial * (1 - perHour * hours);
+  return Math.max(Math.min(initial, floor), decayed);
+}
+
+/**
+ * The take-profit distance (SPX pts) in force right now: the entry-frozen GEX
+ * target after time-decay. `null` while flat / with no stored target.
+ */
+export function effectiveTakeProfitPoints(
+  config: AlgoConfig,
+  state: TradeState,
+  nowUtc: string,
+): number | null {
+  if (state.gexTpPoints === null) return null;
+  return decayDistance(
+    state.gexTpPoints,
+    config.risk.takeProfitDecayPerHour,
+    config.risk.takeProfitFloorPoints,
+    hoursHeld(state, nowUtc),
+  );
+}
+
+/**
+ * The hard stop distance (SPX pts) in force right now: `stopLossPoints` after
+ * time-decay. Independent of the HWM-driven trailing stop, which is applied
+ * separately in {@link checkStopLoss}.
+ */
+export function effectiveStopLossPoints(
+  config: AlgoConfig,
+  state: TradeState,
+  nowUtc: string,
+): number {
+  return decayDistance(
+    config.risk.stopLossPoints,
+    config.risk.stopLossDecayPerHour,
+    config.risk.stopLossFloorPoints,
+    hoursHeld(state, nowUtc),
+  );
+}
+
+/** `" (decayed from 30.0 after 42m)"`, or `''` when decay isn't in force. */
+function decayNote(initial: number, effective: number, hours: number): string {
+  if (effective >= initial - 1e-9) return '';
+  return ` (decayed from ${initial.toFixed(1)} after ${Math.round(hours * 60)}m)`;
+}
 
 /**
  * Compute position size in contracts based on risk parameters and
@@ -48,13 +128,18 @@ export function computePositionSize(
  * Check whether a stop-loss has been hit.
  *
  * Supports:
- *   - Hard stop: fixed distance from entry
+ *   - Hard stop: `stopLossPoints` from entry, tightened by `stopLossDecayPerHour`
+ *     as the trade ages (no decay configured → the original fixed distance)
  *   - Trailing stop: activates after profit threshold, trails behind HWM
+ *
+ * `nowUtc` is the current snapshot's `capturedAt` — the instant the decay is
+ * measured against.
  */
 export function checkStopLoss(
   state: TradeState,
   currentSpot: number,
   config: AlgoConfig,
+  nowUtc: string,
 ): { stopped: boolean; reason: string } {
   if (state.position === 'flat' || state.entryPrice === null) {
     return { stopped: false, reason: '' };
@@ -64,9 +149,14 @@ export function checkStopLoss(
   const direction = state.position === 'long' ? 1 : -1;
   const pnlPoints = (currentSpot - state.entryPrice) * direction;
 
-  // Hard stop-loss
-  if (pnlPoints <= -risk.stopLossPoints) {
-    return { stopped: true, reason: `hard stop hit (${pnlPoints.toFixed(1)} pts)` };
+  // Hard stop-loss, at whatever distance the clock has tightened it to.
+  const stopPoints = effectiveStopLossPoints(config, state, nowUtc);
+  if (pnlPoints <= -stopPoints) {
+    const note = decayNote(risk.stopLossPoints, stopPoints, hoursHeld(state, nowUtc));
+    return {
+      stopped: true,
+      reason: `hard stop hit (${pnlPoints.toFixed(1)} pts ≤ −${stopPoints.toFixed(1)}${note})`,
+    };
   }
 
   // Trailing stop: only when enabled, and only after reaching activation threshold
@@ -140,15 +230,22 @@ export function meetsGexMinTakeProfit(config: AlgoConfig, snapshot: Snapshot): b
 }
 
 /**
- * Check whether the GEX-relative profit target has been reached.
+ * Check whether the profit target has been reached.
  *
  * The target distance was frozen at entry (TradeState.gexTpPoints = distance
- * from the entry spot to that snapshot's gamma center of mass). Slippage is not
- * applied here — it is accounted for at the actual exit fill in recordExit.
+ * from the entry spot to that snapshot's gamma center of mass) and is then
+ * walked toward entry by `takeProfitDecayPerHour`. So a trade that runs most of
+ * the way to its GEX target and stalls is taken at the reduced distance instead
+ * of round-tripping — with decay off this is exactly the old fixed target.
+ *
+ * Slippage is not applied here — it is accounted for at the actual exit fill in
+ * recordExit. `nowUtc` is the current snapshot's `capturedAt`.
  */
 export function checkTakeProfit(
   state: TradeState,
   currentSpot: number,
+  config: AlgoConfig,
+  nowUtc: string,
 ): { hit: boolean; reason: string } {
   if (state.position === 'flat' || state.entryPrice === null || state.gexTpPoints === null) {
     return { hit: false, reason: '' };
@@ -156,12 +253,13 @@ export function checkTakeProfit(
 
   const direction = state.position === 'long' ? 1 : -1;
   const pnlPoints = (currentSpot - state.entryPrice) * direction;
-  const targetPoints = state.gexTpPoints;
+  const targetPoints = effectiveTakeProfitPoints(config, state, nowUtc)!;
 
   if (pnlPoints >= targetPoints) {
+    const note = decayNote(state.gexTpPoints, targetPoints, hoursHeld(state, nowUtc));
     return {
       hit: true,
-      reason: `+${pnlPoints.toFixed(1)} pts ≥ ${targetPoints.toFixed(1)} GEX target`,
+      reason: `+${pnlPoints.toFixed(1)} pts ≥ ${targetPoints.toFixed(1)} GEX target${note}`,
     };
   }
 

@@ -76,7 +76,7 @@ bar the composite z must clear.
 | Knob | Current | Meaning |
 |------|---------|---------|
 | `strikeWindow` | `120` | Only consider strikes within ±this many pts of spot |
-| `zScoreLookback` | `20` | Number of past same-day snapshots defining each factor's magnitude scale |
+| `zScoreLookbackMin` | `180` | Trailing **wall-clock minutes** of same-day history defining each factor's magnitude scale. Not tuned — pinned at 180. |
 
 **Factor normalization is not a z-score.** Each factor is `sign(r)·log2(1+|r|)`
 where `r = raw / meanAbs(recent raws of THAT factor)` — history sets the **scale**
@@ -128,6 +128,10 @@ cone breakout).
 | `stopLossPoints` | `10` | Hard stop distance (SPX pts) from entry |
 | `riskRewardRatio` | `3` | Fallback take-profit = `stopLossPoints × this` when no gamma in window |
 | `minGexTakeProfitPoints` | `15` | Skip entries whose GEX take-profit (gamma-center distance) is below this |
+| `takeProfitDecayPerHour` | `0.25` | Fraction of the **original** TP distance given up per hour held (`0` = off) |
+| `takeProfitFloorPoints` | `6` | Floor (pts) the decaying take-profit never falls below |
+| `stopLossDecayPerHour` | `0` | Same, for the stop — tightens toward entry as the trade ages. **Off by default** |
+| `stopLossFloorPoints` | `4` | Floor (pts) the tightening stop never falls below |
 | `trailingStopEnabled` | `false` | Master switch for the trailing stop |
 | `trailingStopActivation` | `5` | Profit (pts) to arm the trailing stop *(ignored while disabled)* |
 | `trailingStopDistance` | `7` | Distance (pts) the trailing stop trails behind the high-water mark *(ignored while disabled)* |
@@ -153,15 +157,48 @@ sizes positions). Overridable per-run via env vars without editing code.
 A position is closed by the **first** of these to fire, checked every slot:
 
 1. **Forced time exit** — past `forcedExitByET` *(always on)*
-2. **Hard stop-loss** — `stopLossPoints` against you *(always on)*
+2. **Hard stop-loss** — `stopLossPoints` against you, tightened by `stopLossDecayPerHour` *(always on)*
 3. **Trailing stop** — only if `trailingStopEnabled`
-4. **Take-profit** — GEX target (gamma-center distance frozen at entry) *(always on)*
+4. **Take-profit** — GEX target (gamma-center distance frozen at entry), shrunk by `takeProfitDecayPerHour` *(always on)*
 5. **Signal fade** — directional z < `exitFadeThreshold` — **only if `gexAutoExit`**
 6. **Reversal** — directional z < −`reversalThreshold` — **only if `gexAutoExit`**
 
 So `gexAutoExit: false` removes #5 and #6, leaving the structural/risk exits.
 (Since TODO #9, the cone no longer forces an exit in default mode — it only
 selects the entry threshold. Cone re-entry exits are cone-breakout mode only.)
+
+### Time-decaying TP / SL
+
+Exits #2 and #4 are **distances**, not fixed prices, and both walk toward the
+entry price as the trade ages:
+
+```
+distance(t) = max(floor, initial × (1 − perHour × hoursHeld))
+```
+
+The problem this solves: a trade runs +20 of a 30pt GEX target, stalls, and
+round-trips back through entry — the algo caught a real move and banked nothing.
+With `takeProfitDecayPerHour: 0.25` that target is 22.5pts after an hour and
+18.75 after 90 minutes, so the stalling trade is taken at +20 instead. **If it
+doesn't reach the TP, it still takes some of the move.**
+
+- Decay is measured in wall-clock hours from the entry instant, so it means the
+  same thing on the 1-min live feed and a 10-min backfill.
+- `perHour: 0` is *exactly* the old fixed-distance behaviour — every config
+  tuned before this feature (including both models in `tuned-models.json`, which
+  are pinned to `0`) is unaffected.
+- The floor is clamped to at most the initial distance, so decay can only ever
+  **tighten** an exit, never widen one.
+- `stopLossDecayPerHour` defaults to **0** while the TP decay is on: a decaying
+  target only ever banks profit earlier, whereas a tightening stop realizes
+  losses earlier and can shake out a trade that was quietly working. Turn it on
+  deliberately.
+- The exit reason records it, e.g.
+  `take-profit: +20.0 pts ≥ 18.8 GEX target (decayed from 30.0 after 90m)`.
+
+Distinct from the trailing stop: trailing tracks the high-water mark
+(profit-driven), decay tightens on the clock (time-driven). They compose —
+whichever is hit first exits.
 
 **In cone-breakout mode** (`coneBreakout.enabled: true`) this list is replaced by:
 the forced time exit (#1, always) plus only the enabled `coneBreakout` toggles —

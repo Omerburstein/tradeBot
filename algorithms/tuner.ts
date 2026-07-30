@@ -147,12 +147,25 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   // gexAutoExit: { min: 0, max: 1, integer: true },
 
   // Stats.
-  zScoreLookback: { min: 8, max: 40, integer: true },
+  // zScoreLookbackMin is deliberately NOT searched: it is pinned at
+  // DEFAULT_CONFIG's 180 wall-clock minutes by request. It used to be swept as a
+  // snapshot COUNT and settled at its MIN bound (8) in the last two tunes — i.e.
+  // an 80-minute scale window at the 10-min cadence — which makes the normalizer
+  // track the signal so closely that most readings collapse toward ~1.0. Fixing
+  // it also returns one dimension to the (badly over-parameterized) search.
 
   // ── Risk (uncomment to co-tune money management) ──
   // 'risk.stopLossPoints': { min: 5, max: 20 },
   // 'risk.trailingStopActivation': { min: 3, max: 10 },
   // 'risk.trailingStopDistance': { min: 3, max: 12 },
+  // Time-decay of the exit distances (fraction of the ORIGINAL distance given up
+  // per hour held; 0 = fixed distance). Deliberately NOT searched yet — the
+  // DEFAULT_CONFIG values are meant to be A/B'd by hand against the existing
+  // tuned models first, since decay trades win RATE against average win SIZE and
+  // a pure-PnL objective may push it to an extreme in-sample.
+  // 'risk.takeProfitDecayPerHour': { min: 0, max: 0.8 },
+  // 'risk.takeProfitFloorPoints': { min: 3, max: 15 },
+  // 'risk.stopLossDecayPerHour': { min: 0, max: 0.8 },
 };
 
 /** Weight paths that get re-normalized to sum to 1 after sampling. */

@@ -249,7 +249,9 @@ Baseline mapping at `p = 1` (pure log):
 | normalized (p=1) | 0.53 | 1.00 | 1.58 | 2.32 | 3.46 | 3.50 (clamped) |
 
 - **Rolling, same-day window.** The history is the `SignalGenerator`'s per-day
-  `scoreHistory`, sliced to the last `zScoreLookback` (**20**) snapshots. A fresh
+  `scoreHistory`, filtered to the entries whose own instant falls within the last
+  `zScoreLookbackMin` (**180**) minutes — a wall-clock window, not a fixed count
+  of snapshots, so it means the same physical memory at any feed cadence. A fresh
   generator is created for every trading day, so the scale is **always** from
   the same day — never across a day boundary. (Do not feed a cross-day history.)
 - **Cold start.** With fewer than 3 samples there is no reliable scale, so the
@@ -305,7 +307,7 @@ The composite is a **conviction gate**, not a standalone trigger:
 | `positionsGammaGate` | 0.30 | min gamma strength for positions to count |
 | `zClamp` | 3.5 | per-factor / composite clamp (backstop; binds past ~10.3× typical) |
 | `strikeWindow` | 120 | ± SPX pts around spot considered |
-| `zScoreLookback` | 20 | trailing same-day snapshots defining each factor's scale |
+| `zScoreLookbackMin` | 180 | trailing same-day WALL-CLOCK MINUTES defining each factor's scale |
 
 All are tuned via backtest (`npm run tune`); treat the defaults as a starting
 point, not gospel.
