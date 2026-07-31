@@ -404,14 +404,27 @@ export class SignalGenerator {
       return this.checkBreakoutEntries(score, cone, snapshot);
     }
 
-    // 5-min candle gate: cone-driven entries are decided on the ET-aligned 5-min
-    // close (based on the previous 5-min tick), never on an intra-candle price
-    // tick. Between closes the cone holds its state, so hold here too — the
-    // matching cone re-entry exit likewise only fires on a confirmed close.
-    if (!cone.atCandleClose) {
-      return this.makeSignal('hold', score, cone, snapshot, 'low',
-        'no entry: awaiting 5-min candle close');
-    }
+    // ── 5-MIN GATE: SCOPED TO CONE-DRIVEN ENTRIES ONLY ──
+    // The 5-minute rule governs the CONE, not entry timing as such. It applies to
+    // the two branches below that trade OFF the cone — above-cone longs and
+    // below-cone shorts, in both directions of confirmation (inside→outside on a
+    // breakout, outside→inside on a return) — and NOT to the inside-cone branch,
+    // which is a pure score decision with no cone event in it.
+    //
+    // Why the cone branches still need it even though `ConeTracker` already pins
+    // state and nulls `crossed` between closes: without it the algo may open a
+    // breakout trade deep into an ALREADY-HELD state, i.e. chase a move that has
+    // been running for minutes, instead of taking it at the confirmation that
+    // justified it. Measured on the 44-day 1-min staging range, dropping the gate
+    // here took the same config from 44 trades / +$2,750 to 63 trades / −$862
+    // (win 56.8% → 39.7%), and tightening entryThreshold did not recover it.
+    //
+    // What this deliberately does NOT do is limit the algo to one decision every
+    // 5 minutes: inside-cone entries below are evaluated on EVERY minute of the
+    // 1-min feed. The cone-breach EXIT needs no gate either — it triggers on
+    // `cone.state !== cone.previousState`, and those are pinned equal on held
+    // ticks, so it can only ever fire on a real close transition.
+    const coneConfirmed = cone.atCandleClose;
 
     // Entry threshold tests gate on the TIME-SMOOTHED composite (an EWMA over the
     // last few minutes, entrySignalHalfLifeMin) so a one-bar gamma spike can't open
@@ -429,6 +442,10 @@ export class SignalGenerator {
     const gz = score.gexZ.toFixed(2);
 
     if (cone.state === 'above') {
+      if (!coneConfirmed) {
+        return this.makeSignal('hold', score, cone, snapshot, 'low',
+          'above cone: awaiting 5-min cone confirmation');
+      }
       // Above the cone → long only, and only when gamma also points up.
       if (score.gexZ > 0) {
         const bonus = cone.crossed === 'up' ? config.conePassBonus : 0;
@@ -446,6 +463,10 @@ export class SignalGenerator {
     }
 
     if (cone.state === 'below') {
+      if (!coneConfirmed) {
+        return this.makeSignal('hold', score, cone, snapshot, 'low',
+          'below cone: awaiting 5-min cone confirmation');
+      }
       // Below the cone → short only, and only when gamma also points down.
       if (score.gexZ < 0) {
         const bonus = cone.crossed === 'down' ? config.conePassBonus : 0;
