@@ -404,27 +404,32 @@ export class SignalGenerator {
       return this.checkBreakoutEntries(score, cone, snapshot);
     }
 
-    // ── 5-MIN GATE: SCOPED TO CONE-DRIVEN ENTRIES ONLY ──
-    // The 5-minute rule governs the CONE, not entry timing as such. It applies to
-    // the two branches below that trade OFF the cone — above-cone longs and
-    // below-cone shorts, in both directions of confirmation (inside→outside on a
-    // breakout, outside→inside on a return) — and NOT to the inside-cone branch,
-    // which is a pure score decision with no cone event in it.
+    // ── NO 5-MIN GATE ON ENTRY. The 5-minute rule scopes the CONE, not entry
+    // timing: it decides when the cone may change state and when a pass counts as
+    // fresh — never how often the algo is allowed to trade. Every branch below is
+    // therefore evaluated on EVERY minute of the 1-min feed.
     //
-    // Why the cone branches still need it even though `ConeTracker` already pins
-    // state and nulls `crossed` between closes: without it the algo may open a
-    // breakout trade deep into an ALREADY-HELD state, i.e. chase a move that has
-    // been running for minutes, instead of taking it at the confirmation that
-    // justified it. Measured on the 44-day 1-min staging range, dropping the gate
-    // here took the same config from 44 trades / +$2,750 to 63 trades / −$862
-    // (win 56.8% → 39.7%), and tightening entryThreshold did not recover it.
+    // The two places the 5-min rule genuinely binds both enforce themselves inside
+    // `ConeTracker`, so neither needs a check here:
+    //   - `cone.state` is only ever recomputed at an ET-aligned 5-min close;
+    //     between closes the tracker replays the last CONFIRMED candle. So a state
+    //     read on any minute is already a confirmed one.
+    //   - `cone.crossed` is forced to null on held ticks, so the `conePassBonus`
+    //     fresh-pass discount below is confined to real crossings automatically.
+    // The cone-breach EXIT is self-gating for the same reason: it triggers on
+    // `cone.state !== cone.previousState`, and the tracker pins those equal on
+    // held ticks, so it can only fire on a genuine close transition.
     //
-    // What this deliberately does NOT do is limit the algo to one decision every
-    // 5 minutes: inside-cone entries below are evaluated on EVERY minute of the
-    // 1-min feed. The cone-breach EXIT needs no gate either — it triggers on
-    // `cone.state !== cone.previousState`, and those are pinned equal on held
-    // ticks, so it can only ever fire on a real close transition.
-    const coneConfirmed = cone.atCandleClose;
+    // HISTORICAL NOTE — a `!cone.atCandleClose → hold` gate lived here (first for
+    // all entries, then scoped to the cone branches). Removing it lets a breakout
+    // be opened deep into an already-held state rather than at the confirmation
+    // that justified it, and on the 44-day 1-min staging range that measured
+    // WORSE in-sample: 63 trades / −$862 / PF 0.91 against 44 / +$2,750 / PF 1.55,
+    // and tightening entryThreshold did not recover it (0.7 → −$1,675). Removed
+    // deliberately anyway, by decision: entry cadence should not be a side effect
+    // of the cone's sampling rate. That in-sample comparison is 44–63 trades on a
+    // single range — if a walk-forward run reproduces the gap, reinstate the gate
+    // on the two cone branches rather than re-deriving this from scratch.
 
     // Entry threshold tests gate on the TIME-SMOOTHED composite (an EWMA over the
     // last few minutes, entrySignalHalfLifeMin) so a one-bar gamma spike can't open
@@ -442,10 +447,6 @@ export class SignalGenerator {
     const gz = score.gexZ.toFixed(2);
 
     if (cone.state === 'above') {
-      if (!coneConfirmed) {
-        return this.makeSignal('hold', score, cone, snapshot, 'low',
-          'above cone: awaiting 5-min cone confirmation');
-      }
       // Above the cone → long only, and only when gamma also points up.
       if (score.gexZ > 0) {
         const bonus = cone.crossed === 'up' ? config.conePassBonus : 0;
@@ -463,10 +464,6 @@ export class SignalGenerator {
     }
 
     if (cone.state === 'below') {
-      if (!coneConfirmed) {
-        return this.makeSignal('hold', score, cone, snapshot, 'low',
-          'below cone: awaiting 5-min cone confirmation');
-      }
       // Below the cone → short only, and only when gamma also points down.
       if (score.gexZ < 0) {
         const bonus = cone.crossed === 'down' ? config.conePassBonus : 0;
