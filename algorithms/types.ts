@@ -573,8 +573,14 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   positionsGammaGate: 0.30,
   zClamp: 3.5,
 
-  entryThreshold: 1.5,
-  strongEntryThreshold: 2.0,
+  // Calibrated to the composite's MEASURED range, not picked a priori: over the
+  // 44-day 1-min staging range |composite| runs p50=0.265 p90=0.610 p99=0.968
+  // max=1.513. The previous 1.5 / 2.0 sat at and above that ceiling, so a plain
+  // DEFAULT_CONFIG run took ZERO trades in 44 days — the strong bar in particular
+  // was unreachable, disabling inside-cone entries entirely. These sit near p85
+  // (entry) and p99 (strong), keeping the "strong is the stricter bar" ordering.
+  entryThreshold: 0.5,
+  strongEntryThreshold: 0.9,
   conePassBonus: 0.25,
   entrySignalHalfLifeMin: 3, // smooth the entry signal over ~a few min so a 1-bar spike can't enter
   exitFadeThreshold: 0.5, // fade-exit floor

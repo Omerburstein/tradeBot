@@ -124,8 +124,22 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
   zClamp: { min: 2.0, max: 5.0 },
 
   // Signal thresholds.
-  entryThreshold: { min: 0.8, max: 2.5 },
-  strongEntryThreshold: { min: 1.5, max: 3.5 },
+  //
+  // BOUNDS ARE CALIBRATED TO THE COMPOSITE'S MEASURED RANGE. Over the 44-day
+  // 1-min staging range (17,089 slots) |composite| runs:
+  //     p50 = 0.265   p90 = 0.610   p99 = 0.968   max = 1.513
+  // The old floors (0.8 / 1.5) sat at ≈p97 and at the single largest reading ever
+  // observed, so most of each range was unreachable and the tuner pinned
+  // entryThreshold to its MIN in both saved models — the bound was binding, not
+  // chosen. strongEntryThreshold's old floor of 1.5 made inside-cone entries all
+  // but impossible, since the bar exceeded almost every composite the algo can
+  // produce. The floors below sit near p45 (entry) and p75 (strong) so the tuner
+  // can actually reach a trade-generating regime; strong stays above entry, which
+  // is the invariant that matters (no breakout to corroborate ⇒ stricter bar).
+  // RE-DERIVE THESE if the composite's scale changes (new factors, different
+  // normalization window) — they are empirical, not theoretical.
+  entryThreshold: { min: 0.2, max: 2.5 },
+  strongEntryThreshold: { min: 0.4, max: 3.5 },
   conePassBonus: { min: 0.0, max: 0.75 },
   // Wall-clock half-life (min) of the entry-signal EWMA (0 = off/instantaneous;
   // higher = more smoothing, later entries). Filters one-bar spikes, cadence-invariant.
@@ -187,7 +201,12 @@ export const FROZEN_PARAMS: Partial<Record<keyof AlgoConfig, number>> = {
   pDPositions: 0.7118878461245194,
   distanceWeightSpan: 2.0070431945600453,
   zClamp: 4.136436829932964,
-  strongEntryThreshold: 2.529692499488264,
+  // strongEntryThreshold was frozen here at 2.5297 (the old bestModel's value).
+  // UNFROZEN 2026-07-31: that bestModel was tuned on 10-min production data, and
+  // on the 1-min staging range the composite never exceeds 1.513 — so a 2.53 bar
+  // made inside-cone entries impossible rather than merely strict, and inside-cone
+  // is the only path whenever price sits within the cone. It is swept again
+  // (0.4–3.5) so the bar can settle somewhere the signal can actually reach.
   conePassBonus: 0.1338095230282378,
   reversalThreshold: 1.1900472858336397,
 };
