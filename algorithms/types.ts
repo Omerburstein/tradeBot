@@ -568,7 +568,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   pDPositions: 0.5,
   pDistance: 1.5,
   distanceWeightSpan: 2.0,
-  momentumHalfLifeMin: 10,
+  momentumHalfLifeMin: 3, // pinned at the low end of its tuned range (3–30) — fastest baseline
 
   positionsGammaGate: 0.30,
   zClamp: 3.5,
@@ -582,7 +582,7 @@ export const DEFAULT_CONFIG: AlgoConfig = {
   entryThreshold: 0.5,
   strongEntryThreshold: 0.9,
   conePassBonus: 0.25,
-  entrySignalHalfLifeMin: 3, // smooth the entry signal over ~a few min so a 1-bar spike can't enter
+  entrySignalHalfLifeMin: 0, // pinned at the low end of its tuned range (0–12) — smoothing OFF
   exitFadeThreshold: 0.5, // fade-exit floor
   exitFadeFraction: 0.35, // …but scale the fade bar to 35% of entry conviction so strong trades run
   reversalThreshold: 1.0,

@@ -45,7 +45,7 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `pDGamma` | `1.1` | Normalize-step exponent on the gamma-change factor |
 | `pPositions` | `0.5` | Normalize-step exponent on the positions factor (<1 saturates) |
 | `pDPositions` | `0.5` | Normalize-step exponent on the positions-change factor |
-| `momentumHalfLifeMin` | `10` | Half-life **in minutes** of the dGamma/dPositions baseline. Each rate of change is `current level − decayed baseline`: the current snapshot enters at full weight (a big last-minute move registers at once) while the baseline carries ~2–3 half-lives of history. Wall-clock, so it means the same at 1-min and 10-min cadence; cannot ramp. Replaces the old snapshot-counted `dMomentumDecay` EWMA. |
+| `momentumHalfLifeMin` | `3` *(pinned)* | Half-life **in minutes** of the dGamma/dPositions baseline. Each rate of change is `current level − decayed baseline`: the current snapshot enters at full weight (a big last-minute move registers at once) while the baseline carries ~2–3 half-lives of history. Wall-clock, so it means the same at 1-min and 10-min cadence; cannot ramp. Replaces the old snapshot-counted `dMomentumDecay` EWMA. |
 | `pDistance` | `1.5` | Exponent on strike distance in the distance-weight ramp |
 | `distanceWeightSpan` | `2.0` | Span of the distance-weight ramp |
 | `positionsGammaGate` | `0.30` | Min gamma strength (0–1) for a strike's positions to count |
@@ -57,6 +57,7 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `entryThreshold` | `1.5` | Composite z needed for an **outside-cone** (gamma-aligned breakout) entry |
 | `strongEntryThreshold` | `2.0` | Composite z needed for an **inside-cone** entry (higher bar) |
 | `conePassBonus` | `0.25` | Threshold discount on the **first** tick of a gamma-aligned cone pass — lowers the outside-cone bar to `entryThreshold − conePassBonus` for that tick. `0` disables it. |
+| `entrySignalHalfLifeMin` | `0` *(pinned)* | Half-life **in minutes** of the EWMA the entry gate reads. `0` = **smoothing off**, the gate sees the raw composite (so a one-bar gamma spike can enter). Raise above `0` to filter spikes. |
 | `exitFadeThreshold` | `0.5` | Directional z below which a position exits (fade) — only if `gexAutoExit` |
 | `reversalThreshold` | `1.0` | Opposing-direction z that forces an exit — only if `gexAutoExit` |
 | `gexAutoExit` | `true` | Master switch for the two GEX-driven exits above |

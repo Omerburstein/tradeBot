@@ -191,9 +191,12 @@ const WEIGHT_KEYS = ['wGex', 'wDGamma', 'wPositions', 'wDPositions'] as const;
  * They are pinned at the values of the current `bestModel` — the 2026-07-15 tune
  * that generalized to +$650 out-of-sample — NOT at DEFAULT_CONFIG, whose values
  * are unvetted. Only params that exist in that bestModel are frozen; newer knobs
- * it predates (pPositions, entrySignalHalfLifeMin, …) stay tunable rather than
- * be pinned at an arbitrary default. Re-derive these if bestModel changes
- * materially, or remove a key here to sweep it again.
+ * it predates (pPositions, …) stay tunable rather than be pinned at an arbitrary
+ * default. Re-derive these if bestModel changes materially, or remove a key here
+ * to sweep it again.
+ *
+ * The two half-lives are the exception to "pinned at bestModel": they are pinned
+ * at the LOW END of their own ranges by decision (see below), not at a tuned value.
  */
 export const FROZEN_PARAMS: Partial<Record<keyof AlgoConfig, number>> = {
   positiveGammaBias: 1.1607767980745605,
@@ -201,6 +204,15 @@ export const FROZEN_PARAMS: Partial<Record<keyof AlgoConfig, number>> = {
   pDPositions: 0.7118878461245194,
   distanceWeightSpan: 2.0070431945600453,
   zClamp: 4.136436829932964,
+  // Both memory half-lives pinned at the minimum of their search ranges, matching
+  // DEFAULT_CONFIG. The last walk-forward tune had already driven both to exactly
+  // these values on its own (momentum 3, entry-signal 0), so freezing them costs
+  // no reachable optimum and buys back two search dimensions on a trade sample far
+  // too small to support them. Note entrySignalHalfLifeMin: 0 disables the entry
+  // EWMA entirely — the entry gate reads the raw composite, so a one-bar gamma
+  // spike CAN open a trade again. Raise it above 0 to restore the filter.
+  momentumHalfLifeMin: 3,
+  entrySignalHalfLifeMin: 0,
   // strongEntryThreshold was frozen here at 2.5297 (the old bestModel's value).
   // UNFROZEN 2026-07-31: that bestModel was tuned on 10-min production data, and
   // on the 1-min staging range the composite never exceeds 1.513 — so a 2.53 bar
