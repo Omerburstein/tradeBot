@@ -51,7 +51,12 @@ function check(label: string, cond: boolean, detail?: string): void {
 const SPOT = 6000;
 
 function strike(k: number, gamma: number): StrikeData {
-  return { strike: k, gamma, charm: 0, vanna: 0, positions: 0 };
+  return { strike: k, gamma, charm: 0, vanna: 0, positions: 0, callQty: 0, putQty: 0 };
+}
+
+/** A strike carrying position legs — for the §6 positions assertions. */
+function posStrike(k: number, callQty: number, putQty: number, gamma = 100): StrikeData {
+  return { strike: k, gamma, charm: 0, vanna: 0, positions: callQty + putQty, callQty, putQty };
 }
 
 const SNAP_AT = '2026-05-21T18:50:00Z';
@@ -478,6 +483,139 @@ check(
     'gross-scale: one-sided net === gross',
     Math.abs(oneSided.gexRaw - oneSided.gexGross) < 1e-9,
     `net=${oneSided.gexRaw} gross=${oneSided.gexGross}`,
+  );
+}
+
+// ── 8. Positions: the leg/sign direction table ──
+// Direction comes from the LEG and the SIGN of its quantity, identically above
+// and below spot — NOT from the side of spot (which now only picks the ITM leg's
+// distance weight):
+//
+//              negative qty   positive qty
+//     puts       bearish        bullish
+//     calls      bullish        bearish
+//
+// Assertions read positionsRaw (pre-normalization) so they test the arithmetic
+// directly. Every strike carries gamma 100, the only gamma present, so it always
+// clears positionsGammaGate (a fraction of the window max).
+{
+  const posRaw = (k: number, callQty: number, putQty: number): number =>
+    computeScore(snap([posStrike(k, callQty, putQty)]), null, [], DEFAULT_CONFIG).positionsRaw;
+
+  const ABOVE = 6010;
+  const BELOW = 5990;
+
+  for (const [label, k] of [['above spot', ABOVE], ['below spot', BELOW]] as const) {
+    check(`positions ${label}: negative puts → bearish`, posRaw(k, 0, -500) < 0, `got ${posRaw(k, 0, -500)}`);
+    check(`positions ${label}: positive puts → bullish`, posRaw(k, 0, +500) > 0, `got ${posRaw(k, 0, +500)}`);
+    check(`positions ${label}: negative calls → bullish`, posRaw(k, -500, 0) > 0, `got ${posRaw(k, -500, 0)}`);
+    check(`positions ${label}: positive calls → bearish`, posRaw(k, +500, 0) < 0, `got ${posRaw(k, +500, 0)}`);
+  }
+
+  // Bullish and bearish CANCEL — the property the whole rule rests on. Within one
+  // strike: equal-and-opposite legs that happen to share a weight net to zero.
+  // Only calls are ITM below spot, so a strike below spot weights its put leg the
+  // same as a call leg above... simplest exact case is the ATM strike, where
+  // neither leg is ITM and both take w = 1.0.
+  check(
+    'positions: +500 puts and +500 calls at ATM cancel exactly (bullish vs bearish)',
+    Math.abs(posRaw(SPOT, +500, +500)) < 1e-9,
+    `got ${posRaw(SPOT, +500, +500)}`,
+  );
+  // Across strikes: a bullish strike and a mirror-image bearish strike net to zero.
+  // The mirror must match WEIGHTS, not just distance: puts are ITM above spot and
+  // calls are ITM below it, so the equidistant counterpart of a +500 put at ABOVE
+  // (bullish, ITM) is a +500 call at BELOW (bearish, ITM) — same weight, opposite
+  // sign. A +500 put and a −500 put equidistant either side would NOT cancel:
+  // one leg is ITM and decaying, the other OTM and ramping.
+  const mirrored = computeScore(
+    snap([posStrike(ABOVE, 0, +500), posStrike(BELOW, +500, 0)]),
+    null,
+    [],
+    DEFAULT_CONFIG,
+  );
+  check(
+    'positions: mirrored bullish/bearish strikes cancel in the NET',
+    Math.abs(mirrored.positionsRaw) < 1e-9,
+    `got ${mirrored.positionsRaw}`,
+  );
+  check(
+    'positions: …but the same snapshot keeps a non-zero GROSS scale',
+    mirrored.positionsGross > 0,
+    `got ${mirrored.positionsGross}`,
+  );
+
+  // Side of spot does NOT flip direction (the old behaviour did exactly that).
+  check(
+    'positions: identical legs above and below spot agree in SIGN',
+    Math.sign(posRaw(ABOVE, 0, +500)) === Math.sign(posRaw(BELOW, 0, +500)),
+    `above=${posRaw(ABOVE, 0, +500)} below=${posRaw(BELOW, 0, +500)}`,
+  );
+
+  // ITM decays, OTM ramps. Puts are ITM above spot, so a put 40pt above spot is
+  // worth LESS than the same put 10pt above; the same put BELOW spot is OTM, so
+  // further is worth MORE. Same leg, same quantity, opposite distance response.
+  const itmNear = posRaw(SPOT + 10, 0, +500);
+  const itmFar = posRaw(SPOT + 40, 0, +500);
+  check('positions: ITM put decays with distance (40pt < 10pt)', itmFar < itmNear, `near=${itmNear} far=${itmFar}`);
+  const otmNear = posRaw(SPOT - 10, 0, +500);
+  const otmFar = posRaw(SPOT - 40, 0, +500);
+  check('positions: OTM put ramps with distance (40pt > 10pt)', otmFar > otmNear, `near=${otmNear} far=${otmFar}`);
+  check('positions: an ITM leg is always weaker than the same OTM leg', itmNear < otmNear, `itm=${itmNear} otm=${otmNear}`);
+
+  // ATM contributes (the old `sign === 0` zeroed it entirely).
+  check('positions: the ATM strike contributes', Math.abs(posRaw(SPOT, 0, +500)) > 0, `got ${posRaw(SPOT, 0, +500)}`);
+}
+
+// ── 9. dPositions: plain signed difference, correct at every sign ──
+// The regression signedDelta would cause: a market maker DEEPENING a short put
+// (−500 → −800) is growing a bearish position. signedDelta is sign-blind and
+// reads that as "magnitude building" (+300 → bullish); the plain difference used
+// by decayedDiff returns −300 → bearish, which is correct. And covering that
+// short (−500 → −200) is a bullish change, not a bearish one.
+{
+  const dPosRaw = (
+    prevCall: number, prevPut: number,
+    currCall: number, currPut: number,
+    k = 6010,
+  ): number =>
+    computeScore(
+      snap([posStrike(k, currCall, currPut)]),
+      snap([posStrike(k, prevCall, prevPut)]),
+      [],
+      DEFAULT_CONFIG,
+    ).dPositionsRaw;
+
+  check(
+    'dPositions: deepening a short put (−500→−800) → bearish',
+    dPosRaw(0, -500, 0, -800) < 0,
+    `got ${dPosRaw(0, -500, 0, -800)}`,
+  );
+  check(
+    'dPositions: covering a short put (−500→−200) → bullish',
+    dPosRaw(0, -500, 0, -200) > 0,
+    `got ${dPosRaw(0, -500, 0, -200)}`,
+  );
+  check(
+    'dPositions: growing a long put (+100→+150) → bullish',
+    dPosRaw(0, 100, 0, 150) > 0,
+    `got ${dPosRaw(0, 100, 0, 150)}`,
+  );
+  check(
+    'dPositions: a put flipping +100→−50 → bearish, and larger than the +100→+50 decay',
+    dPosRaw(0, 100, 0, -50) < 0 && Math.abs(dPosRaw(0, 100, 0, -50)) > Math.abs(dPosRaw(0, 100, 0, 50)),
+    `flip=${dPosRaw(0, 100, 0, -50)} decay=${dPosRaw(0, 100, 0, 50)}`,
+  );
+  // Calls invert, exactly as at the level.
+  check(
+    'dPositions: growing a long call (+100→+150) → bearish',
+    dPosRaw(100, 0, 150, 0) < 0,
+    `got ${dPosRaw(100, 0, 150, 0)}`,
+  );
+  check(
+    'dPositions: unchanged legs → zero',
+    Math.abs(dPosRaw(300, -200, 300, -200)) < 1e-9,
+    `got ${dPosRaw(300, -200, 300, -200)}`,
   );
 }
 

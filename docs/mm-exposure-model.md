@@ -111,7 +111,7 @@ parameter tuning has felt like it plateaus.
 | A | Gamma sign collapsed to `abs()` + 1.1 bias | `score-engine.ts:216-218` | Pinning and accelerating strikes score identically |
 | B | No `netGex` / `flipStrike` / regime | absent | Model cannot express the regime interaction at all |
 | C | Distance weight rises with distance (edge = 3× ATM) | `score-engine.ts:205` | Score dominated by strikes price may never touch; ATM strikes — where hedging actually fires now — count least |
-| D | `positions = call_qty + put_qty`, then `abs()` | `types.ts:32`, `score-engine.ts:236` | DB stores the split; two sign-collapses discard it entirely |
+| D | ~~`positions = call_qty + put_qty`, then `abs()`~~ **CLOSED 2026-07-31** | `score-engine.ts` → `legContribution` | Both sign-collapses removed; the legs now carry direction via the leg/sign table — see §3.7 |
 | E | Charm captured, unused | excluded by design | 0DTE charm is large and *time-conditioned*; a linear 5th factor would test as noise even if the effect is real |
 | F | Vanna captured, unusable | no IV series stored | Vanna is a *sensitivity*; without ΔIV it has no driver |
 | G | Fixed `stopLossPoints: 10`, fixed `strikeWindow: 120` | `types.ts:599`, `:~` | Both are absolute point values in a market whose daily range varies 3×; the cone already gives the scale |
@@ -237,13 +237,27 @@ resolution. Starting the capture is cheap (`^VIX` through the same
 `backfill-prices.ts` / `live-prices.ts` path as `^GSPC` and `ES=F`) and is worth
 doing **before** deciding whether vanna is useful, not after.
 
-### 3.7 Keep the call/put split (gap D)
+### 3.7 Keep the call/put split (gap D) — ✅ DONE 2026-07-31
 
-`positions` collapses `call_qty + put_qty` and then takes `abs()`. Gamma sign is
-genuinely put/call-agnostic (§1), so this costs nothing *for gamma* — but the
-positions factor is a separate read on dealer exposure, and there the split
-carries delta and charm information that the sum destroys. The DB already has
-both columns; carry them through `StrikeData` and test a signed variant.
+`positions` used to collapse `call_qty + put_qty` and then take `abs()`. Gamma
+sign is genuinely put/call-agnostic (§1), so that cost nothing *for gamma* — but
+the positions factor is a separate read on dealer exposure, and there the split
+carries delta and charm information the sum destroys.
+
+**Implemented.** `StrikeData` now carries `callQty`/`putQty` separately and both
+position factors score them through `legContribution` in `score-engine.ts`
+(algorithm role R7). Direction comes from the leg and the sign of its quantity —
+`+putQty − callQty`, the same rule above and below spot — so bullish and bearish
+positioning cancels instead of both being read as pressure. Side of spot survives
+only as the in-the-money test: the ITM leg (puts above spot, calls below) decays
+with distance at `0.5/dWeight` while the OTM leg keeps the outward ramp. The
+rate-of-change factor runs per-leg baselines and a plain signed difference, since
+`signedDelta` is sign-blind and would invert every negative leg. Full derivation
+in [composite-score.md §3.3–3.4](composite-score.md).
+
+Note this partially undercuts gap C for positions: ATM position strikes now count
+(the old `sign = 0` zeroed them) and deep-ITM legs are damped. Gap C still stands
+for the two gamma factors.
 
 ---
 

@@ -29,6 +29,16 @@ import type { ConeEndpoints, Snapshot, StrikeData } from './types.js';
 const FALLBACK_GREEK_CADENCE_MINUTES = 10;
 
 /**
+ * The two signed market-maker position legs at one strike, kept apart on the way
+ * out of the `positions` table. See {@link loadPositions} for why they are never
+ * summed before reaching the score engine.
+ */
+interface PositionLegs {
+  call: number;
+  put: number;
+}
+
+/**
  * How often the algo re-decides entry/exit. The Greeks refresh at the data's own
  * cadence (1-min live feed, 10-min historical backfill), but spot/ES prices can
  * exist at finer granularity, so we insert an intermediate price tick at this
@@ -103,7 +113,7 @@ export async function loadDay(
     const strike = Number(row.strike);
     let sd = group.strikes.get(strike);
     if (!sd) {
-      sd = { strike, gamma: 0, charm: 0, vanna: 0, positions: 0 };
+      sd = { strike, gamma: 0, charm: 0, vanna: 0, positions: 0, callQty: 0, putQty: 0 };
       group.strikes.set(strike, sd);
     }
 
@@ -115,12 +125,21 @@ export async function loadDay(
   // joined on the exact captured_at + strike. Strikes that appear only in the
   // positions table (no gamma/charm/vanna) are ignored — the algo scores the
   // Greek strikes and positions only add a directional weight to those.
+  //
+  // BOTH LEGS are carried separately: a call and a put of the same sign point in
+  // OPPOSITE directions (see the leg/sign table in score-engine.ts), so the sum
+  // alone cannot be scored. `positions` (the sum) is retained for the coverage
+  // gate only — see {@link StrikeData.positions}.
   for (const [capturedAt, group] of byTime) {
     const perStrike = positionRows.get(capturedAt);
     if (!perStrike) continue;
     for (const sd of group.strikes.values()) {
-      const net = perStrike.get(sd.strike!);
-      if (net !== undefined) sd.positions = net;
+      const legs = perStrike.get(sd.strike!);
+      if (legs !== undefined) {
+        sd.callQty = legs.call;
+        sd.putQty = legs.put;
+        sd.positions = legs.call + legs.put;
+      }
     }
   }
 
@@ -394,20 +413,25 @@ async function loadEsPrices(date: string): Promise<Map<string, number>> {
 
 /**
  * Load net MM positions for a day from the dedicated `positions` table (keyed
- * by captured_at + expiry + strike, with call_qty/put_qty). Net contracts per
- * strike = call_qty + put_qty, matching {@link StrikeData.positions}.
+ * by captured_at + expiry + strike, with call_qty/put_qty).
+ *
+ * The two legs are returned SEPARATELY, not summed: under the leg/sign table in
+ * score-engine.ts a positive call is bearish while a positive put is bullish, so
+ * `call_qty + put_qty` nets two opposite-pointing quantities into a number with
+ * no directional meaning. The caller derives `StrikeData.positions` (the sum)
+ * from these for the coverage gate only.
  *
  * 0DTE only — same expiry + ET-session predicate as loadDay, so positions join
  * the Greek strikes on the exact captured_at instant. Returns both the per-slot
- * per-strike net map AND the set of slots that carried ANY positions row (the
+ * per-strike leg map AND the set of slots that carried ANY positions row (the
  * "positions present" signal for the completeness gate, TODO #6). Returns empty
  * structures if the table doesn't exist yet.
  */
 async function loadPositions(
   date: string,
-): Promise<{ net: Map<string, Map<number, number>>; slots: Set<string> }> {
+): Promise<{ net: Map<string, Map<number, PositionLegs>>; slots: Set<string> }> {
   const sql = getDb();
-  const net = new Map<string, Map<number, number>>();
+  const net = new Map<string, Map<number, PositionLegs>>();
   const slots = new Set<string>();
 
   try {
@@ -428,7 +452,10 @@ async function loadPositions(
         perStrike = new Map();
         net.set(capturedAt, perStrike);
       }
-      perStrike.set(Number(row.strike), Number(row.call_qty) + Number(row.put_qty));
+      perStrike.set(Number(row.strike), {
+        call: Number(row.call_qty),
+        put: Number(row.put_qty),
+      });
     }
   } catch {
     // positions table may not exist yet — positions simply unavailable.

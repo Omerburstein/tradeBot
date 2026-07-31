@@ -82,7 +82,10 @@ function derivePresence(snap: Snapshot): SourcePresence {
     spx: Number.isFinite(snap.spot),
     es: snap.es != null && Number.isFinite(snap.es),
     gex: snap.strikes.some((s) => s.gamma !== 0),
-    positions: snap.strikes.some((s) => s.positions !== 0),
+    // Test the LEGS, not their sum: a strike holding +500 calls against −500 puts
+    // sums to 0 and would read as "no positions data" even though both legs are
+    // present. Only genuinely empty legs count as absent.
+    positions: snap.strikes.some((s) => s.callQty !== 0 || s.putQty !== 0),
   };
 }
 

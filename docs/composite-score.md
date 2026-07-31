@@ -36,22 +36,27 @@ what the trade log prints as `gex= dGam= pos= dPos=`; they sum to the composite.
 
 ---
 
-## 2. The per-strike building blocks (shared by all four factors)
+## 2. The per-strike building blocks
 
 Every factor is a sum over the strikes within `strikeWindow` (±120 pts) of spot.
-Three per-strike quantities shape every term:
+Three per-strike quantities shape the terms:
 
-### Direction (`sign`)
+### Direction (`sign`) — the two GAMMA factors only
 ```
 sign = +1  if strike > spot        (above spot → upside/long pressure)
        -1  if strike < spot        (below spot → downside/short pressure)
         0  at the money
 ```
-Levels are always taken as an **absolute magnitude** and then given direction by
+Gamma levels are taken as an **absolute magnitude** and then given direction by
 `sign`. There is **no netting** between an above-spot strike and a below-spot
 strike of opposite Greek sign — each side pushes the score its own way. This is
 deliberate: a big gamma wall *above* spot is upside fuel regardless of whether
 its raw gamma is signed + or −.
+
+> **The two POSITION factors do not use `sign` at all.** Their direction comes
+> from the leg and the sign of the quantity (§3.3), which is the same rule above
+> and below spot — so a bullish strike and a bearish strike *do* net against each
+> other. For positions, side of spot only decides which leg is in the money.
 
 ### Distance weight (`dWeight`) — farther strikes count *more*
 ```
@@ -62,6 +67,12 @@ strikes weigh `1.0×`, the edge of the ±120 window weighs up to `3.0×`, curved
 the ramp is gentle near spot and steep at the edges. Rationale: ATM gamma pins
 price (little directional information), while a heavy wall out at the edge is
 what price has to *break through* — that is where the directional edge lives.
+
+**One exception:** the *in-the-money* position leg decays instead of ramping —
+`w_ITM = 0.5 / dWeight` — because an ITM contract is a weaker expression of a
+directional view the deeper it goes. That is the only place the outward ramp is
+inverted; gamma, dGamma and the out-of-the-money position leg all use `dWeight`
+as written above. See §3.3.
 
 ### Gamma gate (`gammaStrength`) — positions only count near real gamma
 ```
@@ -75,8 +86,9 @@ to hedge there — so they are dropped entirely.
 
 ### Non-linear shaping (exponents, applied at normalize)
 Every raw factor is aggregated **linearly** in the per-strike data (R6) — the
-per-strike term is just `|value|` times the geometric weights (`sign`, `dWeight`,
-and `gammaBias` on gamma). No per-strike power is applied.
+per-strike term is just the value times the geometric weights (`sign`, `dWeight`,
+`gammaBias` on gamma, the ITM/OTM weights on positions), with gamma's value first
+wrapped in `| |`. No per-strike power is applied.
 
 Each factor's non-linear shaping instead lives at the **normalize step** (§4),
 applied **once, to the whole aggregated factor's ratio, inside the log** (R5):
@@ -137,35 +149,86 @@ baseline  = ρ·baseline + (1 − ρ)·gamma,   ρ = 0.5^(Δt_min / momentumHalf
 
 ### 3.3 Net MM positions  →  `positionsZ` (weight `wPositions`, default **0.18**)
 ```
-positionsRaw += |positions| · sign · dWeight   (gated; shaped at normalize by pPositions)
+positionsRaw += putQty · w_put  −  callQty · w_call   (gated; shaped at normalize by pPositions)
 ```
 - **Represents:** net market-maker contracts stacked at each strike — a second,
   independent read on where dealers are exposed.
 - **Why chosen:** it confirms or tempers the gamma read; when big positions sit
   on the same gamma walls, conviction rises. Weighted below gamma (0.18) because
   it is noisier and only meaningful near gamma.
-- **How computed:** **raw** absolute position size (linear), counted only where
+
+**Direction — the leg/sign table.** Unlike gamma, this factor does **not** take
+its direction from the side of spot. It comes from the leg and the sign of its
+quantity, identically above and below spot:
+
+|         | negative qty | positive qty |
+|---------|--------------|--------------|
+| puts    | bearish      | bullish      |
+| calls   | bullish      | bearish      |
+
+which is exactly `+putQty − callQty`. The two legs are therefore read separately —
+`call_qty + put_qty` would net two opposite-pointing quantities into a number with
+no directional meaning — and nothing is `abs`-wrapped, so **bullish and bearish
+cancel**: within a strike (a bullish put against a bearish call) and across
+strikes alike. `StrikeData.positions` still holds the sum, but only as a
+data-presence signal for the coverage gate; it is never scored.
+
+**Distance — ITM decays, OTM ramps.** Side of spot survives only as the
+in-the-money test. Puts are ITM above spot, calls are ITM below it, and an ITM
+contract is a weaker expression of a directional view — weaker still the deeper it
+goes, which is the opposite of the outward ramp everything else uses (§2):
+
+```
+w_OTM = dWeight                       // 1 + span·(d/W)^pDistance   — rises
+w_ITM = ITM_POSITION_WEIGHT / dWeight // reciprocal mirror          — falls
+ITM_POSITION_WEIGHT = 0.5             // fixed constant, not a tuner knob
+```
+
+The ITM curve is the OTM ramp inverted, so it reuses the already-tuned
+`distanceWeightSpan`/`pDistance` and adds no free parameter to the search. At
+exactly ATM neither leg is in the money, both take `w_OTM` (= 1.0), and the strike
+contributes at full weight.
+
+- **How computed:** **raw** signed leg quantities (linear), counted only where
   the strike's gamma clears the `positionsGammaGate` (a boolean gate — gamma is a
-  threshold here, not a multiplier), directioned and distance-weighted. The whole
-  factor is then shaped at normalize by `pPositions = 0.5` (saturating — a monster
-  print is tamed at the aggregate scale rather than strike-by-strike, §4).
+  threshold here, not a multiplier), combined by the table above and
+  distance-weighted per leg. The whole factor is then shaped at normalize by
+  `pPositions = 0.5` (saturating — a monster print is tamed at the aggregate scale
+  rather than strike-by-strike, §4).
 
 ### 3.4 dPositions/dt — positions momentum  →  `dPositionsZ` (weight `wDPositions`, default **0.12**)
 ```
-dPositionsRaw += signedDelta(|positions|, baseline) · sign · dWeight  (gated; shaped at normalize by pDPositions)
-baseline     = ρ·baseline + (1 − ρ)·positions        // same ρ / half-life as dGamma, per strike
+dCall = callQty − baseline_call        // plain signed difference, per leg
+dPut  = putQty  − baseline_put
+dPositionsRaw += dPut · w_put  −  dCall · w_call   (gated; shaped at normalize by pDPositions)
+baseline = ρ·baseline + (1 − ρ)·qty    // same ρ / half-life as dGamma, per strike PER LEG
 ```
 - **Represents:** dealers actively adding or pulling positions at a strike — the
   freshest, fastest-moving read on positioning.
 - **Why chosen:** earliest warning that positioning is changing; smallest weight
   (0.12) because it is the noisiest of the four.
-- **How computed:** identical machinery to dGamma (§3.2) — current position
-  **magnitude** vs. a per-strike **time-decayed baseline** (same
-  `momentumHalfLifeMin`), current level at full weight — under the **same boolean
-  gamma gate** as the level, directioned and distance-weighted, then shaped at
-  normalize by `pDPositions`. The positions baseline is kept warm for every
-  in-window strike so a strike crossing the gate mid-day has a settled baseline;
-  only a gated strike's delta enters the score.
+- **How computed:** each **leg** moves against its **own** time-decayed baseline
+  (same `momentumHalfLifeMin` as dGamma, current level at full weight), and the two
+  deltas are then combined by the **same leg/sign rule and per-leg distance weights
+  as the level** (§3.3) — so a change is bullish or bearish for exactly the reason
+  the level would be. Under the **same boolean gamma gate**, then shaped at
+  normalize by `pDPositions`. Both baselines are kept warm for every in-window
+  strike so a strike crossing the gate mid-day has a settled baseline; only a gated
+  strike's delta enters the score.
+
+> **Why a plain difference here, not dGamma's `signedDelta`.** `signedDelta` is
+> sign-blind by construction — right for gamma, whose direction comes from the side
+> of spot, and wrong here, where direction comes from the quantity's own sign. A
+> dealer shorting more puts (−500 → −800) is *deepening a bearish position*;
+> `signedDelta` sees the magnitude building and returns +300, scoring it bullish.
+> The plain difference returns −300. It loses nothing on flips either: differencing
+> an already-signed quantity travels the full trip through zero on its own
+> (+100 → −50 gives −150, not −50).
+>
+> The baselines also hold **raw unweighted** quantities, with the ITM/OTM weights
+> applied *after* the delta. A baseline of weighted values would read a strike
+> flipping ITM↔OTM as spot drifts across it as an enormous phantom position change,
+> when nothing had moved at all.
 
 ---
 

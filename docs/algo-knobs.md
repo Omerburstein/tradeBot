@@ -47,8 +47,9 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `pDPositions` | `0.5` | Normalize-step exponent on the positions-change factor |
 | `momentumHalfLifeMin` | `3` *(pinned)* | Half-life **in minutes** of the dGamma/dPositions baseline. Each rate of change is `current level − decayed baseline`: the current snapshot enters at full weight (a big last-minute move registers at once) while the baseline carries ~2–3 half-lives of history. Wall-clock, so it means the same at 1-min and 10-min cadence; cannot ramp. Replaces the old snapshot-counted `dMomentumDecay` EWMA. |
 | `pDistance` | `1.5` | Exponent on strike distance in the distance-weight ramp |
-| `distanceWeightSpan` | `2.0` | Span of the distance-weight ramp |
+| `distanceWeightSpan` | `2.0` | Span of the distance-weight ramp. Applies as written to gamma, dGamma and the **out-of-the-money** position leg; the **in-the-money** leg (puts above spot, calls below) uses the reciprocal `0.5/dWeight` and decays instead — see composite-score.md §3.3 |
 | `positionsGammaGate` | `0.30` | Min gamma strength (0–1) for a strike's positions to count |
+| `ITM_POSITION_WEIGHT` | `0.5` *(constant)* | Flat damping on the in-the-money position leg, on top of its distance decay. A `score-engine.ts` module constant, deliberately **not** tuner-exposed — it encodes a structural property of the leg, not a free parameter |
 | `zClamp` | `3.5` | Hard cap on each normalized factor (and the composite). Backstop — binds only past ~10.3× typical magnitude |
 
 ### Entry / exit thresholds (`DEFAULT_CONFIG`)

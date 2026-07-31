@@ -10,11 +10,14 @@
  *   2. Net MM positions — directional positioning pressure per strike, gated
  *      by gamma: a strike's positions count only where its gamma is strong at
  *      the SAME strike (a THRESHOLD, not a multiplier — once the gate passes,
- *      positions enter at full magnitude with no gamma-strength weighting). The
- *      positions LEVEL is taken as a RAW absolute magnitude (no netting, no
- *      per-strike power) — exactly like gamma's level; the only compression is
- *      the log applied at the normalize step. Direction comes from position vs
- *      spot (no positive bias — gamma only).
+ *      positions enter at full magnitude with no gamma-strength weighting).
+ *
+ *      DIRECTION COMES FROM THE LEG AND THE SIGN OF ITS QUANTITY, not from the
+ *      strike's side of spot (see {@link legContribution}). Puts and calls of the
+ *      same sign point OPPOSITE ways, so the two legs are read separately and
+ *      bullish and bearish cancel — within a strike and across strikes alike.
+ *      Side of spot survives only as the ITM/OTM test that picks each leg's
+ *      distance weight.
  *   3. dGamma/dt — rate of change of gamma, measured as the current gamma level
  *      against a TIME-DECAYED BASELINE of that strike's recent levels (not just
  *      the immediately previous snapshot). Its SIZE is the distance the value
@@ -23,9 +26,10 @@
  *      bleeding, including a negative-gamma strike shrinking toward zero. See
  *      {@link signedDelta}. Then pointed by the strike's side of spot.
  *   4. dPositions/dt — rate of change of net MM positions (same gamma gate —
- *      threshold only, no gamma-strength weighting), against its own decayed
- *      positions baseline, via the same {@link signedDelta}: flip-aware size,
- *      build-vs-bleed sign. Then pointed by the side of spot.
+ *      threshold only, no gamma-strength weighting). Each LEG moves against its
+ *      own decayed baseline, as a PLAIN SIGNED DIFFERENCE (not {@link signedDelta}
+ *      — see {@link decayedDiff}), and the two are then combined by the same
+ *      {@link legContribution} rule as the level.
  *
  *      The baseline is a per-strike EWMA in WALL-CLOCK time (half-life
  *      `momentumHalfLifeMin`): the current snapshot enters at full weight, so a
@@ -34,7 +38,9 @@
  *      one-slot blip reverts as the baseline catches up. See {@link MomentumState}
  *      and {@link decayedDelta}. It is cadence-invariant (ρ is derived from the
  *      real Δt) and cannot ramp (a bounded difference of two levels).
- *   5. Distance weighting — further strikes contribute MORE score
+ *   5. Distance weighting — further strikes contribute MORE score. EXCEPT the
+ *      in-the-money position leg, which decays the other way — see
+ *      {@link legContribution}.
  *   6. Cone — handled separately in cone.ts (trigger gate, not a score factor)
  *
  * Gamma carries the most weight. Charm and vanna are intentionally excluded
@@ -79,8 +85,22 @@ import type {
 
 /** Fresh, empty day-scoped {@link MomentumState}. One per SignalGenerator. */
 export function createMomentumState(): MomentumState {
-  return { gamma: new Map(), positions: new Map(), lastAt: null };
+  return {
+    gamma: new Map(),
+    positionsCall: new Map(),
+    positionsPut: new Map(),
+    lastAt: null,
+  };
 }
+
+/**
+ * Flat damping applied to the IN-THE-MONEY position leg, on top of its distance
+ * decay: an ITM leg is worth half an OTM leg at the same distance. Deliberately a
+ * fixed constant rather than a tuner knob — it encodes a structural property of
+ * the leg (an ITM contract is a weaker expression of a directional view), not a
+ * free parameter to fit. See {@link legContribution}.
+ */
+const ITM_POSITION_WEIGHT = 0.5;
 
 /** Fallback half-life (min) if a config predates `momentumHalfLifeMin`. */
 const DEFAULT_MOMENTUM_HALF_LIFE_MIN = 10;
@@ -222,19 +242,20 @@ export function computeScore(
     // window max (|gamma| ≥ positionsGammaGate·maxAbsGamma); gamma is a pure
     // threshold here — once the gate passes, the strike's positions enter at
     // full magnitude, with no gamma-strength multiplier folded into the value.
-    // The per-strike magnitude is taken RAW (linear, no power) — like every
-    // factor (R6). Shaping (its `pPositions` exponent) and compression (the log)
-    // happen together at the normalize step (normalizeToScale), so a large print
-    // is tamed at the aggregate scale rather than saturated strike-by-strike.
+    // The per-leg quantity is taken RAW (linear, no power) — like every factor
+    // (R6). Shaping (its `pPositions` exponent) and compression (the log) happen
+    // together at the normalize step (normalizeToScale), so a large print is
+    // tamed at the aggregate scale rather than saturated strike-by-strike.
+    //
+    // Unlike gamma, this factor does NOT take `sign`: direction is already baked
+    // into the leg/quantity-sign rule inside legContribution.
     const gammaStrength = maxAbsGamma > 0 ? Math.abs(s.gamma) / maxAbsGamma : 0;
     const positionsCounts = gammaStrength >= config.positionsGammaGate;
 
     if (positionsCounts) {
-      // Absolute magnitude (no netting): position size adds pressure regardless
-      // of its own sign; direction comes from `sign`. No positive bias here —
-      // the bias is gamma-only.
-      positionsRaw += Math.abs(s.positions) * sign * dWeight;
-      positionsGross += Math.abs(s.positions) * dWeight; // |contribution|, no side cancellation
+      const c = legContribution(s.callQty, s.putQty, distance, dWeight);
+      positionsRaw += c;
+      positionsGross += Math.abs(c); // |strike's net contribution|, no cross-strike cancellation
     }
 
     // Factors 3 & 4: rate-of-change of gamma and positions vs a decayed baseline.
@@ -253,13 +274,30 @@ export function computeScore(
     dGammaRaw += deltaGamma * sign * dWeight;
     dGammaGross += Math.abs(deltaGamma) * dWeight; // |contribution|, no side cancellation
 
-    // The positions baseline is kept fresh for EVERY in-window strike (so a strike
+    // Factor 4: each POSITION LEG moves against its own decayed baseline, then the
+    // two are combined by the same leg/sign rule as the level — so a change is
+    // bullish or bearish for exactly the reason the level would be.
+    //
+    // The delta is a PLAIN SIGNED DIFFERENCE (decayedDiff), NOT signedDelta: this
+    // factor's direction comes from the quantity's own sign, and signedDelta is
+    // sign-blind by construction, so it would point backwards on every negative
+    // leg (MM shorting more puts — a deepening bearish position — reads as
+    // "magnitude building" and would score bullish). A plain difference is correct
+    // at every sign and still travels the full trip through zero on a flip,
+    // because the quantity it differences is itself signed.
+    //
+    // Both baselines are kept fresh for EVERY in-window strike (so a strike
     // crossing the gamma gate mid-day already has a warm baseline), but only a
     // gated strike's delta enters the score — mirroring the positions LEVEL gate.
-    const deltaPositions = decayedDelta(momentum?.positions, s.strike, s.positions, prev?.positions, rho);
+    // They hold RAW UNWEIGHTED quantities; the ITM/OTM weights are applied after
+    // the delta, inside legContribution, so a strike flipping ITM↔OTM as spot
+    // moves never registers as a phantom position change.
+    const dCall = decayedDiff(momentum?.positionsCall, s.strike, s.callQty, prev?.callQty, rho);
+    const dPut = decayedDiff(momentum?.positionsPut, s.strike, s.putQty, prev?.putQty, rho);
     if (positionsCounts) {
-      dPositionsRaw += deltaPositions * sign * dWeight;
-      dPositionsGross += Math.abs(deltaPositions) * dWeight; // |contribution|, no side cancellation
+      const dc = legContribution(dCall, dPut, distance, dWeight);
+      dPositionsRaw += dc;
+      dPositionsGross += Math.abs(dc); // |strike's net contribution|, no cross-strike cancellation
     }
   }
 
@@ -336,6 +374,85 @@ export function computeScore(
 }
 
 /**
+ * Combine one strike's two market-maker position legs into a single signed
+ * directional contribution. The single source of truth for what a position
+ * MEANS — used for both the level (factor 2) and the rate of change (factor 4),
+ * so a change is bullish or bearish for exactly the reason the level would be.
+ *
+ * DIRECTION — from the leg and the sign of its quantity, NOT the side of spot:
+ *
+ *              negative qty   positive qty
+ *     puts       bearish        bullish
+ *     calls      bullish        bearish
+ *
+ * which is exactly `+putQty − callQty`: a put carries its own sign, a call is
+ * inverted. This holds identically above and below spot. Because the terms are
+ * summed SIGNED, bullish and bearish cancel — within a strike (a bullish put
+ * against a bearish call) and, once the caller accumulates, across strikes too.
+ *
+ * DISTANCE — the in-the-money leg decays, the out-of-the-money leg ramps. Puts
+ * are ITM above spot, calls are ITM below spot; an ITM contract is a weaker
+ * expression of a directional view, and weaker still the deeper it goes:
+ *
+ *     w_OTM = otmWeight                       // 1 + span·(d/W)^pDistance, rises
+ *     w_ITM = ITM_POSITION_WEIGHT / otmWeight // reciprocal mirror, falls
+ *
+ * The ITM curve is the OTM ramp inverted, so it reuses the already-tuned
+ * `distanceWeightSpan`/`pDistance` and adds no free parameter; the flat
+ * {@link ITM_POSITION_WEIGHT} then damps it further. At exactly ATM neither leg
+ * is in the money, so both take `otmWeight` (which is 1.0 there anyway).
+ *
+ * @param callQty   Signed call-leg quantity (or its rate of change).
+ * @param putQty    Signed put-leg quantity (or its rate of change).
+ * @param distance  `strike − spot`, SIGNED — only its sign is read, to decide
+ *                  which leg is in the money.
+ * @param otmWeight The shared distance ramp `dWeight` at this strike.
+ */
+function legContribution(
+  callQty: number,
+  putQty: number,
+  distance: number,
+  otmWeight: number,
+): number {
+  const itmWeight = ITM_POSITION_WEIGHT / otmWeight;
+  const wPut = distance > 0 ? itmWeight : otmWeight;
+  const wCall = distance < 0 ? itmWeight : otmWeight;
+  return putQty * wPut - callQty * wCall;
+}
+
+/**
+ * One position leg's rate of change against its DECAYED BASELINE, updating the
+ * baseline in place. Identical to {@link decayedDelta} — same seeding, same EWMA
+ * fold-in, same cadence-invariant ρ — except the move itself is a PLAIN SIGNED
+ * DIFFERENCE rather than {@link signedDelta}'s flip-aware magnitude measure:
+ *
+ *   seed = baseline[strike] ?? prevLevel ?? currLevel
+ *   out  = currLevel − seed
+ *
+ * WHY NOT signedDelta HERE: it is sign-blind by construction (negating both
+ * inputs leaves its output unchanged), which is right for gamma — whose direction
+ * comes from the side of spot — and wrong for positions, whose direction comes
+ * from the quantity's OWN sign (see {@link legContribution}). A market maker
+ * shorting more puts, −500 → −800, is deepening a BEARISH position; signedDelta
+ * reads that as "magnitude building" and returns +300, scoring it bullish. The
+ * plain difference returns −300, which is correct — and it loses nothing on
+ * flips, since differencing an already-signed quantity travels the full trip
+ * through zero on its own (+100 → −50 gives −150, not −50).
+ */
+function decayedDiff(
+  baseline: Map<number, number> | undefined,
+  strike: number,
+  currLevel: number,
+  prevLevel: number | undefined,
+  rho: number,
+): number {
+  const seed = baseline?.get(strike) ?? prevLevel ?? currLevel;
+  const out = currLevel - seed;
+  if (baseline) baseline.set(strike, rho * seed + (1 - rho) * currLevel);
+  return out;
+}
+
+/**
  * One strike's rate of change against its DECAYED BASELINE, updating the
  * baseline in place. This is what lifts each rate of change from a single noisy
  * two-snapshot difference to a move measured against ~2–3 half-lives of history,
@@ -371,10 +488,13 @@ function decayedDelta(
 }
 
 /**
- * Signed rate-of-change of a per-strike quantity (gamma or net MM positions)
- * against a reference level (the previous snapshot, or a decayed baseline).
- * Shared by factors 3 and 4 so both rates of change speak exactly the same
- * language.
+ * Signed rate-of-change of a per-strike gamma level against a reference level
+ * (the previous snapshot, or a decayed baseline).
+ *
+ * GAMMA ONLY (factor 3). Factor 4 used to share this, but positions moved to
+ * {@link decayedDiff}'s plain signed difference once their direction started
+ * coming from the quantity's own sign — which this function is deliberately
+ * blind to. See {@link decayedDiff} for why that distinction is load-bearing.
  *
  *   size = |curr − prev|                 // how far the value actually travelled
  *   dir  = sign(|curr| − |prev|)         // did the wall build (+) or bleed (−)

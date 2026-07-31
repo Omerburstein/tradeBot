@@ -29,8 +29,29 @@ export interface StrikeData {
   gamma: number;
   charm: number;
   vanna: number;
-  /** Net market-maker contracts at this strike (call qty + put qty). */
+  /**
+   * Net market-maker contracts at this strike (call qty + put qty).
+   *
+   * PRESENCE ONLY — NOT SCORED. The positions factors read {@link callQty} and
+   * {@link putQty} separately, because a call and a put of the same sign point in
+   * OPPOSITE directions (see the leg/sign table in score-engine.ts) and summing
+   * them destroys exactly the information the score needs. This field survives
+   * solely as the "did any positions row land on an in-window strike" signal for
+   * the coverage gate (data-coverage.ts). Do not reintroduce it into scoring.
+   */
   positions: number;
+  /**
+   * Signed net market-maker contracts in the CALL leg at this strike
+   * (`positions.call_qty`). Positive = MM net long calls. Direction under the
+   * leg/sign table is INVERTED for calls: positive is bearish, negative bullish.
+   */
+  callQty: number;
+  /**
+   * Signed net market-maker contracts in the PUT leg at this strike
+   * (`positions.put_qty`). Positive = MM net long puts, which is bullish;
+   * negative is bearish.
+   */
+  putQty: number;
 }
 
 /**
@@ -137,8 +158,19 @@ export interface ScoreComponents {
 export interface MomentumState {
   /** strike → time-decayed average of that strike's gamma level. */
   gamma: Map<number, number>;
-  /** strike → time-decayed average of that strike's net-positions level. */
-  positions: Map<number, number>;
+  /**
+   * strike → time-decayed average of that strike's signed CALL-leg quantity.
+   *
+   * The two position legs carry SEPARATE baselines because they carry separate
+   * distance weights (one leg is ITM and decays, the other is OTM and ramps —
+   * see score-engine.ts), so there is no single weight a combined baseline could
+   * be multiplied by. Both baselines hold RAW UNWEIGHTED quantities: the weights
+   * depend on |strike − spot| and are applied after the delta, so a strike that
+   * flips ITM↔OTM as spot moves never registers as a phantom position change.
+   */
+  positionsCall: Map<number, number>;
+  /** strike → time-decayed average of that strike's signed PUT-leg quantity. */
+  positionsPut: Map<number, number>;
   /** Epoch-ms of the last Greek snapshot folded in, or null before the first. */
   lastAt: number | null;
 }

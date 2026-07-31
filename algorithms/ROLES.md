@@ -27,39 +27,47 @@ the same magnitude of negative gamma. The gamma sign is not thrown away for
 **Verify:** `positiveGammaBias` is applied only on the `s.gamma >= 0` branch, and
 its default in `DEFAULT_CONFIG` is strictly greater than `1.0`.
 
-## R2 — Gamma and positions LEVELS use absolute value only
+## R2 — The gamma LEVEL uses absolute value only
 
-**Rule:** The per-strike **gamma** and **net-position** *levels* enter the score
-as absolute magnitudes. Opposite-sign strikes never net against each other;
-directional sign comes from the strike's side of spot (`sign`), not from the
-Greek's own sign.
+**Rule:** The per-strike **gamma** *level* enters the score as an absolute
+magnitude. Opposite-sign strikes never net against each other; directional sign
+comes from the strike's side of spot (`sign`), not from the Greek's own sign.
+
+**Scope:** GAMMA ONLY. Positions are explicitly excluded — they are governed by
+R7, whose direction comes from the leg and the sign of the quantity instead.
+This role once covered both; it was narrowed when the positions factor moved to
+the leg/sign table.
 
 **Anchors:**
 - `score-engine.ts` → `computeScore`: gamma level uses `Math.abs(s.gamma)`
   (`gexRaw += Math.abs(s.gamma) * gammaBias * sign * dWeight`).
-- `score-engine.ts` → `computeScore`: positions level uses `Math.abs(s.positions)`.
 
-**Verify:** Both the `gexRaw` and `positionsRaw` accumulators wrap their raw
-Greek in `Math.abs(...)`, and the directional term is the spot-relative `sign`,
-not `Math.sign(s.gamma)` / `Math.sign(s.positions)`.
+**Verify:** The `gexRaw` accumulator wraps its raw Greek in `Math.abs(...)`, and
+the directional term is the spot-relative `sign`, not `Math.sign(s.gamma)`.
+`positionsRaw` is NOT expected to match this shape — see R7.
 
-## R3 — Derivatives track the absolute value
+## R3 — The gamma derivative tracks the absolute value
 
-**Rule:** Rate-of-change factors measure whether the *magnitude* rose or fell —
-they care only that the value increased or decreased, not whether it is positive
-or negative. Each derivative is therefore the delta of the **absolute** value, so
-a wall building versus bleeding is distinguished by magnitude change alone.
+**Rule:** The gamma rate-of-change factor measures whether the *magnitude* rose
+or fell — it cares only that the value increased or decreased, not whether it is
+positive or negative. The derivative is therefore flip-aware over the
+**absolute** value, so a wall building versus bleeding is distinguished by
+magnitude change alone.
+
+**Scope:** GAMMA ONLY, for the same reason as R2. The positions derivative is a
+PLAIN SIGNED DIFFERENCE (`decayedDiff`) and must not be `abs`-wrapped — under R7
+its direction comes from the quantity's own sign, which `signedDelta` is
+deliberately blind to. See R7.
 
 **Anchors:**
 - `score-engine.ts` → `computeScore`: gamma derivative is
-  `const deltaGamma = Math.abs(s.gamma) - Math.abs(prev.gamma);`
-- `score-engine.ts` → `computeScore`: the positions derivative
-  (`dPositionsRaw`) must likewise be the delta of the absolute position level,
-  i.e. `Math.abs(s.positions) - Math.abs(prev.positions)`.
+  `const deltaGamma = decayedDelta(momentum?.gamma, s.strike, s.gamma, prev?.gamma, rho);`
+- `score-engine.ts` → `signedDelta`: size is `Math.abs(curr - prev)`, direction is
+  `Math.abs(curr) - Math.abs(prev)`.
 
-**Verify:** Every rate-of-change delta subtracts an `Math.abs(...)` current from
-an `Math.abs(...)` previous. A raw signed delta (`s.x - prev.x` without `abs`)
-is a MISMATCH.
+**Verify:** `dGammaRaw` is built from `decayedDelta`/`signedDelta`, whose
+direction term differences two `Math.abs(...)` values. `dPositionsRaw` using a
+raw signed delta is CORRECT, not a mismatch.
 
 ## R4 — Factors are orthogonal: no z-component multiplies another's value
 
@@ -77,17 +85,18 @@ spot-relative `sign` and the distance weight `dWeight`.
   — gamma level only (no `dGamma`/positions terms).
 - `score-engine.ts` → `computeScore`: `dGammaRaw += deltaGamma * sign * dWeight;`
   — |gamma| delta only, NOT multiplied by `s.gamma` / any gamma level.
-- `score-engine.ts` → `computeScore`: `positionsRaw += Math.abs(s.positions) * sign * dWeight;`
+- `score-engine.ts` → `computeScore`: `positionsRaw += legContribution(s.callQty, s.putQty, distance, dWeight);`
   gated by `positionsCounts = gammaStrength >= config.positionsGammaGate` — gamma
   is a boolean gate here, never a factor in the value.
-- `score-engine.ts` → `computeScore`: `dPositionsRaw += deltaPositions * sign * dWeight;`
-  — |positions| delta only, under the same boolean gate.
+- `score-engine.ts` → `computeScore`: `dPositionsRaw += legContribution(dCall, dPut, distance, dWeight);`
+  — position-leg deltas only, under the same boolean gate.
 
 **Verify:** No factor accumulator multiplies another factor's quantity into its
 term. `gexRaw` contains no `deltaGamma`/`positions` factor; `dGammaRaw` contains
 no `s.gamma`/`gammaStrength` factor; `positionsRaw`/`dPositionsRaw` use the gamma
 gate only as a boolean (`if (positionsCounts)`), never as a multiplier. The only
-shared multipliers are `sign` and `dWeight`.
+shared multipliers are `sign`, `dWeight`, and the ITM/OTM weights `legContribution`
+derives from `dWeight` (a geometric weight, not a scored component).
 
 ## R5 — The z component is non-linear, applied once to the whole factor
 
@@ -129,19 +138,63 @@ ratio — at normalize, not from power exponents at the raw step. (R1's
 `gammaBias` is a plain multiplicative factor and remains allowed.)
 
 **Anchors:**
-- `score-engine.ts` → `computeScore`: `positionsRaw += Math.abs(s.positions) * sign * dWeight;`
-  — abs + linear factors only, no power.
+- `score-engine.ts` → `legContribution`: `return putQty * wPut - callQty * wCall;`
+  — linear in each leg quantity; `wPut`/`wCall` are geometric weights, no power.
 - `score-engine.ts` → `computeScore`: `gexRaw += Math.abs(s.gamma) * gammaBias * sign * dWeight;`
   — linear in `|gamma|`; `gammaBias * sign * dWeight` are multiplicative factors, no power.
 - `score-engine.ts` → `computeScore`: `dGammaRaw += deltaGamma * sign * dWeight;`
   — linear in the signed `|gamma|` delta, no power.
-- `score-engine.ts` → `computeScore`: `dPositionsRaw += deltaPositions * sign * dWeight;`
-  — linear in the signed `|positions|` delta, no power.
+- `score-engine.ts` → `computeScore`: `dPositionsRaw += legContribution(dCall, dPut, distance, dWeight);`
+  — linear in the signed leg deltas, no power.
 
 **Verify:** Each raw accumulator term is linear in its data value — the data
-appears only inside `Math.abs(...)` and is multiplied by factors (`sign`,
-`dWeight`, `gammaBias`). No `Math.pow`/`signedPow` (exponent ≠ 1) is applied to
-the data magnitude at the raw-accumulation step; any such power transform is a
+appears only inside `Math.abs(...)` (gamma) or bare (position legs) and is
+multiplied by factors (`sign`, `dWeight`, `gammaBias`, the ITM/OTM weights). No
+`Math.pow`/`signedPow` (exponent ≠ 1) is applied to the data magnitude at the
+raw-accumulation step; any such power transform is a MISMATCH. `pDistance` inside
+`dWeight` is a power on the DISTANCE, not on the data, and is allowed.
+
+## R7 — Position direction comes from the leg and the sign of its quantity
+
+**Rule:** A market-maker position's directional meaning is set by which leg it is
+in and the sign of its quantity — identically above and below spot:
+
+|         | negative qty | positive qty |
+|---------|--------------|--------------|
+| puts    | bearish      | bullish      |
+| calls   | bullish      | bearish      |
+
+which is exactly `+putQty − callQty`. The two legs are therefore **never summed
+before scoring**, and the level is **never** `abs`-wrapped: bullish and bearish
+must cancel, both within a strike and across strikes. The strike's side of spot
+does NOT set position direction (that is gamma's rule, R2) — it survives only as
+the in-the-money test that picks each leg's distance weight.
+
+The in-the-money leg (puts above spot, calls below spot) **decays** with distance
+while the out-of-the-money leg keeps the outward ramp `dWeight`: `w_ITM =
+ITM_POSITION_WEIGHT / w_OTM`, a reciprocal mirror that reuses the tuned
+`distanceWeightSpan`/`pDistance` and adds no free parameter. At exactly ATM
+neither leg is in the money and both take `w_OTM`.
+
+**Anchors:**
+- `types.ts`: `StrikeData.callQty` / `StrikeData.putQty` — the two signed legs;
+  `StrikeData.positions` (their sum) is presence-only and must not be scored.
+- `score-engine.ts` → `legContribution`: `return putQty * wPut - callQty * wCall;`
+  with `wPut = distance > 0 ? itmWeight : otmWeight` and the call leg mirrored.
+- `score-engine.ts` → `ITM_POSITION_WEIGHT = 0.5` — a fixed constant, not a
+  tuner knob.
+- `score-engine.ts` → `computeScore`: both `positionsRaw` and `dPositionsRaw`
+  accumulate via `legContribution`, with no `sign` multiplier.
+- `score-engine.ts` → `decayedDiff`: `const out = currLevel - seed;` — a PLAIN
+  signed difference, because `signedDelta` is sign-blind and would invert the
+  direction of every negative leg.
+- `data-loader.ts` → `loadPositions`: returns `{ call, put }` per strike; the two
+  legs are never summed on the way in.
+
+**Verify:** `positionsRaw`/`dPositionsRaw` contain no `Math.abs(...)` around the
+position data and no `sign` multiplier; the put term is positive and the call term
+negative; the position derivative is a bare subtraction, not `signedDelta`. Any
+reintroduction of `s.positions` (the summed field) into a score accumulator is a
 MISMATCH.
 
 <!-- ROLES:END -->
