@@ -13,6 +13,11 @@
  *   - the strike's side of spot points the momentum (above = +, below = −);
  *   - unchanged Greeks (or no previous snapshot) → zero dGamma.
  *
+ * §10 pins the pre-market warm-up: dGamma/dPositions are exactly 0 (raw AND
+ * gross) until a baseline exists, `primeMomentum` establishes that baseline from
+ * the day's pre-open frames, and a primed first slot reads the same delta an
+ * ordinary snapshot-to-snapshot step would — one decay implementation, not two.
+ *
  * §5c additionally pins the DECAYED-BASELINE momentum (momentumHalfLifeMin): a
  * large last-step move enters at full weight, a constant level never ramps, a
  * sustained build accumulates, a one-slot blip reverts, and the memory is
@@ -27,9 +32,9 @@
  */
 
 import pino from 'pino';
-import { computeScore, createMomentumState } from '../score-engine.js';
+import { computeScore, createMomentumState, primeMomentum } from '../score-engine.js';
 import { DEFAULT_CONFIG } from '../types.js';
-import type { Snapshot, StrikeData } from '../types.js';
+import type { Snapshot, StrikeData, WarmupFrame } from '../types.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
@@ -617,6 +622,127 @@ check(
     Math.abs(dPosRaw(300, -200, 300, -200)) < 1e-9,
     `got ${dPosRaw(300, -200, 300, -200)}`,
   );
+}
+
+// ── 10. Pre-market warm-up: 0 until initialized, live once primed ──
+// The rate-of-change factors have nothing to measure against until a baseline
+// exists, so they report EXACTLY 0 until one does. `primeMomentum` establishes
+// that baseline from the day's pre-market frames, so the first SCORED slot of a
+// warmed day reads a true change instead of a self-difference.
+{
+  /** A pre-market frame at `etOffsetMin` minutes before the sequence start. */
+  const frame = (
+    minutesBefore: number,
+    gamma: number,
+    callQty: number,
+    putQty: number,
+    hasPositions = true,
+    k = 6010,
+  ): WarmupFrame => ({
+    capturedAt: new Date(SEQ_START_MS - minutesBefore * 60_000).toISOString(),
+    strikes: [posStrike(k, callQty, putQty, gamma)],
+    hasPositions,
+  });
+
+  const openSnap = (gamma: number, callQty: number, putQty: number, k = 6010): Snapshot => ({
+    ...snap([posStrike(k, callQty, putQty, gamma)]),
+    capturedAt: new Date(SEQ_START_MS).toISOString(),
+  });
+
+  // A fresh state is not initialized, so the first scored slot reads 0 on BOTH
+  // rate-of-change factors — even though its levels differ from nothing at all.
+  {
+    const m = createMomentumState();
+    check('warm-up: a fresh MomentumState is not initialized', m.initialized === false);
+    const s = computeScore(openSnap(200, 100, -400), null, [], DEFAULT_CONFIG, m);
+    check(
+      'warm-up: cold start → dGamma and dPositions are exactly 0',
+      s.dGammaRaw === 0 && s.dPositionsRaw === 0,
+      `dGamma=${s.dGammaRaw} dPositions=${s.dPositionsRaw}`,
+    );
+    // Gross too — a cold slot must not seed the normalization scale either.
+    check(
+      'warm-up: cold start → dGamma/dPositions gross are 0 (no scale seeded)',
+      s.dGammaGross === 0 && s.dPositionsGross === 0,
+      `dGammaGross=${s.dGammaGross} dPositionsGross=${s.dPositionsGross}`,
+    );
+    check('warm-up: the first scored slot initializes the baseline', m.initialized === true);
+  }
+
+  // Priming with the pre-market frames flips it, and the first scored slot then
+  // measures against those levels: gamma 100 → 200 is a wall building (positive
+  // above spot), the put leg −400 → −800 is a deepening short (bearish).
+  {
+    const m = createMomentumState();
+    const folded = primeMomentum(m, [frame(1, 100, 0, -400)], DEFAULT_CONFIG);
+    check('warm-up: primeMomentum reports the frames it folded', folded === 1, `got ${folded}`);
+    check('warm-up: priming initializes the baseline', m.initialized === true);
+
+    const s = computeScore(openSnap(200, 0, -800), null, [], DEFAULT_CONFIG, m);
+    check(
+      'warm-up: primed → the first scored slot reads a real dGamma (wall building)',
+      s.dGammaRaw > 0,
+      `got ${s.dGammaRaw}`,
+    );
+    check(
+      'warm-up: primed → the first scored slot reads a real dPositions (short deepening)',
+      s.dPositionsRaw < 0,
+      `got ${s.dPositionsRaw}`,
+    );
+    // And it equals what the same two frames produce as an ordinary step: the
+    // warm-up fold is the SAME decay math, not a second implementation.
+    const stepwise = runGammaSeq([100, 200], 1, DEFAULT_CONFIG.momentumHalfLifeMin);
+    check(
+      'warm-up: primed first slot === the equivalent snapshot-to-snapshot step',
+      Math.abs(s.dGammaRaw - stepwise[1]!) < 1e-9,
+      `primed ${s.dGammaRaw} vs stepwise ${stepwise[1]}`,
+    );
+  }
+
+  // No pre-market coverage → nothing folded, nothing initialized: the cold-start
+  // behaviour above is preserved exactly (the prod-data path).
+  {
+    const m = createMomentumState();
+    check(
+      'warm-up: no pre-market frames → nothing folded, still cold',
+      primeMomentum(m, [], DEFAULT_CONFIG) === 0 && m.initialized === false && m.lastAt === null,
+    );
+  }
+
+  // A frame with no positions row must NOT fold its (loader-default 0) legs —
+  // that would fake a position collapse at the open. Gamma still folds.
+  {
+    const m = createMomentumState();
+    primeMomentum(m, [frame(1, 100, 0, -400, false)], DEFAULT_CONFIG);
+    check(
+      'warm-up: a frame without positions folds gamma only',
+      m.gamma.size === 1 && m.positionsCall.size === 0 && m.positionsPut.size === 0,
+      `gamma=${m.gamma.size} call=${m.positionsCall.size} put=${m.positionsPut.size}`,
+    );
+    const s = computeScore(openSnap(200, 0, -800), null, [], DEFAULT_CONFIG, m);
+    check(
+      'warm-up: gamma is live but the un-warmed position leg starts from itself',
+      s.dGammaRaw > 0 && Math.abs(s.dPositionsRaw) < 1e-9,
+      `dGamma=${s.dGammaRaw} dPositions=${s.dPositionsRaw}`,
+    );
+  }
+
+  // Multi-frame priming carries the wall-clock decay across frames: a build that
+  // ran through the pre-market is still building at the first scored slot.
+  {
+    const m = createMomentumState();
+    const folded = primeMomentum(
+      m,
+      [frame(3, 100, 0, -100), frame(2, 150, 0, -200), frame(1, 200, 0, -300)],
+      DEFAULT_CONFIG,
+    );
+    const s = computeScore(openSnap(250, 0, -400), null, [], DEFAULT_CONFIG, m);
+    check(
+      'warm-up: a pre-market build is still building at the first scored slot',
+      folded === 3 && s.dGammaRaw > 0 && s.dPositionsRaw < 0,
+      `folded=${folded} dGamma=${s.dGammaRaw} dPositions=${s.dPositionsRaw}`,
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────

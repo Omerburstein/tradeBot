@@ -144,8 +144,17 @@ baseline  = ρ·baseline + (1 − ρ)·gamma,   ρ = 0.5^(Δt_min / momentumHalf
   at normalize by `pDGamma`. The memory is **wall-clock** (ρ from the real Δt), so
   it means the same thing at 1-min and 10-min cadence, and it **cannot ramp** (a
   bounded difference of two levels). A price tick contributes no update (Greeks
-  unchanged); it is 0 on the day's first snapshot. See
+  unchanged). See
   [MomentumState / decayedDelta in score-engine.ts](../algorithms/score-engine.ts).
+- **Where the baseline comes from (pre-market warm-up):** on a day with pre-open
+  coverage the baselines are warmed from the **09:00–09:29 ET** frames before
+  anything is scored (`primeMomentum`), so this factor is live from the first
+  slot after the bell, measured against real pre-open positioning. Those frames
+  are *only* used for this: SPX has no pre-open print, so they are never scored,
+  never enter the z-scale, never touch the cone and can never open a trade. On a
+  day with **no** pre-market data (the current production dataset) the factor is
+  **exactly 0** — raw *and* gross, so it does not seed the scale either — until
+  the first scored slot establishes the baseline. Same rule for §3.4 dPositions.
 
 ### 3.3 Net MM positions  →  `positionsZ` (weight `wPositions`, default **0.18**)
 ```
@@ -294,9 +303,10 @@ version self-scales so all four factors share one anchor and the weights stay
 comparable. The reason it is safe now: the rate of change is the **decayed-
 baseline momentum** (§3.2), not a raw one-step difference, so it is smooth
 (≈35 sign flips/session, not ≈118) and its own magnitude is a stable scale rather
-than pure noise. `history[0]`'s delta is a structural zero (no baseline yet); the
-`<3`-sample cold-start guard plus a short lookback keep that from distorting the
-open.
+than pure noise. Without a pre-market warm-up `history[0]`'s delta is a
+structural zero (no baseline yet); the `<3`-sample cold-start guard plus a short
+lookback keep that from distorting the open. With one, the baseline already
+exists at the bell and `history[0]` carries a real delta instead.
 
 **Why log-compress?** A plain ratio needs a large `zClamp` to let a 10× spike
 read as 10, and such a spike then swamps the other three factors. Compression

@@ -365,8 +365,9 @@ export function checkTimeGates(
 
   return {
     // Block new entries pre-market (before the open) and after the late cutoff.
-    // Pre-market Greek frames still warm the z-score/cone history upstream; they
-    // just never open a position (see RiskParams.noNewTradesBeforeET).
+    // Pre-market Greek frames still warm the dGamma/dPositions baselines upstream
+    // (see `primeMomentum`); they are never scored and never open a position
+    // (see RiskParams.noNewTradesBeforeET).
     blockNewEntries: etMinutes < openMinutes || etMinutes >= noEntryMinutes,
     forceExit: etMinutes >= forceExitMinutes,
   };

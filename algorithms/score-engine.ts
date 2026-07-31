@@ -38,6 +38,14 @@
  *      one-slot blip reverts as the baseline catches up. See {@link MomentumState}
  *      and {@link decayedDelta}. It is cadence-invariant (ρ is derived from the
  *      real Δt) and cannot ramp (a bounded difference of two levels).
+ *
+ *      BOTH RATES OF CHANGE READ 0 UNTIL THERE IS A BASELINE. On a day with
+ *      pre-market coverage the baselines are warmed from the 09:00–09:29 ET
+ *      frames ({@link primeMomentum}), so the first slot after the bell measures
+ *      against real pre-open levels; without pre-market data the first scored
+ *      slot establishes the baseline and reports dGamma/dPositions as exactly 0
+ *      (never a self-difference). The gamma and positions LEVELS are unaffected
+ *      — they are instantaneous readings and need no history.
  *   5. Distance weighting — further strikes contribute MORE score. EXCEPT the
  *      in-the-money position leg, which decays the other way — see
  *      {@link legContribution}.
@@ -81,6 +89,7 @@ import type {
   ScoreComponents,
   Snapshot,
   StrikeData,
+  WarmupFrame,
 } from './types.js';
 
 /** Fresh, empty day-scoped {@link MomentumState}. One per SignalGenerator. */
@@ -90,7 +99,76 @@ export function createMomentumState(): MomentumState {
     positionsCall: new Map(),
     positionsPut: new Map(),
     lastAt: null,
+    initialized: false,
   };
+}
+
+/**
+ * Fold the day's PRE-MARKET frames into the momentum baselines, so the first
+ * scored slot of the session measures dGamma/dPositions against real pre-open
+ * levels instead of against itself.
+ *
+ * This is the ONLY thing pre-market data is used for. A {@link WarmupFrame}
+ * carries no price (SPX has no pre-open print), so it is never scored, never
+ * enters the z-score history, and can never open a trade — see WarmupFrame.
+ *
+ * The fold is exactly the fold `computeScore` performs: the same ρ from the same
+ * wall-clock Δt, the same `decayedDelta`/`decayedDiff` update — the returned
+ * deltas are simply discarded. Replaying the pre-market through here and
+ * replaying it through `computeScore` therefore leave identical baselines; there
+ * is no second copy of the decay math to drift.
+ *
+ * Position LEGS are folded only from frames that actually carried a positions
+ * row (`hasPositions`): a loader-default 0 is not an observed 0, and folding it
+ * would fake a position collapse at the bell. Gamma is folded from every frame.
+ *
+ * @param state   Day-scoped state, mutated in place.
+ * @param frames  Pre-market frames in CHRONOLOGICAL order (the loader sorts them).
+ * @param config  Supplies `momentumHalfLifeMin` — the same half-life scoring uses.
+ * @returns How many frames were folded; 0 leaves the state untouched (and
+ *          `initialized` false, so the deltas stay 0 until the first scored slot).
+ */
+export function primeMomentum(
+  state: MomentumState,
+  frames: readonly WarmupFrame[],
+  config: AlgoConfig,
+): number {
+  for (const frame of frames) {
+    const frameMs = new Date(frame.capturedAt).getTime();
+    const rho = decayRetention(state.lastAt, frameMs, config);
+
+    for (const s of frame.strikes) {
+      decayedDelta(state.gamma, s.strike, s.gamma, undefined, rho);
+      if (frame.hasPositions) {
+        decayedDiff(state.positionsCall, s.strike, s.callQty, undefined, rho);
+        decayedDiff(state.positionsPut, s.strike, s.putQty, undefined, rho);
+      }
+    }
+
+    state.lastAt = frameMs;
+  }
+
+  if (frames.length > 0) state.initialized = true;
+  return frames.length;
+}
+
+/**
+ * Per-step baseline retention ρ = 0.5^(Δt / halfLife), derived from the REAL
+ * wall-clock gap so the half-life means the same memory at any cadence. Before
+ * the first fold (`lastAt === null`) ρ = 0, so the baseline simply seeds to the
+ * current level. Δt is clamped — see {@link MIN_DELTA_MINUTES}/{@link MAX_DELTA_MINUTES}.
+ */
+function decayRetention(lastAt: number | null, currentMs: number, config: AlgoConfig): number {
+  if (lastAt === null) return 0;
+  const halfLife =
+    Number.isFinite(config.momentumHalfLifeMin) && config.momentumHalfLifeMin > 0
+      ? config.momentumHalfLifeMin
+      : DEFAULT_MOMENTUM_HALF_LIFE_MIN;
+  const dtMin = Math.min(
+    MAX_DELTA_MINUTES,
+    Math.max(MIN_DELTA_MINUTES, (currentMs - lastAt) / 60_000),
+  );
+  return Math.pow(0.5, dtMin / halfLife);
 }
 
 /**
@@ -161,22 +239,21 @@ export function computeScore(
   const { spot, strikes } = current;
 
   // Per-step decay for the momentum baseline, derived from the REAL Δt since the
-  // last Greek snapshot so the half-life means the same wall-clock memory at any
-  // cadence. Before the first snapshot (or with no momentum state) ρ = 0, so the
-  // baseline simply seeds to the current level and the first delta is 0.
-  const halfLife =
-    Number.isFinite(config.momentumHalfLifeMin) && config.momentumHalfLifeMin > 0
-      ? config.momentumHalfLifeMin
-      : DEFAULT_MOMENTUM_HALF_LIFE_MIN;
+  // last Greek frame folded in (a pre-market warm-up frame counts) so the
+  // half-life means the same wall-clock memory at any cadence. Before the first
+  // fold (or with no momentum state) ρ = 0, so the baseline simply seeds to the
+  // current level and the first delta is 0.
   const currentMs = new Date(current.capturedAt).getTime();
-  let rho = 0;
-  if (momentum && momentum.lastAt !== null) {
-    const dtMin = Math.min(
-      MAX_DELTA_MINUTES,
-      Math.max(MIN_DELTA_MINUTES, (currentMs - momentum.lastAt) / 60_000),
-    );
-    rho = Math.pow(0.5, dtMin / halfLife);
-  }
+  const rho = momentum ? decayRetention(momentum.lastAt, currentMs, config) : 0;
+
+  // Do the rate-of-change factors have a baseline to measure against yet? With a
+  // MomentumState that is `initialized` (pre-market warm-up folded in, or an
+  // earlier scored slot); on the stateless path it is simply "there is a
+  // previous snapshot". Until then dGamma/dPositions are reported as EXACTLY 0
+  // rather than a self-difference against a baseline seeded from this very
+  // frame — see {@link MomentumState.initialized}. The levels are still folded
+  // below, so the next frame reads a true change.
+  const momentumReady = momentum ? momentum.initialized : previous !== null;
 
   let gexRaw = 0;
   let dGammaRaw = 0;
@@ -301,9 +378,24 @@ export function computeScore(
     }
   }
 
+  // No baseline yet (see `momentumReady`): report the rate-of-change factors as
+  // exactly 0 — raw AND gross, so nothing enters the normalization scale either.
+  // The baselines above were still updated, so the next frame reads a real
+  // change. This is a no-op on a day that warmed up pre-market.
+  if (!momentumReady) {
+    dGammaRaw = 0;
+    dGammaGross = 0;
+    dPositionsRaw = 0;
+    dPositionsGross = 0;
+  }
+
   // The baseline decay consumed this snapshot; advance the clock so the next
-  // snapshot derives ρ from the true Δt. (Skipped when running stateless.)
-  if (momentum) momentum.lastAt = currentMs;
+  // snapshot derives ρ from the true Δt, and mark the baselines usable.
+  // (Skipped when running stateless.)
+  if (momentum) {
+    momentum.lastAt = currentMs;
+    momentum.initialized = true;
+  }
 
   // Magnitude-ratio normalization using a rolling lookback, hard-clamped to
   // ±zClamp. History supplies only the SCALE each factor is measured against —
