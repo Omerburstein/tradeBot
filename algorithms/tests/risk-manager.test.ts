@@ -18,7 +18,10 @@
  *   - a bad/absent/out-of-order clock degrades to "no decay", never to a
  *     spuriously shrunken target that would fabricate an exit;
  *   - the stalling-trade case end-to-end: a +20pt open trade under a 30pt target
- *     does not exit at t=0 but DOES once decay brings the target under +20.
+ *     does not exit at t=0 but DOES once decay brings the target under +20;
+ *   - §7: the take-profit center weights strikes by gamma² while the entry gate
+ *     stays on plain gamma mass — two different numbers from one book, plus the
+ *     scale-invariance / single-strike / empty-window edge cases.
  *
  * Only pure functions from risk-manager.ts are exercised — no env/DB stub needed.
  *
@@ -32,9 +35,12 @@ import {
   checkTakeProfit,
   effectiveStopLossPoints,
   effectiveTakeProfitPoints,
+  gammaCenterStrike,
+  gexEntryGatePoints,
+  gexTakeProfitPoints,
 } from '../risk-manager.js';
 import { DEFAULT_CONFIG } from '../types.js';
-import type { AlgoConfig, TradeState } from '../types.js';
+import type { AlgoConfig, Snapshot, TradeState } from '../types.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
@@ -234,6 +240,93 @@ function cfg(risk: Partial<AlgoConfig['risk']> = {}): AlgoConfig {
     'the stop reason reports the decay',
     stopped.reason.includes('decayed from 10.0'),
     `reason=${stopped.reason}`,
+  );
+}
+
+// ── §7 Gamma-center weighting: TP sharpens, the entry gate does not ──
+{
+  logger.info('§7 gamma-center weighting (TP uses gamma², the gate uses gamma mass)');
+
+  // Two-sided gamma around spot 7000: a heavy cluster 50pts BELOW, a lighter
+  // spread ABOVE. The plain mass center is dragged back toward spot by the
+  // upper strikes; squaring the weights concentrates on the heavy cluster.
+  const snap = (strikes: Array<[number, number]>, spot = 7000): Snapshot => ({
+    capturedAt: ENTRY_ISO,
+    expiry: '2026-07-28',
+    spot,
+    strikes: strikes.map(([strike, gamma]) => ({
+      strike,
+      gamma,
+      charm: 0,
+      vanna: 0,
+      netPosition: 0,
+    })),
+  } as unknown as Snapshot);
+
+  const twoSided = snap([
+    [6950, 10e9],
+    [6955, 8e9],
+    [7010, 2e9],
+    [7040, 1.5e9],
+    [7060, 1e9],
+  ]);
+  const c = cfg();
+
+  const tp = gexTakeProfitPoints(c, twoSided);
+  const gate = gexEntryGatePoints(c, twoSided);
+  check(
+    'gamma² TP reaches further than the plain-mass gate on a two-sided book',
+    tp > gate,
+    `tp=${tp.toFixed(2)} gate=${gate.toFixed(2)}`,
+  );
+  check(
+    'the gate is the plain |gamma| mass center',
+    near(gate, Math.abs(gammaCenterStrike(twoSided.strikes, twoSided.spot, c.strikeWindow)! - twoSided.spot)),
+    `gate=${gate}`,
+  );
+  check(
+    'the TP is the gamma²-weighted center',
+    near(tp, Math.abs(gammaCenterStrike(twoSided.strikes, twoSided.spot, c.strikeWindow, 2)! - twoSided.spot)),
+    `tp=${tp}`,
+  );
+
+  // Scale invariance: the weights are normalized before exponentiation, so
+  // multiplying every gamma by a constant cannot move either center.
+  const scaled = snap([
+    [6950, 10e9 * 1e6],
+    [6955, 8e9 * 1e6],
+    [7010, 2e9 * 1e6],
+    [7040, 1.5e9 * 1e6],
+    [7060, 1e9 * 1e6],
+  ]);
+  check(
+    'gamma² center is scale-invariant (1e6× gamma → same target)',
+    near(gexTakeProfitPoints(c, scaled), tp, 1e-6),
+    `scaled=${gexTakeProfitPoints(c, scaled)} vs ${tp}`,
+  );
+
+  // A single dominant strike: both exponents must agree — there is nothing for
+  // the sharpening to concentrate on.
+  const single = snap([[6960, 5e9]]);
+  check(
+    'one-strike book: TP and gate agree',
+    near(gexTakeProfitPoints(c, single), gexEntryGatePoints(c, single)),
+    `tp=${gexTakeProfitPoints(c, single)} gate=${gexEntryGatePoints(c, single)}`,
+  );
+
+  // No gamma in the window → both fall back to stopLossPoints × riskRewardRatio.
+  const empty = snap([[9000, 5e9]]);
+  const fallback = c.risk.stopLossPoints * c.risk.riskRewardRatio;
+  check(
+    'empty window falls back to stopLossPoints × riskRewardRatio for both',
+    near(gexTakeProfitPoints(c, empty), fallback) && near(gexEntryGatePoints(c, empty), fallback),
+    `tp=${gexTakeProfitPoints(c, empty)} gate=${gexEntryGatePoints(c, empty)} expected=${fallback}`,
+  );
+
+  // Zero gamma everywhere is the null case, not a divide-by-zero.
+  check(
+    'all-zero gamma → null center (no NaN)',
+    gammaCenterStrike(snap([[6990, 0], [7010, 0]]).strikes, 7000, c.strikeWindow, 2) === null,
   );
 }
 

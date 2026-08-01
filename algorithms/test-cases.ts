@@ -43,7 +43,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadDay } from './data-loader.js';
 import { SignalGenerator } from './signal-generator.js';
-import { gexTakeProfitPoints } from './risk-manager.js';
+import { gexEntryGatePoints } from './risk-manager.js';
 import { loadModelStore, type ModelRecord } from './model-store.js';
 import type { AlgoConfig, Signal, Snapshot, TradeRecord } from './types.js';
 import { DEFAULT_CONFIG } from './types.js';
@@ -205,8 +205,12 @@ interface SlotDiag {
   action: Signal['action'];
   confidence: Signal['confidence'];
   reason: string;
-  /** GEX take-profit distance (gamma-center dist) this slot would target. */
-  gexTpPoints: number;
+  /**
+   * Gamma-center distance the ENTRY GATE tests against `minGexTakeProfitPoints`
+   * (plain gamma mass). Not the trade's take-profit — that one weights by
+   * gamma² (see TP_GAMMA_POWER in risk-manager.ts) and reads larger.
+   */
+  gexGatePoints: number;
   /**
    * True when the generator skipped this slot for incomplete data (TODO #6).
    * Such a slot carries no decision: its score is the all-zero placeholder and
@@ -309,7 +313,7 @@ export async function runTestCase(
       action: signal.action,
       confidence: signal.confidence,
       reason: signal.reason,
-      gexTpPoints: gexTakeProfitPoints(config, snap),
+      gexGatePoints: gexEntryGatePoints(config, snap),
       dataGap: false, // marked below, from the generator's own gap ledger
     });
   }
@@ -559,7 +563,7 @@ function relevantFactors(s: SlotDiag, config: AlgoConfig): string {
   }
 
   if (reason.includes('gex tp') || reason.includes('gamma center')) {
-    bits.push(`gexTP=${s.gexTpPoints.toFixed(1)}pts (min ${config.risk.minGexTakeProfitPoints})`);
+    bits.push(`gammaCenter=${s.gexGatePoints.toFixed(1)}pts (min ${config.risk.minGexTakeProfitPoints})`);
   }
 
   if (bits.length === 0) bits.push(`z=${fmtSigned(s.composite)}`);

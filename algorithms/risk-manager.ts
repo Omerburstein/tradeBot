@@ -174,25 +174,57 @@ export function checkStopLoss(
 }
 
 /**
- * Gamma center of mass: the |gamma|-weighted average strike,
- * Σ(|gamma|·strike) / Σ(|gamma|).
+ * Exponent on |gamma| when weighting strikes for the TAKE-PROFIT center (see
+ * {@link gexTakeProfitPoints}). Squaring sharpens the weights toward the
+ * dominant strike cluster, so the target points at the gamma pile price is
+ * actually drawn to instead of the balance point of a two-sided distribution —
+ * on 2026-05-19 10:00 that moves the target from 17.1 to 34.2 pts.
+ */
+const TP_GAMMA_POWER = 2;
+
+/**
+ * Exponent on |gamma| for the ENTRY-GATE center (see {@link gexEntryGatePoints}).
+ * Deliberately plain gamma MASS: the gate asks "is there enough room between
+ * spot and where the gamma sits to be worth the entry costs", and the mass
+ * center answers that. Sharpened weights push the center systematically further
+ * from spot (mean 11.96 → 16.06 pts on 2026-05-19), which would gut the
+ * `minGexTakeProfitPoints` filter — measured at ~2× the trades for flat PnL and
+ * double the drawdown. Keep the two exponents separate.
+ */
+const GATE_GAMMA_POWER = 1;
+
+/**
+ * Gamma center of mass: the |gamma|^p-weighted average strike,
+ * Σ(|gamma|^p·strike) / Σ(|gamma|^p).
  *
  * Strikes are weighted by ABSOLUTE gamma (consistent with the score engine,
  * which treats gamma as a magnitude) so opposite-sign gamma can't cancel the
  * denominator toward zero and fling the average far from spot. Only strikes
  * inside the ±strikeWindow band around spot are counted. Returns null when
  * there is no gamma in the window.
+ *
+ * `gammaPower` raises each weight before averaging: 1 is the plain mass center,
+ * >1 concentrates the average on the heaviest strikes. Weights are normalized by
+ * the window's largest |gamma| first — the ratio is scale-invariant, so this
+ * doesn't move the result, it just keeps |gamma|^p in a safe numeric range for
+ * any exponent (raw gamma exposure runs to ~1e9 per strike).
  */
 export function gammaCenterStrike(
   strikes: StrikeData[],
   spot: number,
   strikeWindow: number,
+  gammaPower = 1,
 ): number | null {
+  const inWindow = strikes.filter((s) => Math.abs(s.strike - spot) <= strikeWindow);
+  let maxGamma = 0;
+  for (const s of inWindow) maxGamma = Math.max(maxGamma, Math.abs(s.gamma));
+  if (maxGamma <= 0) return null;
+
   let weightedSum = 0;
   let weightSum = 0;
-  for (const s of strikes) {
-    if (Math.abs(s.strike - spot) > strikeWindow) continue;
-    const w = Math.abs(s.gamma);
+  for (const s of inWindow) {
+    const scaled = Math.abs(s.gamma) / maxGamma;
+    const w = gammaPower === 1 ? scaled : Math.pow(scaled, gammaPower);
     weightedSum += w * s.strike;
     weightSum += w;
   }
@@ -201,19 +233,14 @@ export function gammaCenterStrike(
 }
 
 /**
- * GEX take-profit target in SPX points: the distance from the snapshot's spot
- * to its gamma center of mass (Σ(|gamma|·strike)/Σ(|gamma|)). Price is expected
- * to gravitate toward the gamma center, so that distance is the profit target.
- * Falls back to the fixed stopLossPoints × riskRewardRatio target when the
- * snapshot carries no gamma in the window.
- *
- * Evaluated on the ENTRY snapshot and frozen into TradeState.gexTpPoints; the
- * exit check reads the stored value so the target doesn't drift as gamma/spot
- * move intraday. Single source of truth for both the entry gate and the stored
- * exit target.
+ * Distance (SPX pts) from a snapshot's spot to its gamma center of mass at the
+ * given weighting exponent. Falls back to the fixed stopLossPoints ×
+ * riskRewardRatio target when the snapshot carries no gamma in the window.
+ * Shared by the take-profit and the entry gate, which differ ONLY in the
+ * exponent they pass.
  */
-export function gexTakeProfitPoints(config: AlgoConfig, snapshot: Snapshot): number {
-  const center = gammaCenterStrike(snapshot.strikes, snapshot.spot, config.strikeWindow);
+function gexCenterDistance(config: AlgoConfig, snapshot: Snapshot, gammaPower: number): number {
+  const center = gammaCenterStrike(snapshot.strikes, snapshot.spot, config.strikeWindow, gammaPower);
   if (center != null) {
     return Math.abs(center - snapshot.spot);
   }
@@ -221,12 +248,36 @@ export function gexTakeProfitPoints(config: AlgoConfig, snapshot: Snapshot): num
 }
 
 /**
- * Whether the GEX-implied take-profit clears the configured minimum.
- * When the gamma-center distance falls below `minGexTakeProfitPoints` the trade
- * is skipped — the expected move is too small to justify entry costs.
+ * GEX take-profit target in SPX points: the distance from the snapshot's spot to
+ * its gamma center of mass under {@link TP_GAMMA_POWER}. Price is expected to
+ * gravitate toward the gamma center, so that distance is the profit target.
+ *
+ * Evaluated on the ENTRY snapshot and frozen into TradeState.gexTpPoints; the
+ * exit check reads the stored value so the target doesn't drift as gamma/spot
+ * move intraday. NOT the quantity the entry gate tests — that is
+ * {@link gexEntryGatePoints}.
+ */
+export function gexTakeProfitPoints(config: AlgoConfig, snapshot: Snapshot): number {
+  return gexCenterDistance(config, snapshot, TP_GAMMA_POWER);
+}
+
+/**
+ * The gamma-center distance the entry gate tests against
+ * `minGexTakeProfitPoints`, on plain gamma mass ({@link GATE_GAMMA_POWER}).
+ * Report this — not {@link gexTakeProfitPoints} — whenever the number being
+ * shown is the one compared to that minimum.
+ */
+export function gexEntryGatePoints(config: AlgoConfig, snapshot: Snapshot): number {
+  return gexCenterDistance(config, snapshot, GATE_GAMMA_POWER);
+}
+
+/**
+ * Whether the gamma center sits far enough from spot to justify an entry.
+ * When the mass-center distance falls below `minGexTakeProfitPoints` the trade
+ * is skipped — the expected move is too small to cover the entry costs.
  */
 export function meetsGexMinTakeProfit(config: AlgoConfig, snapshot: Snapshot): boolean {
-  return gexTakeProfitPoints(config, snapshot) >= config.risk.minGexTakeProfitPoints;
+  return gexEntryGatePoints(config, snapshot) >= config.risk.minGexTakeProfitPoints;
 }
 
 /**

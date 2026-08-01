@@ -40,6 +40,7 @@ import {
   computePositionSize,
   createFlatState,
   fadeExitBar,
+  gexEntryGatePoints,
   gexTakeProfitPoints,
   meetsGexMinTakeProfit,
   recordEntry,
@@ -312,12 +313,14 @@ export class SignalGenerator {
       return this.makeSignal('hold', score, cone, snapshot, 'low', `daily limit: ${dailyLimits.reason}`);
     }
 
-    // GEX-derived TP gate: skip entries when the gamma-center distance < 15 pts.
-    // The TP is the distance from spot to the gamma center of mass
-    // (Σ(|gamma|·strike)/Σ(|gamma|)); falls back to stopLossPoints ×
-    // riskRewardRatio when the snapshot carries no gamma in the window.
+    // GEX-derived entry gate: skip entries when the gamma-center distance < 15
+    // pts. This reads the PLAIN-mass center (Σ(|gamma|·strike)/Σ(|gamma|)),
+    // which is not the same number as the trade's take-profit — that one
+    // sharpens the weights (see TP_GAMMA_POWER in risk-manager.ts). Falls back
+    // to stopLossPoints × riskRewardRatio when the snapshot carries no gamma in
+    // the window.
     if (!meetsGexMinTakeProfit(config, snapshot)) {
-      const tp = gexTakeProfitPoints(config, snapshot);
+      const tp = gexEntryGatePoints(config, snapshot);
       return this.makeSignal('hold', score, cone, snapshot, 'low',
         `GEX TP ${tp.toFixed(1)} pts < ${config.risk.minGexTakeProfitPoints} pt minimum — gamma center too close`);
     }
