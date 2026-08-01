@@ -19,9 +19,10 @@
  *     spuriously shrunken target that would fabricate an exit;
  *   - the stalling-trade case end-to-end: a +20pt open trade under a 30pt target
  *     does not exit at t=0 but DOES once decay brings the target under +20;
- *   - §7: the take-profit center weights strikes by gamma² while the entry gate
- *     stays on plain gamma mass — two different numbers from one book, plus the
- *     scale-invariance / single-strike / empty-window edge cases.
+ *   - §7: the gamma center weights strikes by gamma², sharpening it onto the
+ *     dominant cluster, and BOTH the frozen target and the entry gate read that
+ *     one number — plus the scale-invariance / single-strike / empty-window
+ *     edge cases.
  *
  * Only pure functions from risk-manager.ts are exercised — no env/DB stub needed.
  *
@@ -36,8 +37,8 @@ import {
   effectiveStopLossPoints,
   effectiveTakeProfitPoints,
   gammaCenterStrike,
-  gexEntryGatePoints,
   gexTakeProfitPoints,
+  meetsGexMinTakeProfit,
 } from '../risk-manager.js';
 import { DEFAULT_CONFIG } from '../types.js';
 import type { AlgoConfig, Snapshot, TradeState } from '../types.js';
@@ -243,9 +244,9 @@ function cfg(risk: Partial<AlgoConfig['risk']> = {}): AlgoConfig {
   );
 }
 
-// ── §7 Gamma-center weighting: TP sharpens, the entry gate does not ──
+// ── §7 Gamma-center weighting: gamma², for the target AND the gate ───
 {
-  logger.info('§7 gamma-center weighting (TP uses gamma², the gate uses gamma mass)');
+  logger.info('§7 gamma-center weighting (gamma², shared by the TP and the entry gate)');
 
   // Two-sided gamma around spot 7000: a heavy cluster 50pts BELOW, a lighter
   // spread ABOVE. The plain mass center is dragged back toward spot by the
@@ -273,21 +274,32 @@ function cfg(risk: Partial<AlgoConfig['risk']> = {}): AlgoConfig {
   const c = cfg();
 
   const tp = gexTakeProfitPoints(c, twoSided);
-  const gate = gexEntryGatePoints(c, twoSided);
-  check(
-    'gamma² TP reaches further than the plain-mass gate on a two-sided book',
-    tp > gate,
-    `tp=${tp.toFixed(2)} gate=${gate.toFixed(2)}`,
-  );
-  check(
-    'the gate is the plain |gamma| mass center',
-    near(gate, Math.abs(gammaCenterStrike(twoSided.strikes, twoSided.spot, c.strikeWindow)! - twoSided.spot)),
-    `gate=${gate}`,
+  const massCenter = Math.abs(
+    gammaCenterStrike(twoSided.strikes, twoSided.spot, c.strikeWindow)! - twoSided.spot,
   );
   check(
     'the TP is the gamma²-weighted center',
     near(tp, Math.abs(gammaCenterStrike(twoSided.strikes, twoSided.spot, c.strikeWindow, 2)! - twoSided.spot)),
     `tp=${tp}`,
+  );
+  check(
+    'gamma² reaches further from spot than the plain mass center on a two-sided book',
+    tp > massCenter,
+    `gamma²=${tp.toFixed(2)} mass=${massCenter.toFixed(2)}`,
+  );
+
+  // The entry gate reads the SAME sharpened number — one center, two consumers.
+  // A book whose mass center sits inside the minimum but whose gamma² center
+  // clears it must therefore PASS the gate.
+  const gateMin = massCenter + (tp - massCenter) / 2; // between the two centers
+  check(
+    'the gate tests the gamma² center, not the mass center',
+    meetsGexMinTakeProfit(cfg({ minGexTakeProfitPoints: gateMin }), twoSided),
+    `gamma²=${tp.toFixed(2)} mass=${massCenter.toFixed(2)} min=${gateMin.toFixed(2)}`,
+  );
+  check(
+    'the gate still blocks when even the gamma² center is too close',
+    !meetsGexMinTakeProfit(cfg({ minGexTakeProfitPoints: tp + 1 }), twoSided),
   );
 
   // Scale invariance: the weights are normalized before exponentiation, so
@@ -305,22 +317,22 @@ function cfg(risk: Partial<AlgoConfig['risk']> = {}): AlgoConfig {
     `scaled=${gexTakeProfitPoints(c, scaled)} vs ${tp}`,
   );
 
-  // A single dominant strike: both exponents must agree — there is nothing for
-  // the sharpening to concentrate on.
+  // A single dominant strike: the exponent must not move the center — there is
+  // nothing for the sharpening to concentrate on.
   const single = snap([[6960, 5e9]]);
   check(
-    'one-strike book: TP and gate agree',
-    near(gexTakeProfitPoints(c, single), gexEntryGatePoints(c, single)),
-    `tp=${gexTakeProfitPoints(c, single)} gate=${gexEntryGatePoints(c, single)}`,
+    'one-strike book: gamma² lands on that strike (40pts), same as plain mass',
+    near(gexTakeProfitPoints(c, single), 40),
+    `tp=${gexTakeProfitPoints(c, single)}`,
   );
 
-  // No gamma in the window → both fall back to stopLossPoints × riskRewardRatio.
+  // No gamma in the window → falls back to stopLossPoints × riskRewardRatio.
   const empty = snap([[9000, 5e9]]);
   const fallback = c.risk.stopLossPoints * c.risk.riskRewardRatio;
   check(
-    'empty window falls back to stopLossPoints × riskRewardRatio for both',
-    near(gexTakeProfitPoints(c, empty), fallback) && near(gexEntryGatePoints(c, empty), fallback),
-    `tp=${gexTakeProfitPoints(c, empty)} gate=${gexEntryGatePoints(c, empty)} expected=${fallback}`,
+    'empty window falls back to stopLossPoints × riskRewardRatio',
+    near(gexTakeProfitPoints(c, empty), fallback),
+    `tp=${gexTakeProfitPoints(c, empty)} expected=${fallback}`,
   );
 
   // Zero gamma everywhere is the null case, not a divide-by-zero.

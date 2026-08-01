@@ -174,24 +174,22 @@ export function checkStopLoss(
 }
 
 /**
- * Exponent on |gamma| when weighting strikes for the TAKE-PROFIT center (see
- * {@link gexTakeProfitPoints}). Squaring sharpens the weights toward the
- * dominant strike cluster, so the target points at the gamma pile price is
- * actually drawn to instead of the balance point of a two-sided distribution —
- * on 2026-05-19 10:00 that moves the target from 17.1 to 34.2 pts.
+ * Exponent on |gamma| when weighting strikes for the gamma center of mass.
+ * Squaring sharpens the weights toward the dominant strike cluster, so the
+ * center sits on the gamma pile price is actually drawn to rather than the
+ * balance point of a two-sided distribution — on 2026-05-19 10:00 that moves it
+ * from 17.1 to 34.2 pts from spot.
+ *
+ * ONE exponent, used by BOTH consumers of the center — the frozen take-profit
+ * ({@link gexTakeProfitPoints}) and the `minGexTakeProfitPoints` entry gate
+ * ({@link meetsGexMinTakeProfit}). The gate is the sensitive one: a sharper
+ * center sits systematically further from spot (mean 11.96 → 16.06 pts on
+ * 2026-05-19), so the 15-pt filter passes many more slots. Backtest
+ * 2026-05-18 → 2026-07-24 on the tuned bestModel: 6 → 11 trades, +$1125 →
+ * +$1075, profit factor 3.73 → 1.76, max drawdown $375 → $712.50. Re-tune
+ * (`npm run tune`) after changing this — the gate threshold is fitted to it.
  */
-const TP_GAMMA_POWER = 2;
-
-/**
- * Exponent on |gamma| for the ENTRY-GATE center (see {@link gexEntryGatePoints}).
- * Deliberately plain gamma MASS: the gate asks "is there enough room between
- * spot and where the gamma sits to be worth the entry costs", and the mass
- * center answers that. Sharpened weights push the center systematically further
- * from spot (mean 11.96 → 16.06 pts on 2026-05-19), which would gut the
- * `minGexTakeProfitPoints` filter — measured at ~2× the trades for flat PnL and
- * double the drawdown. Keep the two exponents separate.
- */
-const GATE_GAMMA_POWER = 1;
+const GAMMA_CENTER_POWER = 2;
 
 /**
  * Gamma center of mass: the |gamma|^p-weighted average strike,
@@ -233,14 +231,24 @@ export function gammaCenterStrike(
 }
 
 /**
- * Distance (SPX pts) from a snapshot's spot to its gamma center of mass at the
- * given weighting exponent. Falls back to the fixed stopLossPoints ×
- * riskRewardRatio target when the snapshot carries no gamma in the window.
- * Shared by the take-profit and the entry gate, which differ ONLY in the
- * exponent they pass.
+ * GEX take-profit target in SPX points: the distance from the snapshot's spot to
+ * its gamma center of mass under {@link GAMMA_CENTER_POWER}. Price is expected
+ * to gravitate toward the gamma center, so that distance is the profit target.
+ * Falls back to the fixed stopLossPoints × riskRewardRatio target when the
+ * snapshot carries no gamma in the window.
+ *
+ * Evaluated on the ENTRY snapshot and frozen into TradeState.gexTpPoints; the
+ * exit check reads the stored value so the target doesn't drift as gamma/spot
+ * move intraday. Single source of truth for both the entry gate and the stored
+ * exit target.
  */
-function gexCenterDistance(config: AlgoConfig, snapshot: Snapshot, gammaPower: number): number {
-  const center = gammaCenterStrike(snapshot.strikes, snapshot.spot, config.strikeWindow, gammaPower);
+export function gexTakeProfitPoints(config: AlgoConfig, snapshot: Snapshot): number {
+  const center = gammaCenterStrike(
+    snapshot.strikes,
+    snapshot.spot,
+    config.strikeWindow,
+    GAMMA_CENTER_POWER,
+  );
   if (center != null) {
     return Math.abs(center - snapshot.spot);
   }
@@ -248,36 +256,12 @@ function gexCenterDistance(config: AlgoConfig, snapshot: Snapshot, gammaPower: n
 }
 
 /**
- * GEX take-profit target in SPX points: the distance from the snapshot's spot to
- * its gamma center of mass under {@link TP_GAMMA_POWER}. Price is expected to
- * gravitate toward the gamma center, so that distance is the profit target.
- *
- * Evaluated on the ENTRY snapshot and frozen into TradeState.gexTpPoints; the
- * exit check reads the stored value so the target doesn't drift as gamma/spot
- * move intraday. NOT the quantity the entry gate tests — that is
- * {@link gexEntryGatePoints}.
- */
-export function gexTakeProfitPoints(config: AlgoConfig, snapshot: Snapshot): number {
-  return gexCenterDistance(config, snapshot, TP_GAMMA_POWER);
-}
-
-/**
- * The gamma-center distance the entry gate tests against
- * `minGexTakeProfitPoints`, on plain gamma mass ({@link GATE_GAMMA_POWER}).
- * Report this — not {@link gexTakeProfitPoints} — whenever the number being
- * shown is the one compared to that minimum.
- */
-export function gexEntryGatePoints(config: AlgoConfig, snapshot: Snapshot): number {
-  return gexCenterDistance(config, snapshot, GATE_GAMMA_POWER);
-}
-
-/**
- * Whether the gamma center sits far enough from spot to justify an entry.
- * When the mass-center distance falls below `minGexTakeProfitPoints` the trade
- * is skipped — the expected move is too small to cover the entry costs.
+ * Whether the GEX-implied take-profit clears the configured minimum.
+ * When the gamma-center distance falls below `minGexTakeProfitPoints` the trade
+ * is skipped — the expected move is too small to justify entry costs.
  */
 export function meetsGexMinTakeProfit(config: AlgoConfig, snapshot: Snapshot): boolean {
-  return gexEntryGatePoints(config, snapshot) >= config.risk.minGexTakeProfitPoints;
+  return gexTakeProfitPoints(config, snapshot) >= config.risk.minGexTakeProfitPoints;
 }
 
 /**
