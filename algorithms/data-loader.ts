@@ -17,14 +17,13 @@
 import { getDb } from '../db/index.js';
 import { CAPTURED_AT_ET_DATE, CAPTURED_AT_UTC_ISO } from './db-sql.js';
 import { etMinutesSinceMidnight } from './et-time.js';
-import type { ConeEndpoints, Snapshot, StrikeData, WarmupFrame } from './types.js';
+import type { ConeEndpoints, Snapshot, StrikeData } from './types.js';
 
 /**
  * ET market open (09:30) in minutes since midnight. Frames captured BEFORE this
  * are pre-market: they carry no SPX print (the index has no pre-open quote, so
- * `spot_prices` starts at the bell), so they can never be scored — they are
- * returned as {@link WarmupFrame}s that warm the dGamma/dPositions baselines
- * only. Frames at or after it are decision snapshots.
+ * `spot_prices` starts at the bell), so they can never be scored and are dropped
+ * outright. Frames at or after it are decision snapshots.
  */
 const RTH_OPEN_MINUTES = 9 * 60 + 30;
 
@@ -62,12 +61,10 @@ const DECISION_INTERVAL_MINUTES = 1;
  * Load snapshots for a single trading day, joining gamma/charm/vanna
  * rows at each captured_at into unified Snapshot objects.
  *
- * PRE-MARKET (before 09:30 ET) frames are split off as {@link WarmupFrame}s and
- * stamped onto every returned snapshot (`Snapshot.warmup`, day-scoped like
- * `cone`). They are never snapshots themselves — SPX has no pre-open print, so
- * they cannot be scored — and exist only to warm the dGamma/dPositions baselines
- * before the bell (see `primeMomentum`). Days with no pre-market coverage simply
- * carry an empty list.
+ * PRE-MARKET (before 09:30 ET) frames are DROPPED: SPX has no pre-open print, so
+ * they carry no spot and cannot be scored. The dGamma/dPositions baselines
+ * therefore start cold at the bell and read exactly 0 on the day's first scored
+ * slot (see {@link MomentumState.initialized} in types.ts).
  *
  * @param date  YYYY-MM-DD trading day
  * @param strikeWindow  Only include strikes within this range of spot
@@ -162,29 +159,16 @@ export async function loadDay(
 
   // Step 4: Build Snapshot objects
   const snapshots: Snapshot[] = [];
-  // One shared array, stamped on every snapshot below and sorted in place once
-  // the loop is done — so the reference the snapshots carry is always the final,
-  // chronologically ordered list `primeMomentum` requires.
-  const warmupFrames: WarmupFrame[] = [];
   let unmatched = 0;
 
   for (const [capturedAt, group] of byTime) {
-    // Pre-market frame (before the 09:30 bell)? It has no SPX print to be scored
-    // against, so it becomes a warm-up frame for the momentum baselines instead
-    // of a decision snapshot — and is NOT counted as a missing-spot gap, which
-    // is what it would otherwise look like. See {@link WarmupFrame}.
-    if (etMinutesSinceMidnight(capturedAt) < RTH_OPEN_MINUTES) {
-      warmupFrames.push({
-        capturedAt,
-        // Unwindowed on purpose (no spot to window around) and sorted so the
-        // frame reads like a Snapshot's strike list.
-        strikes: [...group.strikes.values()]
-          .map((sd) => sd as StrikeData)
-          .sort((a, b) => a.strike - b.strike),
-        hasPositions: positionSlots.has(capturedAt),
-      });
-      continue;
-    }
+    // Pre-market frame (before the 09:30 bell)? Dropped. It has no SPX print to
+    // be scored against — every scored factor needs spot (side of spot, the
+    // distance weight, the gamma gate) — so it can never become a decision
+    // snapshot. Skipped explicitly rather than falling through to the spot join
+    // below, so it is NOT counted as a missing-spot gap, which is what it would
+    // otherwise look like.
+    if (etMinutesSinceMidnight(capturedAt) < RTH_OPEN_MINUTES) continue;
 
     // Spot comes strictly from the dedicated spot_prices table, using the candle
     // that CLOSES at this slot's instant (no look-ahead — see spotAtClose). A
@@ -220,9 +204,6 @@ export async function loadDay(
       es,
       strikes: strikes.sort((a, b) => a.strike - b.strike),
       cone,
-      // Day-scoped, stamped on every snapshot exactly like `cone` (one shared
-      // array — the generator folds it once, on its first snapshot of the day).
-      warmup: warmupFrames,
       // Per-source presence for the completeness gate (TODO #6). spx is always
       // true here (a snapshot only exists with a matching spot row); gex is true
       // (hasGamma above); es/positions vary by what was joined. positions
@@ -245,11 +226,6 @@ export async function loadDay(
   }
 
   snapshots.sort(
-    (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
-  );
-  // Chronological too: `primeMomentum` folds them in order, deriving each step's
-  // decay from the real gap between frames.
-  warmupFrames.sort(
     (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
   );
 

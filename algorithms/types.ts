@@ -55,38 +55,6 @@ export interface StrikeData {
 }
 
 /**
- * One PRE-MARKET Greek/positions frame (09:00–09:29 ET), carried alongside the
- * day's snapshots for a single purpose: warming the dGamma/dPositions baselines
- * before the bell (see `primeMomentum` in score-engine.ts).
- *
- * WHY IT IS NOT A {@link Snapshot}: SPX does not print before 09:30 — the index
- * has no pre-open quote, so `spot_prices` starts at the bell — and every scored
- * factor needs spot (the strike's side of spot, the distance weight, the gamma
- * gate). A pre-market frame therefore CANNOT be scored: it is never given to
- * `computeScore`, never enters the z-score history, never touches the cone (the
- * cone is undefined before its 09:30 apex) and can never open a trade
- * (`noNewTradesBeforeET`). Only the per-strike RAW LEVELS it carries — which
- * need no price — are folded into the momentum baselines.
- *
- * Strikes are NOT windowed (no spot to window around): the extra strikes simply
- * sit in the baseline maps until spot brings them in range, which is the point —
- * a strike that walks into the window mid-morning arrives with a warm baseline.
- */
-export interface WarmupFrame {
-  /** UTC ISO-8601 timestamp (minute END), same convention as {@link Snapshot}. */
-  capturedAt: string;
-  /** Every strike published in this frame, ascending. */
-  strikes: StrikeData[];
-  /**
-   * True when a `positions` row existed for this instant. When false the legs on
-   * `strikes` are loader-defaults (0), NOT observed zeros, so the position-leg
-   * baselines must skip this frame — folding fake zeros in would manufacture a
-   * position collapse at the open. The gamma baseline is folded either way.
-   */
-  hasPositions: boolean;
-}
-
-/**
  * A unified snapshot: all three Greek panels joined for one captured_at,
  * plus the SPX spot price at capture time.
  */
@@ -135,16 +103,6 @@ export interface Snapshot {
    * (see `assessCoverage` in data-coverage.ts).
    */
   present?: SourcePresence;
-  /**
-   * The day's PRE-MARKET Greek/positions frames (see {@link WarmupFrame}),
-   * stamped onto every snapshot of the day exactly like {@link cone} so the
-   * in-memory backtest/tuner data flow carries them with no extra plumbing. The
-   * signal generator folds them into the momentum baselines ONCE, on its first
-   * snapshot of the day, and ignores the field thereafter. Absent/empty = the
-   * day started cold, so dGamma/dPositions read 0 until the first scored slot
-   * establishes the baseline (see {@link MomentumState.initialized}).
-   */
-  warmup?: WarmupFrame[];
 }
 
 // ── Scoring ──
@@ -218,15 +176,12 @@ export interface MomentumState {
   /**
    * Whether the baselines above hold anything to measure against yet.
    *
-   * False on a fresh state and until the first frame is folded in — by
-   * `primeMomentum` (the day's pre-market frames) or, failing that, by the first
-   * scored snapshot. WHILE FALSE THE RATE-OF-CHANGE FACTORS ARE EXACTLY 0: with
-   * no prior level, each strike's baseline seeds to the very level being
-   * measured, so any "delta" would be a self-difference dressed up as momentum.
-   * `computeScore` zeroes dGamma/dPositions (raw, gross AND normalized) until
-   * this flips, while still folding the levels in — so the NEXT frame reads a
-   * true change. A day with pre-market coverage flips it before the bell, so
-   * 09:31 measures against real pre-open positioning instead of against itself.
+   * False on a fresh state and until the day's first scored snapshot is folded
+   * in. WHILE FALSE THE RATE-OF-CHANGE FACTORS ARE EXACTLY 0: with no prior
+   * level, each strike's baseline seeds to the very level being measured, so any
+   * "delta" would be a self-difference dressed up as momentum. `computeScore`
+   * zeroes dGamma/dPositions (raw, gross AND normalized) until this flips, while
+   * still folding the levels in — so the NEXT frame reads a true change.
    */
   initialized: boolean;
 }
@@ -426,9 +381,9 @@ export interface RiskParams {
    * open: thin pre-open SPX liquidity makes pre-bell fills untrustworthy. Exits
    * are never blocked (a position can only exist once entries are allowed).
    *
-   * Pre-market Greek frames are still loaded — as {@link WarmupFrame}s, which
-   * warm the dGamma/dPositions baselines only (they carry no SPX print, so they
-   * are never scored and the z-score scale and cone still start at the bell).
+   * Pre-market Greek frames are dropped by the data loader entirely: they carry
+   * no SPX print, so they cannot be scored, and the z-score scale, the momentum
+   * baselines and the cone all start at the bell.
    */
   noNewTradesBeforeET: string;
   /** ET time after which no new entries allowed (HH:MM). */

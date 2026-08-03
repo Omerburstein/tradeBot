@@ -46,12 +46,7 @@ import {
   recordExit,
   updateTradeMetrics,
 } from './risk-manager.js';
-import {
-  computeScore,
-  createMomentumState,
-  factorContributions,
-  primeMomentum,
-} from './score-engine.js';
+import { computeScore, createMomentumState, factorContributions } from './score-engine.js';
 import type {
   AlgoConfig,
   ConeInfo,
@@ -99,15 +94,6 @@ export class SignalGenerator {
    * never reaches across a day boundary — same invariant as scoreHistory.
    */
   private momentum: MomentumState = createMomentumState();
-  /**
-   * Pre-market frames folded into {@link momentum} at the day's first snapshot
-   * (see `primeMomentum`). 0 = the day started cold, so dGamma/dPositions read
-   * exactly 0 until the first scored slot establishes the baseline. Reported by
-   * {@link getWarmup} so a run can say which of the two it was.
-   */
-  private warmupFrames = 0;
-  /** Whether the once-per-day warm-up fold has already run. */
-  private warmedUp = false;
   /** Last snapshot of any kind — for the chronological look-ahead guard. */
   private previousSnapshot: Snapshot | null = null;
   /** Last snapshot carrying fresh Greeks — the dGamma/dPositions baseline. */
@@ -177,18 +163,6 @@ export class SignalGenerator {
     }
 
     const { config } = this;
-
-    // 0a. Pre-market warm-up, once per day, before anything is scored: fold the
-    // day's pre-open Greek/position frames into the momentum baselines so the
-    // first slot after the bell measures dGamma/dPositions against real pre-open
-    // levels instead of against itself. Runs even when this first snapshot turns
-    // out to be a data gap (the warm-up is day data, not slot data), and is a
-    // no-op on a day with no pre-market coverage — the rate-of-change factors
-    // then simply read 0 until the first scored slot establishes the baseline.
-    if (!this.warmedUp) {
-      this.warmedUp = true;
-      this.warmupFrames = primeMomentum(this.momentum, snapshot.warmup ?? [], config);
-    }
 
     // 0. Data-completeness gate (TODO #6). A decision requires all four sources
     // (SPX, ES, GEX, positions) for THIS slot. If any is missing, emit a
@@ -274,12 +248,12 @@ export class SignalGenerator {
   }
 
   /**
-   * How the day's rate-of-change baselines started: `frames` pre-market frames
-   * folded in (0 = cold start, so dGamma/dPositions read 0 until the first
-   * scored slot), and whether the baselines are usable at all yet.
+   * Whether the day's rate-of-change baselines are usable yet. False until the
+   * first scored slot folds a level in — dGamma/dPositions read exactly 0 until
+   * then (see {@link MomentumState.initialized}).
    */
-  getWarmup(): { frames: number; initialized: boolean } {
-    return { frames: this.warmupFrames, initialized: this.momentum.initialized };
+  getMomentumReady(): boolean {
+    return this.momentum.initialized;
   }
 
   private generateSignal(

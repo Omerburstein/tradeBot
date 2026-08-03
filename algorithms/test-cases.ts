@@ -4,12 +4,10 @@
  * A curated list of date + intraday-window cases the algo is replayed against.
  * For every case this file:
  *   1. Replays the FULL trading day through the same SignalGenerator the
- *      backtest/tuner use (so z-score history + cone crossings are correct),
- *      including the day's pre-market warm-up: the 09:00–09:29 ET frames are
- *      folded into the gex/positions baselines before the first slot is scored,
- *      so dGam/dPos are live at the open. A day with no pre-market coverage
- *      starts cold and both read 0 until the first scored slot — which of the
- *      two happened is stated at the top of every case (see `warmupLine`).
+ *      backtest/tuner use (so z-score history + cone crossings are correct).
+ *      Every day starts cold: pre-market frames are dropped by the loader (no
+ *      SPX print to score against), so dGam/dPos read 0 until the first scored
+ *      slot sets the baseline — stated at the top of every case (`warmupLine`).
  *   2. Prints an EXPLAINED timeline for the WHOLE day — every slot from the
  *      market open onward is listed with ALL of its factor z-scores (composite,
  *      gexZ, dGammaZ, positionsZ, dPositionsZ) computed exactly as the tuner
@@ -228,13 +226,6 @@ export interface TestCaseResult {
   allTrades: TradeRecord[];
   /** Absolute path of the SVG written, or null when there was no data. */
   svgPath: string | null;
-  /**
-   * How the day's dGamma/dPositions baselines started (see `primeMomentum`):
-   * the pre-market frames folded in and the ET span they covered, or 0 frames
-   * when the day had no pre-market coverage — in which case both rate-of-change
-   * factors read exactly 0 until the first scored slot.
-   */
-  warmup: { frames: number; firstEt: string | null; lastEt: string | null };
 }
 
 // ── ET time helpers (display + window gating; storage stays UTC) ──
@@ -333,32 +324,18 @@ export async function runTestCase(
     svgPath = writeSvg(testCase, windowSlots, trades, config);
   }
 
-  // Pre-market warm-up: what the generator actually folded, plus the ET span the
-  // frames covered (read off the same day-scoped list it was handed).
-  const frames = daySnapshots[0]?.warmup ?? [];
-  const warmup = {
-    frames: generator.getWarmup().frames,
-    firstEt: frames.length > 0 ? etLabel(frames[0]!.capturedAt) : null,
-    lastEt: frames.length > 0 ? etLabel(frames[frames.length - 1]!.capturedAt) : null,
-  };
-
-  return { testCase, allSlots: diags, slots: windowSlots, trades, allTrades, svgPath, warmup };
+  return { testCase, allSlots: diags, slots: windowSlots, trades, allTrades, svgPath };
 }
 
 /**
- * One line stating how the day's rate-of-change factors started: warmed from
- * pre-market frames, or cold (dGam/dPos pinned to 0 until the first scored slot).
- * Printed on the console and in the explained log so a run is never ambiguous
- * about which regime produced its dGam/dPos readings.
+ * One line stating how the day's rate-of-change factors started. Every day now
+ * starts cold — pre-market frames are dropped by the loader (no SPX print to
+ * score against) — so dGam/dPos are pinned to 0 until the first scored slot
+ * establishes the baseline. Printed on the console and in the explained log so
+ * the leading 0s are never mistaken for a data gap.
  */
-function warmupLine(warmup: TestCaseResult['warmup']): string {
-  if (warmup.frames === 0) {
-    return 'Pre-market warm-up: none — dGam/dPos read 0 until the first scored slot sets the baseline.';
-  }
-  return (
-    `Pre-market warm-up: ${warmup.frames} frame(s) ${warmup.firstEt}–${warmup.lastEt} ET ` +
-    'folded into the gex/positions baselines — dGam/dPos are live from the first scored slot.'
-  );
+function warmupLine(): string {
+  return 'Rate-of-change baselines: cold start — dGam/dPos read 0 until the first scored slot sets the baseline.';
 }
 
 // ── Explanation (console + log) ──
@@ -387,7 +364,7 @@ function printExplanation(
     return;
   }
 
-  console.log(warmupLine(result.warmup));
+  console.log(warmupLine());
 
   if (logOnly) for (const line of explainedTimeline(result, config)) logOnly(line);
 
@@ -421,7 +398,7 @@ function explainedTimeline(result: TestCaseResult, config: AlgoConfig): string[]
   const { testCase, allSlots, allTrades } = result;
   const out: string[] = [];
 
-  out.push(`\n${warmupLine(result.warmup)}`);
+  out.push(`\n${warmupLine()}`);
 
   const r = config.risk;
   out.push(

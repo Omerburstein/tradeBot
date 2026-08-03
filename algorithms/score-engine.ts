@@ -39,13 +39,11 @@
  *      and {@link decayedDelta}. It is cadence-invariant (ρ is derived from the
  *      real Δt) and cannot ramp (a bounded difference of two levels).
  *
- *      BOTH RATES OF CHANGE READ 0 UNTIL THERE IS A BASELINE. On a day with
- *      pre-market coverage the baselines are warmed from the 09:00–09:29 ET
- *      frames ({@link primeMomentum}), so the first slot after the bell measures
- *      against real pre-open levels; without pre-market data the first scored
- *      slot establishes the baseline and reports dGamma/dPositions as exactly 0
- *      (never a self-difference). The gamma and positions LEVELS are unaffected
- *      — they are instantaneous readings and need no history.
+ *      BOTH RATES OF CHANGE READ 0 UNTIL THERE IS A BASELINE. The first scored
+ *      slot of the day establishes the baseline and reports dGamma/dPositions as
+ *      exactly 0 (never a self-difference); the next slot reads a true change.
+ *      The gamma and positions LEVELS are unaffected — they are instantaneous
+ *      readings and need no history.
  *   5. Distance weighting — further strikes contribute MORE score. EXCEPT the
  *      in-the-money position leg, which decays the other way — see
  *      {@link legContribution}.
@@ -89,7 +87,6 @@ import type {
   ScoreComponents,
   Snapshot,
   StrikeData,
-  WarmupFrame,
 } from './types.js';
 
 /** Fresh, empty day-scoped {@link MomentumState}. One per SignalGenerator. */
@@ -104,59 +101,10 @@ export function createMomentumState(): MomentumState {
 }
 
 /**
- * Fold the day's PRE-MARKET frames into the momentum baselines, so the first
- * scored slot of the session measures dGamma/dPositions against real pre-open
- * levels instead of against itself.
- *
- * This is the ONLY thing pre-market data is used for. A {@link WarmupFrame}
- * carries no price (SPX has no pre-open print), so it is never scored, never
- * enters the z-score history, and can never open a trade — see WarmupFrame.
- *
- * The fold is exactly the fold `computeScore` performs: the same ρ from the same
- * wall-clock Δt, the same `decayedDelta`/`decayedDiff` update — the returned
- * deltas are simply discarded. Replaying the pre-market through here and
- * replaying it through `computeScore` therefore leave identical baselines; there
- * is no second copy of the decay math to drift.
- *
- * Position LEGS are folded only from frames that actually carried a positions
- * row (`hasPositions`): a loader-default 0 is not an observed 0, and folding it
- * would fake a position collapse at the bell. Gamma is folded from every frame.
- *
- * @param state   Day-scoped state, mutated in place.
- * @param frames  Pre-market frames in CHRONOLOGICAL order (the loader sorts them).
- * @param config  Supplies `momentumHalfLifeMin` — the same half-life scoring uses.
- * @returns How many frames were folded; 0 leaves the state untouched (and
- *          `initialized` false, so the deltas stay 0 until the first scored slot).
- */
-export function primeMomentum(
-  state: MomentumState,
-  frames: readonly WarmupFrame[],
-  config: AlgoConfig,
-): number {
-  for (const frame of frames) {
-    const frameMs = new Date(frame.capturedAt).getTime();
-    const rho = decayRetention(state.lastAt, frameMs, config);
-
-    for (const s of frame.strikes) {
-      decayedDelta(state.gamma, s.strike, s.gamma, undefined, rho);
-      if (frame.hasPositions) {
-        decayedDiff(state.positionsCall, s.strike, s.callQty, undefined, rho);
-        decayedDiff(state.positionsPut, s.strike, s.putQty, undefined, rho);
-      }
-    }
-
-    state.lastAt = frameMs;
-  }
-
-  if (frames.length > 0) state.initialized = true;
-  return frames.length;
-}
-
-/**
  * Per-step baseline retention ρ = 0.5^(Δt / halfLife), derived from the REAL
  * wall-clock gap so the half-life means the same memory at any cadence. Before
- * the first fold (`lastAt === null`) ρ = 0, so the baseline simply seeds to the
- * current level. Δt is clamped — see {@link MIN_DELTA_MINUTES}/{@link MAX_DELTA_MINUTES}.
+ * the first scored slot (`lastAt === null`) ρ = 0, so the baseline simply seeds
+ * to the current level. Δt is clamped — see {@link MIN_DELTA_MINUTES}/{@link MAX_DELTA_MINUTES}.
  */
 function decayRetention(lastAt: number | null, currentMs: number, config: AlgoConfig): number {
   if (lastAt === null) return 0;
@@ -239,20 +187,20 @@ export function computeScore(
   const { spot, strikes } = current;
 
   // Per-step decay for the momentum baseline, derived from the REAL Δt since the
-  // last Greek frame folded in (a pre-market warm-up frame counts) so the
-  // half-life means the same wall-clock memory at any cadence. Before the first
-  // fold (or with no momentum state) ρ = 0, so the baseline simply seeds to the
-  // current level and the first delta is 0.
+  // last Greek frame folded in, so the half-life means the same wall-clock
+  // memory at any cadence. Before the first fold (or with no momentum state)
+  // ρ = 0, so the baseline simply seeds to the current level and the first
+  // delta is 0.
   const currentMs = new Date(current.capturedAt).getTime();
   const rho = momentum ? decayRetention(momentum.lastAt, currentMs, config) : 0;
 
   // Do the rate-of-change factors have a baseline to measure against yet? With a
-  // MomentumState that is `initialized` (pre-market warm-up folded in, or an
-  // earlier scored slot); on the stateless path it is simply "there is a
-  // previous snapshot". Until then dGamma/dPositions are reported as EXACTLY 0
-  // rather than a self-difference against a baseline seeded from this very
-  // frame — see {@link MomentumState.initialized}. The levels are still folded
-  // below, so the next frame reads a true change.
+  // MomentumState that is `initialized` (an earlier scored slot folded in); on
+  // the stateless path it is simply "there is a previous snapshot". Until then
+  // dGamma/dPositions are reported as EXACTLY 0 rather than a self-difference
+  // against a baseline seeded from this very frame — see
+  // {@link MomentumState.initialized}. The levels are still folded below, so the
+  // next frame reads a true change.
   const momentumReady = momentum ? momentum.initialized : previous !== null;
 
   let gexRaw = 0;
@@ -381,7 +329,7 @@ export function computeScore(
   // No baseline yet (see `momentumReady`): report the rate-of-change factors as
   // exactly 0 — raw AND gross, so nothing enters the normalization scale either.
   // The baselines above were still updated, so the next frame reads a real
-  // change. This is a no-op on a day that warmed up pre-market.
+  // change. This binds on the day's first scored slot only.
   if (!momentumReady) {
     dGammaRaw = 0;
     dGammaGross = 0;
@@ -646,8 +594,8 @@ function signedDelta(curr: number, prev: number): number {
  * offset. Scaling the net by its own net history instead would divide a near-zero
  * balanced-day net by a near-zero scale and emit a meaningless flippy ±1; the
  * gross scale reports "no clear direction" there instead. history[0]'s delta is a
- * structural zero (no baseline yet); the <3-sample cold-start guard below plus a
- * short lookback keep it from distorting the open.
+ * structural zero (no baseline yet); the <3-sample cold-start guard below (which
+ * reports 0, never a sign) plus a short lookback keep it from distorting the open.
  *
  * This is the SOLE non-linear transform in the score pipeline (R5). Per-strike
  * accumulation is linear (R6); the factor's shaping exponent — `pGamma`,
@@ -671,14 +619,17 @@ function signedDelta(curr: number, prev: number): number {
  * keeps a 10× clearly above a 4× while both stay near the ±3.5 clamp, so genuine
  * outliers remain distinguishable without dominating.
  *
- * With fewer than 3 data points there is no reliable scale yet, so a clamped
- * sign estimate is returned (unchanged from the previous z-score behaviour).
+ * With fewer than 3 data points there is no reliable scale yet, so the reading
+ * is 0 — see the guard below for why a sign estimate is wrong there.
  */
 function normalizeToScale(value: number, history: number[], exponent: number): number {
-  if (history.length < 3) {
-    // Not enough data for a meaningful scale — return clamped sign
-    return value > 0 ? 1 : value < 0 ? -1 : 0;
-  }
+  // Fewer than 3 samples: there is no scale to measure against, so there is
+  // nothing to report. Returning a clamped SIGN here (the pre-2026-08 behaviour)
+  // manufactured a full-magnitude ±1 reading out of no data at all — on the
+  // 1-min feed that made the day's FIRST slot its largest |composite| of the
+  // session, an artifact large enough to clear `entryThreshold` and open a
+  // trade. Same reasoning as the degenerate-scale branch below.
+  if (history.length < 3) return 0;
 
   const n = history.length;
   const scale = history.reduce((a, b) => a + Math.abs(b), 0) / n;
