@@ -274,6 +274,35 @@ Because every factor anchors at `ratio = 1 → 1.0`, a rate of change reads on t
 **same footing** as its level (all ≈1.0 typical), so the four `w…` weights are
 directly comparable and no per-factor gain is needed.
 
+### The gross floor under the scale
+
+One correction to the formula above: on a balanced **pinning** day the net raw
+collapses toward zero, and so does its own recent history — dividing a near-zero
+raw by a near-zero scale would emit a flippy ±`zClamp` out of pure noise. So each
+factor also tracks a **gross** magnitude (the per-snapshot sum of
+`|per-strike contribution|`, where above/below-spot strikes do *not* cancel), and
+that gross puts a **floor** under the denominator:
+
+```
+scale = max( meanAbs(recent NET raws),  scaleGrossFloor · meanAbs(recent GROSS) )
+```
+
+`scaleGrossFloor` (default **0.15**) sits below every factor's typical
+directional coherence — measured mean `|net|/gross`: gex ≈ 0.22, dGamma ≈ 0.63,
+positions ≈ 0.21, dPositions ≈ 0.48 — so on a normal day the floor does not bind
+and the net scale above is exactly what applies. It engages only when the net
+genuinely collapses, where it correctly reports "no clear direction".
+
+> **Do not promote gross to the operative scale.** Both sums are built from the
+> same per-strike terms, one signed and one absolute, so `|net| ≤ gross` is an
+> identity at every snapshot — making gross the denominator makes `ratio ≤ 1` an
+> identity too, pins every factor under `log2(2) = 1.0`, and (the four weights
+> sum to 1) traps the whole composite inside ±1. That was the behaviour from the
+> 2026-08 gross-scale change until 2026-08-20, and it is why the score sat
+> flat all day: measured over 6 prod days, `|composite|` ran p50 0.147, p99 0.809
+> against thresholds and the ±3.5 range documented below. With the floor it runs
+> p50 0.414, p99 2.017 on the same slots.
+
 `p` is the factor's own exponent (`pGamma` / `pDGamma` / `pPositions` /
 `pDPositions`) — the **only** place the factors are shaped non-linearly (the raw
 sums in §3 are linear). `p = 1` is the pure-log baseline tabulated below; `p > 1`

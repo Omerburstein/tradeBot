@@ -356,16 +356,17 @@ export function computeScore(
   // never from prior days' "historical" data. The slice below is a trailing
   // window WITHIN that day; since history starts empty each day it can never
   // reach back across a day boundary. Do not feed a cross-day history here.
-  // NET NUMERATOR, GROSS-MAGNITUDE SCALE. Each factor's reading is the NET `…Raw`
-  // (the directional signal, where above/below-spot strikes offset) divided by
-  // the mean of its own recent GROSS magnitude — the sum of |per-strike
-  // contribution|, where nothing cancels. So the scale measures "typical total
-  // activity" and never collapses when a day is balanced; the ratio net/gross is
-  // then the DIRECTIONAL COHERENCE of that activity: ~1 when one-sided, ~0 on a
-  // balanced pinning day (correctly, no direction) rather than a flippy ±1 from
-  // self-scaling a near-zero net against a near-zero scale. `meanAbs` inside
-  // normalizeToScale keeps the denominator sign-blind either way. See
-  // {@link ScoreComponents} gross fields.
+  // NET NUMERATOR, NET SCALE, GROSS FLOOR. Each factor's reading is the NET `…Raw`
+  // (the directional signal, where above/below-spot strikes offset) divided by the
+  // mean of its own recent NET magnitude, so a ratio of 1 means "as large as this
+  // factor typically gets today" — the anchor the thresholds are written in. Its
+  // GROSS history (the sum of |per-strike contribution|, where nothing cancels)
+  // enters ONLY as a floor under that scale, at `scaleGrossFloor ×` its mean, so a
+  // balanced pinning day cannot self-scale a near-zero net against a near-zero
+  // scale into a flippy ±1. `meanAbs` inside normalizeToScale keeps the
+  // denominator sign-blind either way. See {@link ScoreComponents} gross fields
+  // and the identity argument in normalizeToScale for why gross must not be the
+  // operative scale.
   // WALL-CLOCK lookback: keep the history entries whose own instant falls inside
   // the trailing `zScoreLookbackMin` window, rather than a fixed COUNT of
   // entries. A count means 10× less history on a 1-min feed than on a 10-min one
@@ -381,10 +382,15 @@ export function computeScore(
   const windowStartMs = currentMs - windowMin * 60_000;
   const lookback = history.filter((h) => h.at >= windowStartMs);
   const clamp = (z: number) => Math.max(-config.zClamp, Math.min(config.zClamp, z));
-  const gexZ = clamp(normalizeToScale(gexRaw, lookback.map((h) => h.gexGross), config.pGamma));
-  const dGammaZ = clamp(normalizeToScale(dGammaRaw, lookback.map((h) => h.dGammaGross), config.pDGamma));
-  const positionsZ = clamp(normalizeToScale(positionsRaw, lookback.map((h) => h.positionsGross), config.pPositions));
-  const dPositionsZ = clamp(normalizeToScale(dPositionsRaw, lookback.map((h) => h.dPositionsGross), config.pDPositions));
+  const floor = config.scaleGrossFloor;
+  const gexZ = clamp(normalizeToScale(
+    gexRaw, lookback.map((h) => h.gexRaw), lookback.map((h) => h.gexGross), config.pGamma, floor));
+  const dGammaZ = clamp(normalizeToScale(
+    dGammaRaw, lookback.map((h) => h.dGammaRaw), lookback.map((h) => h.dGammaGross), config.pDGamma, floor));
+  const positionsZ = clamp(normalizeToScale(
+    positionsRaw, lookback.map((h) => h.positionsRaw), lookback.map((h) => h.positionsGross), config.pPositions, floor));
+  const dPositionsZ = clamp(normalizeToScale(
+    dPositionsRaw, lookback.map((h) => h.dPositionsRaw), lookback.map((h) => h.dPositionsGross), config.pDPositions, floor));
 
   // Composite weighted score
   const composite =
@@ -584,18 +590,30 @@ function signedDelta(curr: number, prev: number): number {
  * out. The reading's direction comes solely from `sign(value)` on the output; it
  * is applied AFTER scaling and is orthogonal to the scale.
  *
- * NET VALUE, GROSS-MAGNITUDE HISTORY. `value` is a factor's NET raw (above/below-
- * spot strikes offset — the directional signal), but callers pass its GROSS
- * history for `history`: the per-snapshot sum of |per-strike contribution|, where
- * nothing cancels (see the gross fields on {@link ScoreComponents}). So `scale`
- * is "typical TOTAL activity" and never collapses on a balanced day, and `ratio =
- * net / gross` reads the DIRECTIONAL COHERENCE of that activity — ~1 when the
- * movement is one-sided, ~0 on a balanced "pinning" day where above and below
- * offset. Scaling the net by its own net history instead would divide a near-zero
- * balanced-day net by a near-zero scale and emit a meaningless flippy ±1; the
- * gross scale reports "no clear direction" there instead. history[0]'s delta is a
- * structural zero (no baseline yet); the <3-sample cold-start guard below (which
- * reports 0, never a sign) plus a short lookback keep it from distorting the open.
+ * NET VALUE, NET SCALE, GROSS FLOOR. `value` is a factor's NET raw (above/below-
+ * spot strikes offset — the directional signal), and the scale it is measured
+ * against is `meanAbs` of that factor's own recent NET history: "how large is
+ * this reading relative to how large this factor typically gets today". That is
+ * what makes `ratio = 1` mean TYPICAL, which is the anchor the entry thresholds
+ * are expressed in.
+ *
+ * `grossHistory` — the per-snapshot sum of |per-strike contribution|, where
+ * nothing cancels (see the gross fields on {@link ScoreComponents}) — supplies a
+ * FLOOR under that scale, at `grossFloor ×` its mean, and nothing else. Its sole
+ * purpose is the balanced "pinning" day, where the net collapses toward zero and
+ * self-scaling would divide a near-zero net by a near-zero scale and emit a
+ * meaningless flippy ±1. The floor holds the denominator up so such a day reports
+ * "no clear direction" instead.
+ *
+ * Do NOT promote gross back to the operative scale (it was, from the 2026-08
+ * gross-scale change until 2026-08-20): `|net| ≤ gross` is an identity at every
+ * snapshot, so that made `ratio ≤ 1` an identity too, pinned every factor under
+ * log2(2) = 1.0, and — with the weights summing to 1 — flattened the composite
+ * into ±1 for the whole session. See the scale comment in the body.
+ *
+ * history[0]'s delta is a structural zero (no baseline yet); the <3-sample
+ * cold-start guard below (which reports 0, never a sign) plus a short lookback
+ * keep it from distorting the open.
  *
  * This is the SOLE non-linear transform in the score pipeline (R5). Per-strike
  * accumulation is linear (R6); the factor's shaping exponent — `pGamma`,
@@ -622,17 +640,41 @@ function signedDelta(curr: number, prev: number): number {
  * With fewer than 3 data points there is no reliable scale yet, so the reading
  * is 0 — see the guard below for why a sign estimate is wrong there.
  */
-function normalizeToScale(value: number, history: number[], exponent: number): number {
+function normalizeToScale(
+  value: number,
+  netHistory: number[],
+  grossHistory: number[],
+  exponent: number,
+  grossFloor: number,
+): number {
   // Fewer than 3 samples: there is no scale to measure against, so there is
   // nothing to report. Returning a clamped SIGN here (the pre-2026-08 behaviour)
   // manufactured a full-magnitude ±1 reading out of no data at all — on the
   // 1-min feed that made the day's FIRST slot its largest |composite| of the
   // session, an artifact large enough to clear `entryThreshold` and open a
   // trade. Same reasoning as the degenerate-scale branch below.
-  if (history.length < 3) return 0;
+  if (netHistory.length < 3) return 0;
 
-  const n = history.length;
-  const scale = history.reduce((a, b) => a + Math.abs(b), 0) / n;
+  // The OPERATIVE scale is the factor's own recent NET magnitude, so `ratio = 1`
+  // means "as large as this factor typically gets today" — the anchor that both
+  // the entry thresholds and the log's log2(2) = 1.0 fixed point are built on.
+  const meanAbs = (xs: number[]) => xs.reduce((a, b) => a + Math.abs(b), 0) / xs.length;
+  const netScale = meanAbs(netHistory);
+
+  // …floored by a fraction of the GROSS magnitude, which is the only job the
+  // gross series has: stop a balanced "pinning" day from dividing a near-zero net
+  // by a near-zero scale and emitting a flippy ±1. Because `|net| ≤ gross` holds
+  // per snapshot BY CONSTRUCTION (both sums are built from the same per-strike
+  // terms, one signed and one absolute), using gross as the OPERATIVE scale — the
+  // behaviour from the 2026-08 gross-scale change until 2026-08-20 — made
+  // `ratio ≤ 1` an identity. That capped every factor at log2(2) = 1.0 and, with
+  // the four weights normalized to sum 1, trapped the whole composite inside ±1:
+  // measured |composite| p50 = 0.27, max = 1.51, against thresholds and docs
+  // calibrated for ±3.5. The score therefore barely moved all day. Demoting gross
+  // to a floor keeps the balanced-day protection without paying that compression
+  // on every normal day.
+  const grossScale = grossHistory.length > 0 ? meanAbs(grossHistory) : 0;
+  const scale = Math.max(netScale, grossFloor * grossScale);
 
   // Degenerate history (every reading ~0): no scale to measure against. Falling
   // back to a sign estimate here would turn numerical noise into a ±1 signal,

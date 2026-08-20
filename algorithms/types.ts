@@ -498,6 +498,21 @@ export interface AlgoConfig {
   zClamp: number;
 
   /**
+   * Floor under each factor's normalization scale, as a fraction of that factor's
+   * recent GROSS magnitude (see `normalizeToScale` in score-engine.ts). The
+   * operative scale is the factor's own recent NET magnitude; this floor only
+   * binds on a balanced "pinning" day, where the net collapses toward zero and
+   * self-scaling would emit a flippy ±1 out of noise.
+   *
+   * Set it BELOW the factors' typical directional coherence (measured mean
+   * |net|/gross: gex ≈ 0.22, dGamma ≈ 0.63, positions ≈ 0.21, dPositions ≈ 0.48)
+   * so it stays a guard rather than the everyday denominator — at 1.0 it becomes
+   * the everyday denominator, which is exactly the regime that flattened the
+   * composite into ±1 before 2026-08-20.
+   */
+  scaleGrossFloor: number;
+
+  /**
    * Z-score threshold for entries taken OUTSIDE the cone (TODO #9). Applies when
    * price is above the cone with gamma pointing up (long) or below the cone with
    * gamma pointing down (short) — the gamma-aligned breakout case.
@@ -617,13 +632,19 @@ export const DEFAULT_CONFIG: AlgoConfig = {
 
   positionsGammaGate: 0.30,
   zClamp: 3.5,
+  scaleGrossFloor: 0.15, // guard only — below every factor's typical |net|/gross
 
-  // Calibrated to the composite's MEASURED range, not picked a priori: over the
-  // 44-day 1-min staging range |composite| runs p50=0.265 p90=0.610 p99=0.968
-  // max=1.513. The previous 1.5 / 2.0 sat at and above that ceiling, so a plain
-  // DEFAULT_CONFIG run took ZERO trades in 44 days — the strong bar in particular
-  // was unreachable, disabling inside-cone entries entirely. These sit near p85
-  // (entry) and p99 (strong), keeping the "strong is the stricter bar" ordering.
+  // STALE — RE-DERIVE. These were calibrated to the composite's measured range
+  // under the GROSS normalization scale (44-day 1-min staging: |composite| p50
+  // 0.265, p90 0.610, p99 0.968, max 1.513), sitting near p85 (entry) and p99
+  // (strong). The 2026-08-20 scale fix (`scaleGrossFloor`, see normalizeToScale)
+  // roughly TRIPLED the composite's dispersion — remeasured over 6 prod days /
+  // 234 fresh-Greek slots, |composite| now runs p50 0.414, p90 1.099, p99 2.017,
+  // sd 0.676 (was sd 0.269 on the same slots). At the values below, entry now
+  // fires on ~42% of slots instead of ~6%. They are LEFT AS-IS deliberately so
+  // the scale change lands on its own and stays attributable; re-derive them
+  // (and the tuner bounds in tuner.ts, same problem) in a separate pass against
+  // a freshly measured distribution before trusting a DEFAULT_CONFIG run.
   entryThreshold: 0.5,
   strongEntryThreshold: 0.9,
   conePassBonus: 0.25,

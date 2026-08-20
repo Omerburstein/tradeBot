@@ -51,6 +51,7 @@ the next `npm run backtest` / `npm run test-cases` / `npm run tune`.
 | `positionsGammaGate` | `0.30` | Min gamma strength (0–1) for a strike's positions to count |
 | `ITM_POSITION_WEIGHT` | `0.5` *(constant)* | Flat damping on the in-the-money position leg, on top of its distance decay. A `score-engine.ts` module constant, deliberately **not** tuner-exposed — it encodes a structural property of the leg, not a free parameter |
 | `zClamp` | `3.5` | Hard cap on each normalized factor (and the composite). Backstop — binds only past ~10.3× typical magnitude |
+| `scaleGrossFloor` | `0.15` | Floor under each factor's normalization scale, as a fraction of that factor's recent **gross** magnitude. The operative scale is the factor's own recent **net** magnitude; this only binds on a balanced "pinning" day where the net collapses to noise. Keep it below the factors' typical `\|net\|/gross` (gex ≈ 0.22, dGamma ≈ 0.63, positions ≈ 0.21, dPositions ≈ 0.48) — at `1.0` gross becomes the everyday denominator, which flattens the composite into ±1 all session. See composite-score.md §4 |
 
 ### Entry / exit thresholds (`DEFAULT_CONFIG`)
 | Knob | Current | Meaning |

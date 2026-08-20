@@ -125,8 +125,19 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
 
   // Signal thresholds.
   //
+  // STALE AFTER THE 2026-08-20 SCALE FIX — RE-DERIVE BEFORE THE NEXT TUNE.
+  // The numbers below were measured under the GROSS normalization scale, which
+  // capped every factor at log2(2)=1.0 and trapped the composite in ±1 (see
+  // normalizeToScale in score-engine.ts). With `scaleGrossFloor` demoting gross
+  // to a floor, dispersion roughly tripled: remeasured over 6 prod days / 234
+  // fresh-Greek slots, |composite| runs p50 0.414, p90 1.099, p99 2.017, sd 0.676
+  // (was sd 0.269 on the same slots). So `entryThreshold`'s 0.2 floor now sits
+  // near p15 rather than p45, and its 2.5 ceiling is reachable again. Left
+  // unchanged here so the scale fix lands attributably — but a tune run against
+  // these bounds will search the wrong region.
+  //
   // BOUNDS ARE CALIBRATED TO THE COMPOSITE'S MEASURED RANGE. Over the 44-day
-  // 1-min staging range (17,089 slots) |composite| runs:
+  // 1-min staging range (17,089 slots) |composite| ran, under the OLD scale:
   //     p50 = 0.265   p90 = 0.610   p99 = 0.968   max = 1.513
   // The old floors (0.8 / 1.5) sat at ≈p97 and at the single largest reading ever
   // observed, so most of each range was unreachable and the tuner pinned

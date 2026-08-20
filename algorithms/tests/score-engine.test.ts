@@ -327,9 +327,10 @@ check(
 // History supplies only the SCALE; it never re-centers the reading. These pin
 // the properties that distinguish normalizeToScale from (x − mean) / std.
 
-// The normalization SCALE now reads the GROSS field, so history entries set
-// `gexGross` to the intended scale magnitude. For the single above-spot strike
-// these tests use, a snapshot's gross == |net|, so gexGross = |gexRaw|.
+// The normalization SCALE reads the NET field, floored at `scaleGrossFloor ×`
+// the gross (see §7b). For the single above-spot strike these tests use, a
+// snapshot's gross == |net|, so gexGross = |gexRaw| and the floor — a fraction
+// of an equal magnitude — never binds. These cases therefore isolate the scale.
 /** gexZ for `gamma` at a strike above spot, against a history of `hist` scale mags. */
 function gexZAgainst(gamma: number, hist: number[]): number {
   const history = hist.map((gexRaw, i) => ({
@@ -491,6 +492,67 @@ check(
     'gross-scale: one-sided net === gross',
     Math.abs(oneSided.gexRaw - oneSided.gexGross) < 1e-9,
     `net=${oneSided.gexRaw} gross=${oneSided.gexGross}`,
+  );
+}
+
+// ── 7b. The gross series is a FLOOR under the scale, never the scale itself ──
+// `|net| ≤ gross` holds per snapshot by construction (both sums are built from
+// the same per-strike terms, one signed and one absolute). So if gross were the
+// operative denominator, `ratio ≤ 1` would be an identity, every factor would be
+// pinned under log2(2) = 1.0, and — with the weights summing to 1 — the whole
+// composite would be trapped in ±1 all session. That was the behaviour from the
+// 2026-08 gross-scale change until 2026-08-20, and it is what made the score sit
+// flat all day. These two checks pin both halves of the fix.
+
+/** gexZ for one above-spot strike, against a history of explicit (net, gross) pairs. */
+function gexZAgainstPair(gamma: number, pairs: Array<[net: number, gross: number]>): number {
+  const history = pairs.map(([gexRaw, gexGross], i) => ({
+    at: histAt(i, pairs.length),
+    gexRaw, gexZ: 0, dGammaRaw: 0, dGammaZ: 0,
+    positionsRaw: 0, positionsZ: 0, dPositionsRaw: 0, dPositionsZ: 0,
+    composite: 0,
+    gexGross, dGammaGross: 0, positionsGross: 0, dPositionsGross: 0,
+  }));
+  return computeScore(snap([strike(6010, gamma)]), null, history, DEFAULT_CONFIG).gexZ;
+}
+
+// (a) NORMAL day — net history is healthy, so the floor must NOT bind and the
+// scale must be the NET magnitude. Coherence here is 0.2 (net 1000 of gross
+// 5000), close to the measured intraday mean for gex; under the old gross scale
+// this same reading collapsed to log2(1 + 0.2^1.2) ≈ 0.19 instead of 1.0.
+{
+  const NET = 1000;
+  const pairs: Array<[number, number]> = Array(5).fill(0).map(() => [NET, 5 * NET]);
+  const gexRaw = computeScore(snap([strike(6010, 100)]), null, [], DEFAULT_CONFIG).gexRaw;
+  const z = gexZAgainstPair(100, pairs);
+  const expected = Math.log2(1 + Math.pow(gexRaw / NET, DEFAULT_CONFIG.pGamma));
+  check(
+    'gross floor: healthy net history → scale is the NET magnitude, not the gross',
+    Math.abs(z - expected) < 1e-9,
+    `got ${z}, expected ${expected} (would be ${Math.log2(1 + Math.pow(gexRaw / (5 * NET), DEFAULT_CONFIG.pGamma))} under a gross scale)`,
+  );
+}
+
+// (b) BALANCED "pinning" day — the net history has collapsed to noise (±1) while
+// gross stays large. Self-scaling against that noise would divide by ~1 and slam
+// the reading into ±zClamp out of nothing; the floor holds the denominator up at
+// `scaleGrossFloor × gross` instead. This is the case the gross series exists for.
+{
+  const GROSS = 1000;
+  const pairs: Array<[number, number]> = [[1, GROSS], [-1, GROSS], [1, GROSS], [-1, GROSS], [1, GROSS]];
+  const gexRaw = computeScore(snap([strike(6010, 100)]), null, [], DEFAULT_CONFIG).gexRaw;
+  const z = gexZAgainstPair(100, pairs);
+  const floorScale = DEFAULT_CONFIG.scaleGrossFloor * GROSS;
+  const expected = Math.log2(1 + Math.pow(gexRaw / floorScale, DEFAULT_CONFIG.pGamma));
+  check(
+    'gross floor: noise-level net history → the floor binds (no ±zClamp out of nothing)',
+    Math.abs(z - expected) < 1e-9,
+    `got ${z}, expected ${expected}`,
+  );
+  check(
+    'gross floor: …and the unfloored self-scale really would have hit the clamp',
+    Math.log2(1 + Math.pow(gexRaw / 1, DEFAULT_CONFIG.pGamma)) > DEFAULT_CONFIG.zClamp && z < DEFAULT_CONFIG.zClamp,
+    `unfloored ${Math.log2(1 + Math.pow(gexRaw, DEFAULT_CONFIG.pGamma))} vs floored ${z}`,
   );
 }
 
