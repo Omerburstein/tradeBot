@@ -76,17 +76,26 @@ export async function insertSpotPrices(
     );
     return 0;
   }
-  const spots = spotsAll.filter((s) => isRthInstant(s.capturedAt));
+  const rthSpots = spotsAll.filter((s) => isRthInstant(s.capturedAt));
   const droppedByRth = spotsAll.filter((s) => !isRthInstant(s.capturedAt));
+  // Collapse repeated (captured_at, date) keys — the upsert's conflict target.
+  // A feed that repeats one minute (Yahoo does this around contract rollovers;
+  // see the matching guard in es-prices.ts) would otherwise make Postgres
+  // reject the entire multi-row statement with "ON CONFLICT DO UPDATE command
+  // cannot affect row a second time", discarding every good row in the chunk.
+  const byKey = new Map<string, { capturedAt: string; expiry: string; spot: number }>();
+  for (const s of rthSpots) byKey.set(`${s.capturedAt}|${s.expiry}`, s);
+  const spots = [...byKey.values()];
   logger.info(
     {
       received: spotsAll.length,
-      keptAfterRthFilter: spots.length,
+      keptAfterRthFilter: rthSpots.length,
       droppedByRthFilter: droppedByRth.length,
+      droppedByDedup: rthSpots.length - spots.length,
       droppedSample: droppedByRth.slice(0, 3),
       rows: spots,
     },
-    'insertSpotPrices: rows to write (post RTH filter)',
+    'insertSpotPrices: rows to write (post RTH filter + dedup)',
   );
   if (spots.length === 0) {
     logger.warn(

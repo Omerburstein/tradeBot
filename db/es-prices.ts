@@ -51,15 +51,29 @@ const CREATE_ES_PRICES_DATE_INDEX =
 export async function insertEsPrices(
   rowsAll: ReadonlyArray<EsPriceRow>,
 ): Promise<number> {
-  const rows = rowsAll.filter((r) => isRthInstant(r.capturedAt));
-  const droppedByRth = rowsAll.length - rows.length;
+  const rthRows = rowsAll.filter((r) => isRthInstant(r.capturedAt));
+  const droppedByRth = rowsAll.length - rthRows.length;
+  // Collapse repeated captured_at instants before they reach the upsert. Yahoo's
+  // continuous front-month (ES=F) emits the SAME minute twice around a quarterly
+  // rollover (seen 2026-09-17T19:38Z, the week of the Sep-18 expiry) — and a
+  // single duplicated key makes Postgres reject the WHOLE multi-row statement
+  // with "ON CONFLICT DO UPDATE command cannot affect row a second time",
+  // losing every good bar in that 500-row chunk. Last bar wins: the later entry
+  // is the stitched contract's value, which is what the upsert would settle on
+  // anyway if the rows arrived as separate statements.
+  const byInstant = new Map<string, EsPriceRow>();
+  for (const r of rthRows) byInstant.set(r.capturedAt, r);
+  const rows = [...byInstant.values()];
+  const droppedByDedup = rthRows.length - rows.length;
   logger.info(
     {
       received: rowsAll.length,
-      keptAfterRthFilter: rows.length,
+      keptAfterRthFilter: rthRows.length,
       droppedByRthFilter: droppedByRth,
+      droppedByDedup,
+      toWrite: rows.length,
     },
-    'insertEsPrices: rows to write (post RTH filter)',
+    'insertEsPrices: rows to write (post RTH filter + dedup)',
   );
   if (rows.length === 0) {
     logger.warn(
