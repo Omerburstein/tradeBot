@@ -279,6 +279,20 @@ function isInvertedFadeConfig(config: AlgoConfig): boolean {
 }
 
 /**
+ * True when the "strong" entry bar sits at or below the ordinary one, which
+ * inverts the two gates' meaning: `strongEntryThreshold` is the STRICTER bar
+ * demanded when there is no cone breakout to corroborate the signal, so it must
+ * stay above `entryThreshold`. The search ranges overlap (entry 0.2–2.5, strong
+ * 0.4–3.5), so a large slab of the box violates this — nothing but an explicit
+ * constraint keeps CMA-ES out of it. The 2026-09-29 staging tune settled at
+ * entry 2.233 / strong 1.234 and its folds therefore measured incoherent gate
+ * semantics, which is what motivated this check.
+ */
+function isInvertedEntryConfig(config: AlgoConfig): boolean {
+  return config.strongEntryThreshold <= config.entryThreshold;
+}
+
+/**
  * Zero-filled result stand-in for a config rejected BEFORE simulation (an
  * inverted fade bar): recorded in `candidates` for an accurate `evaluated`
  * count, but `failed`/-Infinity so it is filtered out and never selected.
@@ -399,7 +413,10 @@ function searchBestConfig(train: Snapshot[], space: Record<string, ParamRange>, 
     // config enters a position already below its own fade bar and flushes it on
     // the next tick — see fadeExitBar in risk-manager.ts. Rejecting steers the
     // optimizer away from that region instead of banking whipsaw-driven scores.
-    if (isInvertedFadeConfig(config)) {
+    // Reject configs whose STRONG entry bar sits at or below the ordinary one —
+    // the stricter no-corroboration gate must stay the stricter of the two, or
+    // the two thresholds no longer mean what the score engine reads them as.
+    if (isInvertedFadeConfig(config) || isInvertedEntryConfig(config)) {
       candidates.push({ config, score: -Infinity, train: EMPTY_RESULT });
       return -Infinity;
     }
