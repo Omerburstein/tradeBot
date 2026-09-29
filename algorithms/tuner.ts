@@ -125,32 +125,35 @@ export const DEFAULT_SEARCH_SPACE: Record<string, ParamRange> = {
 
   // Signal thresholds.
   //
-  // STALE AFTER THE 2026-08-20 SCALE FIX — RE-DERIVE BEFORE THE NEXT TUNE.
-  // The numbers below were measured under the GROSS normalization scale, which
-  // capped every factor at log2(2)=1.0 and trapped the composite in ±1 (see
-  // normalizeToScale in score-engine.ts). With `scaleGrossFloor` demoting gross
-  // to a floor, dispersion roughly tripled: remeasured over 6 prod days / 234
-  // fresh-Greek slots, |composite| runs p50 0.414, p90 1.099, p99 2.017, sd 0.676
-  // (was sd 0.269 on the same slots). So `entryThreshold`'s 0.2 floor now sits
-  // near p15 rather than p45, and its 2.5 ceiling is reachable again. Left
-  // unchanged here so the scale fix lands attributably — but a tune run against
-  // these bounds will search the wrong region.
+  // BOUNDS ARE CALIBRATED TO THE COMPOSITE'S MEASURED RANGE — empirical, not
+  // theoretical. RE-DERIVE whenever the composite's scale changes (new factors,
+  // a different normalization window, another normalizer fix).
   //
-  // BOUNDS ARE CALIBRATED TO THE COMPOSITE'S MEASURED RANGE. Over the 44-day
-  // 1-min staging range (17,089 slots) |composite| ran, under the OLD scale:
-  //     p50 = 0.265   p90 = 0.610   p99 = 0.968   max = 1.513
-  // The old floors (0.8 / 1.5) sat at ≈p97 and at the single largest reading ever
-  // observed, so most of each range was unreachable and the tuner pinned
-  // entryThreshold to its MIN in both saved models — the bound was binding, not
-  // chosen. strongEntryThreshold's old floor of 1.5 made inside-cone entries all
-  // but impossible, since the bar exceeded almost every composite the algo can
-  // produce. The floors below sit near p45 (entry) and p75 (strong) so the tuner
-  // can actually reach a trade-generating regime; strong stays above entry, which
-  // is the invariant that matters (no breakout to corroborate ⇒ stricter bar).
-  // RE-DERIVE THESE if the composite's scale changes (new factors, different
-  // normalization window) — they are empirical, not theoretical.
-  entryThreshold: { min: 0.2, max: 2.5 },
-  strongEntryThreshold: { min: 0.4, max: 3.5 },
+  // Re-derived 2026-09-29, post-`scaleGrossFloor`, over 77 priced staging days
+  // (2026-05-19→09-25, 29,746 fresh-Greek slots) scored exactly as
+  // SignalGenerator does — per-day MomentumState, accumulating history:
+  //     p45 ≈ 0.42   p50 = 0.480   p75 = 0.794   p90 = 1.103
+  //     p95 = 1.295  p99 = 1.730   max = 2.837   sd = 0.404
+  // Stable across configs (p50 ran 0.383 / 0.480 / 0.574 under the 2026-09-29
+  // model, this base, and the 2026-07-31 bestModel), so one set of bounds serves.
+  // This supersedes the interim figures taken from 234 prod slots (p99 2.017,
+  // sd 0.676), which overstated the tail on far too small a sample.
+  //
+  // CEILINGS ARE SET WHERE THE GATE STOPS FIRING. Measured pass rates on the
+  // slots above: 0.5→48.2%, 1.0→13.8%, 1.5→2.5%, 2.0→0.3%, 2.5→0.0%. The old
+  // 2.5 / 3.5 ceilings therefore reached deep into a DEAD ZONE where no slot
+  // clears the bar, and the 2026-09-29 walk-forward walked straight into it —
+  // settling at entryThreshold 2.233 (beyond p99.9) and producing 6 trades in 47
+  // out-of-sample days, two of four folds empty. Capping entry at p99 and strong
+  // near p99.7 keeps the whole range trade-generating.
+  //
+  // FLOORS SIT NEAR p45 (entry) and p75 (strong) — the long-standing intent,
+  // recomputed on the current scale. The previous 0.2 floor sat at ≈p15 (77.5%
+  // of slots passing), which is barely a gate at all. Strong stays above entry;
+  // that ordering is the invariant that matters (no breakout to corroborate ⇒
+  // stricter bar) and is now enforced outright by isInvertedEntryConfig.
+  entryThreshold: { min: 0.42, max: 1.75 },
+  strongEntryThreshold: { min: 0.80, max: 2.20 },
   conePassBonus: { min: 0.0, max: 0.75 },
   // Wall-clock half-life (min) of the entry-signal EWMA (0 = off/instantaneous;
   // higher = more smoothing, later entries). Filters one-bar spikes, cadence-invariant.
@@ -226,10 +229,12 @@ export const FROZEN_PARAMS: Partial<Record<keyof AlgoConfig, number>> = {
   entrySignalHalfLifeMin: 0,
   // strongEntryThreshold was frozen here at 2.5297 (the old bestModel's value).
   // UNFROZEN 2026-07-31: that bestModel was tuned on 10-min production data, and
-  // on the 1-min staging range the composite never exceeds 1.513 — so a 2.53 bar
-  // made inside-cone entries impossible rather than merely strict, and inside-cone
-  // is the only path whenever price sits within the cone. It is swept again
-  // (0.4–3.5) so the bar can settle somewhere the signal can actually reach.
+  // a 2.53 bar made inside-cone entries impossible rather than merely strict —
+  // and inside-cone is the only path whenever price sits within the cone. It is
+  // swept instead, over a range the signal can actually reach: re-derived
+  // 2026-09-29 to 0.80–2.20 (p75 → ≈p99.7 of |composite|; under the post-
+  // scaleGrossFloor measurement the composite reaches 2.837, so 2.53 is no longer
+  // strictly unreachable, but only ~0.02% of slots clear it).
   conePassBonus: 0.1338095230282378,
   reversalThreshold: 1.1900472858336397,
 };

@@ -32,3 +32,4 @@ Thumbs.db
 
 # ad-hoc scratch probes
 algorithms/_chk.ts
+algorithms/_composite-dist.ts
