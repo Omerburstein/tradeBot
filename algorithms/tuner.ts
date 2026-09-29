@@ -67,6 +67,7 @@
  */
 
 import pino from 'pino';
+import { assessCoverage } from './data-coverage.js';
 import { loadDateRange, getAvailableDates } from './data-loader.js';
 import { simulate, resultFromTrades, printTradeLog, printSummary } from './backtest.js';
 import { recordModelRun } from './model-store.js';
@@ -460,9 +461,11 @@ export async function runTuning(opts: TuneOptions): Promise<TuneResult | null> {
   const rng = makeRng(opts.seed ?? Date.now());
 
   log.info({ startDate: opts.startDate, endDate: opts.endDate }, 'loading snapshots for tuning');
-  const allSnapshots = await loadDateRange(opts.startDate, opts.endDate, DEFAULT_CONFIG.strikeWindow);
+  const allSnapshots = dropUnpricedDays(
+    await loadDateRange(opts.startDate, opts.endDate, DEFAULT_CONFIG.strikeWindow),
+  );
   if (allSnapshots.length === 0) {
-    log.warn('no snapshots found in date range');
+    log.warn('no snapshots with priced slots found in date range');
     return null;
   }
 
@@ -562,9 +565,11 @@ export async function runWalkForward(opts: WalkForwardOptions): Promise<WalkForw
   const rng = makeRng(opts.seed ?? Date.now());
 
   log.info({ startDate: opts.startDate, endDate: opts.endDate }, 'loading snapshots for walk-forward tuning');
-  const allSnapshots = await loadDateRange(opts.startDate, opts.endDate, DEFAULT_CONFIG.strikeWindow);
+  const allSnapshots = dropUnpricedDays(
+    await loadDateRange(opts.startDate, opts.endDate, DEFAULT_CONFIG.strikeWindow),
+  );
   if (allSnapshots.length === 0) {
-    log.warn('no snapshots found in date range');
+    log.warn('no snapshots with priced slots found in date range');
     return null;
   }
 
@@ -709,6 +714,57 @@ function setPath(obj: AlgoConfig, path: string, value: number): void {
   const key = parts[parts.length - 1];
   // Coerce back to boolean for toggle fields (the field's current type decides).
   node[key] = typeof node[key] === 'boolean' ? value >= 0.5 : value;
+}
+
+// ── Day admission ──
+
+/**
+ * Drop trading days that carry NO actionable slot — days whose price feeds never
+ * landed. A day like this still holds a full set of Greeks, so it survives the
+ * loader and counts as a "day" when folds are sized, but it can never produce a
+ * trade: {@link assessCoverage} marks every slot incomplete, so the signal
+ * generator refuses to decide on any of them. Leaving it in silently starves the
+ * fold it lands in — the 2026-09-29 walk-forward lost roughly half of fold 2's
+ * test block that way (2026-08-03→08-18 had no prices at all) and reported that
+ * fold as an honest "0 trades".
+ *
+ * Completeness is read through {@link assessCoverage} rather than a snapshot
+ * count, because the two disagree: on 2026-07-31 spot existed but ES did not, so
+ * the day loaded 78 snapshots of which zero were actionable. A count-based rule
+ * would have admitted it.
+ *
+ * Deliberately a ZERO test, not a coverage percentage — the observed split is
+ * bimodal (77 days at ~98% priced, 13 at exactly 0%), so no threshold needs
+ * inventing. Partly-priced days are still admitted and their coverage logged, so
+ * if that ever changes it is visible rather than silently absorbed.
+ */
+function dropUnpricedDays(snapshots: Snapshot[]): Snapshot[] {
+  const byDay = groupSnapshotsByDay(snapshots);
+  const dropped: string[] = [];
+  const partial: Array<{ day: string; complete: number; slots: number }> = [];
+  const kept: Snapshot[] = [];
+
+  for (const day of [...byDay.keys()].sort()) {
+    const slots = byDay.get(day)!;
+    const complete = slots.filter((s) => assessCoverage(s).complete).length;
+    if (complete === 0) {
+      dropped.push(day);
+      continue;
+    }
+    if (complete < slots.length) partial.push({ day, complete, slots: slots.length });
+    for (const s of slots) kept.push(s);
+  }
+
+  if (dropped.length > 0) {
+    log.warn(
+      { days: dropped.length, dropped },
+      'excluded day(s) with no priced slot — no actionable data, so they would only starve the folds they land in',
+    );
+  }
+  if (partial.length > 0) {
+    log.info({ partial }, 'day(s) admitted with partial price coverage');
+  }
+  return kept;
 }
 
 // ── Train/test split ──
