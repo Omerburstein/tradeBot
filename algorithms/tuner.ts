@@ -584,14 +584,20 @@ export async function runWalkForward(opts: WalkForwardOptions): Promise<WalkForw
   const byDay = groupSnapshotsByDay(allSnapshots);
   const startIdx = Math.max(1, Math.floor(days.length * initialTrainFraction));
   const testDays = days.slice(startIdx);
-  const chunk = Math.max(1, Math.ceil(testDays.length / folds));
+  const bounds = foldBoundaries(testDays.length, folds);
 
   const foldResults: FoldResult[] = [];
   const oosTrades: TradeRecord[] = [];
   let evaluated = 0;
 
-  for (let f = 0; f < folds; f++) {
-    const testSlice = testDays.slice(f * chunk, (f + 1) * chunk);
+  log.info(
+    { folds: bounds.length, sizes: bounds.map(([lo, hi]) => hi - lo), testDays: testDays.length },
+    'walk-forward fold sizes (tradeable days)',
+  );
+
+  for (let f = 0; f < bounds.length; f++) {
+    const [lo, hi] = bounds[f]!;
+    const testSlice = testDays.slice(lo, hi);
     if (testSlice.length === 0) break;
     const testStart = testSlice[0]!;
     // Expanding train: every day strictly before this test block.
@@ -765,6 +771,41 @@ function dropUnpricedDays(snapshots: Snapshot[]): Snapshot[] {
     log.info({ partial }, 'day(s) admitted with partial price coverage');
   }
   return kept;
+}
+
+/**
+ * Split `n` out-of-sample TRADEABLE days into `folds` contiguous `[lo, hi)`
+ * blocks whose sizes differ by at most one, returning `⌊n/folds⌋` or
+ * `⌈n/folds⌉` days per fold with the larger blocks first.
+ *
+ * Replaces a `ceil(n / folds)` chunk width, which back-loaded the entire
+ * remainder onto the LAST fold: at the 76-day staging range (46 test days, 4
+ * folds) that produced 12/12/12/10, so the final fold — the most recent data,
+ * and the one closest to what a deployed config would actually meet — was
+ * measured on ~17% less evidence than its peers. The even split gives
+ * 12/12/11/11.
+ *
+ * Note this partitions tradeable days, never calendar dates: `days` holds only
+ * sessions that produced snapshots, so a stretch of missing sessions shortens a
+ * fold's calendar span without ever shrinking its day count.
+ *
+ * Also removes a way to silently lose a fold entirely: with `ceil`, `n` just
+ * above a multiple of `folds` could leave the last block empty (n=5, folds=4 →
+ * 2/2/1/0), and the empty block broke out of the loop, quietly yielding K−1
+ * folds. Every returned block here is non-empty whenever `n >= folds`.
+ */
+function foldBoundaries(n: number, folds: number): Array<[number, number]> {
+  const k = Math.max(1, Math.min(folds, n));
+  const base = Math.floor(n / k);
+  const remainder = n % k;
+  const bounds: Array<[number, number]> = [];
+  let lo = 0;
+  for (let f = 0; f < k; f++) {
+    const size = base + (f < remainder ? 1 : 0);
+    bounds.push([lo, lo + size]);
+    lo += size;
+  }
+  return bounds;
 }
 
 // ── Train/test split ──
